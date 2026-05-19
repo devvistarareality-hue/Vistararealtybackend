@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import AttendanceRecord, LeaveBalance
+from .models import AttendanceRecord, LeaveBalance, LeaveApplication, LeaveTransaction
 
 
 class AttendanceRecordSerializer(serializers.ModelSerializer):
@@ -41,3 +41,41 @@ class LeaveBalanceSerializer(serializers.ModelSerializer):
     class Meta:
         model  = LeaveBalance
         fields = ['available', 'utilised']
+
+
+class LeaveTransactionSerializer(serializers.ModelSerializer):
+    date       = serializers.SerializerMethodField()
+    leave_type = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
+    change     = serializers.FloatField()
+    balance    = serializers.FloatField()
+
+    class Meta:
+        model  = LeaveTransaction
+        fields = ['id', 'date', 'leave_type', 'description', 'change', 'balance']
+
+    def get_date(self, obj):
+        return obj.date.strftime('%-d %b %Y %-I:%M %p')
+
+    def get_leave_type(self, obj):
+        return obj.get_leave_type_display()
+
+    def get_description(self, obj):
+        return obj.get_description_display()
+
+
+class LeaveApplicationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = LeaveApplication
+        fields = ['id', 'work_type', 'leave_type', 'day_type', 'session',
+                  'from_date', 'to_date', 'description', 'status', 'applied_on']
+        read_only_fields = ['id', 'status', 'applied_on']
+
+    def validate(self, data):
+        if data.get('day_type') == 'half_day' and not data.get('session'):
+            raise serializers.ValidationError({'session': 'Session is required for Half Day leave.'})
+        if data.get('day_type') == 'full_day' and not data.get('to_date'):
+            raise serializers.ValidationError({'to_date': 'End date is required for Full Day leave.'})
+        if data.get('to_date') and data['to_date'] < data['from_date']:
+            raise serializers.ValidationError({'to_date': 'End date cannot be before start date.'})
+        return data

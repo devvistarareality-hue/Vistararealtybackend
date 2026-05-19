@@ -5,8 +5,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from .models import AttendanceRecord, LeaveBalance
-from .serializers import AttendanceRecordSerializer
+from rest_framework import status
+
+from .models import AttendanceRecord, LeaveBalance, LeaveApplication, LeaveTransaction
+from .serializers import AttendanceRecordSerializer, LeaveApplicationSerializer, LeaveTransactionSerializer
 
 
 def _fmt_hours(hours):
@@ -99,3 +101,68 @@ class DashboardView(APIView):
             },
             'weekly_attendance': weekly_attendance,
         })
+
+
+class LeaveBalanceView(APIView):
+    """
+    GET /api/attendance/leave-balance/
+    Returns all leave transactions for the authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        transactions = LeaveTransaction.objects.filter(user=request.user)
+        serializer   = LeaveTransactionSerializer(transactions, many=True)
+        return Response(serializer.data)
+
+
+class LeaveHistoryView(APIView):
+    """
+    GET /api/attendance/leave-history/
+    Returns all leave applications for the authenticated user grouped by month.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        applications = LeaveApplication.objects.filter(user=request.user)
+        from collections import defaultdict
+
+        groups = defaultdict(list)
+        for app in applications:
+            month_key = app.applied_on.strftime('%B %Y')
+            session = app.get_day_type_display()
+            if app.day_type == 'half_day' and app.session:
+                session = app.get_session_display()
+            groups[month_key].append({
+                'id':         app.id,
+                'name':       request.user.name,
+                'avatar':     request.user.avatar_url,
+                'session':    session,
+                'date':       app.from_date.strftime('%a, %b %-d'),
+                'leave_type': app.get_leave_type_display(),
+                'status':     app.get_status_display(),
+            })
+
+        sections = [
+            {'month': month, 'data': items}
+            for month, items in groups.items()
+        ]
+        return Response(sections)
+
+
+class ApplyLeaveView(APIView):
+    """
+    POST /api/attendance/apply-leave/
+    Creates a new leave application for the authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = LeaveApplicationSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(user=request.user)
+            return Response(
+                {'message': 'Leave application submitted successfully.', 'data': serializer.data},
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
