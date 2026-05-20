@@ -134,13 +134,19 @@ class LeaveHistoryView(APIView):
             if app.day_type == 'half_day' and app.session:
                 session = app.get_session_display()
             groups[month_key].append({
-                'id':         app.id,
-                'name':       request.user.name,
-                'avatar':     request.user.avatar_url,
-                'session':    session,
-                'date':       app.from_date.strftime('%a, %b %-d'),
-                'leave_type': app.get_leave_type_display(),
-                'status':     app.get_status_display(),
+                'id':          app.id,
+                'name':        request.user.name,
+                'avatar':      request.user.avatar_url,
+                'session':     session,
+                'date':        app.from_date.strftime('%a, %b %-d'),
+                'from_date':   app.from_date.strftime('%-d %b %Y'),
+                'to_date':     app.to_date.strftime('%-d %b %Y') if app.to_date else None,
+                'leave_type':  app.get_leave_type_display(),
+                'work_type':   app.get_work_type_display(),
+                'day_type':    app.get_day_type_display(),
+                'description': app.description,
+                'applied_on':  app.applied_on.strftime('%-d %b %Y'),
+                'status':      app.get_status_display(),
             })
 
         sections = [
@@ -148,6 +154,29 @@ class LeaveHistoryView(APIView):
             for month, items in groups.items()
         ]
         return Response(sections)
+
+
+class LeaveActionView(APIView):
+    """
+    PATCH /api/attendance/leave-action/<pk>/
+    Approves or rejects a leave application.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        try:
+            application = LeaveApplication.objects.get(pk=pk)
+        except LeaveApplication.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        new_status = request.data.get('status')
+        if new_status not in ['approved', 'rejected']:
+            return Response({'detail': 'Invalid status. Use approved or rejected.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        application.status = new_status
+        application.save()
+
+        return Response({'message': f'Leave {new_status} successfully.', 'status': new_status})
 
 
 class ApplyLeaveView(APIView):
