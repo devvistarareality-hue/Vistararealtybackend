@@ -1,6 +1,8 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+from django.utils import timezone
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -173,8 +175,35 @@ class LeaveActionView(APIView):
         if new_status not in ['approved', 'rejected']:
             return Response({'detail': 'Invalid status. Use approved or rejected.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        old_status = application.status
         application.status = new_status
         application.save()
+
+        if new_status == 'approved' and old_status != 'approved':
+            if application.day_type == 'half_day':
+                leave_days = Decimal('0.5')
+            else:
+                if application.to_date and application.to_date > application.from_date:
+                    leave_days = Decimal((application.to_date - application.from_date).days + 1)
+                else:
+                    leave_days = Decimal('1')
+
+            lb, _ = LeaveBalance.objects.get_or_create(user=application.user)
+            new_balance = lb.available - leave_days
+
+            LeaveTransaction.objects.create(
+                user=application.user,
+                date=timezone.now(),
+                leave_date=application.from_date,
+                leave_type=application.leave_type,
+                description='leave_applied',
+                change=-leave_days,
+                balance=new_balance,
+            )
+
+            lb.available = new_balance
+            lb.utilised  = lb.utilised + leave_days
+            lb.save()
 
         return Response({'message': f'Leave {new_status} successfully.', 'status': new_status})
 

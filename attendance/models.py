@@ -64,6 +64,7 @@ class LeaveTransaction(models.Model):
 
     user        = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='leave_transactions')
     date        = models.DateTimeField()
+    leave_date  = models.DateField(null=True, blank=True)
     leave_type  = models.CharField(max_length=20, choices=LEAVE_TYPE_CHOICES, default='paid_leave')
     description = models.CharField(max_length=30, choices=DESCRIPTION_CHOICES)
     change      = models.DecimalField(max_digits=5, decimal_places=1)

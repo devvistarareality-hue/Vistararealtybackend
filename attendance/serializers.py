@@ -44,18 +44,22 @@ class LeaveBalanceSerializer(serializers.ModelSerializer):
 
 
 class LeaveTransactionSerializer(serializers.ModelSerializer):
-    date       = serializers.SerializerMethodField()
-    leave_type = serializers.SerializerMethodField()
+    date        = serializers.SerializerMethodField()
+    leave_date  = serializers.SerializerMethodField()
+    leave_type  = serializers.SerializerMethodField()
     description = serializers.SerializerMethodField()
-    change     = serializers.FloatField()
-    balance    = serializers.FloatField()
+    change      = serializers.FloatField()
+    balance     = serializers.FloatField()
 
     class Meta:
         model  = LeaveTransaction
-        fields = ['id', 'date', 'leave_type', 'description', 'change', 'balance']
+        fields = ['id', 'date', 'leave_date', 'leave_type', 'description', 'change', 'balance']
 
     def get_date(self, obj):
         return obj.date.strftime('%-d %b %Y %-I:%M %p')
+
+    def get_leave_date(self, obj):
+        return obj.leave_date.strftime('%-d %b %Y') if obj.leave_date else None
 
     def get_leave_type(self, obj):
         return obj.get_leave_type_display()
