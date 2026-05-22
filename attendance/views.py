@@ -126,12 +126,12 @@ class LeaveHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        applications = LeaveApplication.objects.filter(user=request.user)
+        applications = LeaveApplication.objects.filter(user=request.user).order_by('-from_date')
         from collections import defaultdict
 
         groups = defaultdict(list)
         for app in applications:
-            month_key = app.applied_on.strftime('%B %Y')
+            month_key = app.from_date.strftime('%B %Y')
             session = app.get_day_type_display()
             if app.day_type == 'half_day' and app.session:
                 session = app.get_session_display()
