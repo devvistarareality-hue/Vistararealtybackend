@@ -6,11 +6,31 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 
 from rest_framework import status
 
 from .models import AttendanceRecord, LeaveBalance, LeaveApplication, LeaveTransaction
 from .serializers import AttendanceRecordSerializer, LeaveApplicationSerializer, LeaveTransactionSerializer
+
+
+class OptionalPageNumberPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+def _pagination_requested(request):
+    return 'page' in request.query_params or 'page_size' in request.query_params
+
+
+def _paginated_response(request, queryset, serializer_class, response_key):
+    paginator = OptionalPageNumberPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    serializer = serializer_class(page, many=True)
+    response = paginator.get_paginated_response(serializer.data)
+    response.data[response_key] = response.data.pop('results')
+    return response
 
 
 def _fmt_hours(hours):
@@ -113,7 +133,10 @@ class LeaveBalanceView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        transactions = LeaveTransaction.objects.filter(user=request.user)
+        transactions = LeaveTransaction.objects.filter(user=request.user).order_by('-date', '-id')
+        if _pagination_requested(request):
+            return _paginated_response(request, transactions, LeaveTransactionSerializer, 'transactions')
+
         serializer   = LeaveTransactionSerializer(transactions, many=True)
         return Response(serializer.data)
 
@@ -126,7 +149,19 @@ class LeaveHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        applications = LeaveApplication.objects.filter(user=request.user).order_by('-from_date')
+        applications = LeaveApplication.objects.filter(user=request.user).order_by('-from_date', '-id')
+        if _pagination_requested(request):
+            paginator = OptionalPageNumberPagination()
+            page = paginator.paginate_queryset(applications, request)
+            sections = self._group_applications(page, request.user)
+            response = paginator.get_paginated_response(sections)
+            response.data['sections'] = response.data.pop('results')
+            return response
+
+        sections = self._group_applications(applications, request.user)
+        return Response(sections)
+
+    def _group_applications(self, applications, user):
         from collections import defaultdict
 
         groups = defaultdict(list)
@@ -137,8 +172,8 @@ class LeaveHistoryView(APIView):
                 session = app.get_session_display()
             groups[month_key].append({
                 'id':          app.id,
-                'name':        request.user.name,
-                'avatar':      request.user.avatar_url,
+                'name':        user.name,
+                'avatar':      user.avatar_url,
                 'session':     session,
                 'date':        app.from_date.strftime('%a, %b %-d'),
                 'from_date':   app.from_date.strftime('%-d %b %Y'),
@@ -151,11 +186,10 @@ class LeaveHistoryView(APIView):
                 'status':      app.get_status_display(),
             })
 
-        sections = [
+        return [
             {'month': month, 'data': items}
             for month, items in groups.items()
         ]
-        return Response(sections)
 
 
 class LeaveActionView(APIView):
