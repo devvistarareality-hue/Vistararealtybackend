@@ -73,8 +73,9 @@ class Lead(models.Model):
         null=True, blank=True,
         related_name='assigned_leads',
     )
-    budget      = models.CharField(max_length=100, blank=True)
-    notes       = models.TextField(blank=True)
+    budget         = models.CharField(max_length=100, blank=True)
+    notes          = models.TextField(blank=True)
+    next_followup  = models.DateField(null=True, blank=True)
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
