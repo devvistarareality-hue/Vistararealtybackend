@@ -29,7 +29,7 @@ class LeadSerializer(serializers.ModelSerializer):
             'project', 'project_name',
             'source', 'status',
             'assigned_to', 'assigned_to_name',
-            'budget', 'notes',
+            'budget', 'notes', 'next_followup',
             'created_at', 'created_at_str', 'time_ago',
             'activities',
         ]

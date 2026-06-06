@@ -342,3 +342,48 @@ class LeadTransferView(APIView):
                 .get(pk=lead.pk)
             ).data
         )
+
+
+# ─── Lead Follow-up ──────────────────────────────────────────────────────────
+
+class LeadFollowupView(APIView):
+    """PATCH /api/presales/leads/<pk>/followup/"""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        from datetime import date as date_cls
+
+        try:
+            lead = Lead.objects.get(pk=pk)
+        except Lead.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        followup_str = request.data.get('next_followup')
+
+        if followup_str:
+            try:
+                parsed = date_cls.fromisoformat(str(followup_str))
+            except ValueError:
+                return Response(
+                    {'detail': 'Invalid date format. Use YYYY-MM-DD.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            lead.next_followup = parsed
+            note = f'Follow-up scheduled for {parsed.strftime("%-d %b %Y")}.'
+        else:
+            lead.next_followup = None
+            note = 'Follow-up date cleared.'
+
+        lead.save()
+
+        LeadActivity.objects.create(
+            lead=lead, type='Note', note=note, created_by=request.user,
+        )
+
+        return Response(
+            LeadSerializer(
+                Lead.objects.select_related('project', 'assigned_to')
+                .prefetch_related('activities')
+                .get(pk=lead.pk)
+            ).data
+        )
