@@ -9,6 +9,8 @@ from .views import (
     LeadStatusChangeView,
     LeadTransferView,
     LeadFollowupView,
+    LeadBulkUploadView,
+    LeadUploadTemplateView,
 )
 
 urlpatterns = [
@@ -17,6 +19,8 @@ urlpatterns = [
     path('projects/',                ProjectListCreateView.as_view(),   name='project-list'),
     path('projects/<int:pk>/',       ProjectDetailView.as_view(),       name='project-detail'),
     path('leads/',                   LeadListCreateView.as_view(),      name='lead-list'),
+    path('leads/bulk-upload/',       LeadBulkUploadView.as_view(),      name='lead-bulk-upload'),
+    path('leads/upload-template/',   LeadUploadTemplateView.as_view(),  name='lead-upload-template'),
     path('leads/<int:pk>/',          LeadDetailView.as_view(),          name='lead-detail'),
     path('leads/<int:pk>/status/',   LeadStatusChangeView.as_view(),    name='lead-status'),
     path('leads/<int:pk>/transfer/', LeadTransferView.as_view(),        name='lead-transfer'),
