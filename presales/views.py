@@ -1,7 +1,9 @@
 from django.db.models import Count, Q
+from django.http import HttpResponse
 
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -387,3 +389,178 @@ class LeadFollowupView(APIView):
                 .get(pk=lead.pk)
             ).data
         )
+
+
+# ─── Excel Bulk Upload ────────────────────────────────────────────────────────
+
+_HEADER_MAP = {
+    'name':           'name',    'full name':     'name',
+    'phone':          'phone',   'phone number':  'phone',   'mobile':   'phone',
+    'email':          'email',   'email address': 'email',
+    'project':        'project', 'project name':  'project',
+    'source':         'source',  'lead source':   'source',
+    'status':         'status',
+    'budget':         'budget',  'budget range':  'budget',
+    'notes':          'notes',   'note':          'notes',   'remarks':  'notes',
+    'next followup':  'next_followup', 'follow up':   'next_followup',
+    'followup date':  'next_followup', 'follow-up':   'next_followup',
+}
+
+_VALID_SOURCES  = {'Walk-in', 'Phone', 'Online', 'Reference', 'Email'}
+_VALID_STATUSES = {'New', 'Cold', 'Warm', 'Lost'}
+
+
+class LeadBulkUploadView(APIView):
+    """POST /api/presales/leads/bulk-upload/"""
+    permission_classes = [IsAuthenticated]
+    parser_classes     = [MultiPartParser]
+
+    def post(self, request):
+        import openpyxl
+        from datetime import date as date_cls
+
+        file = request.FILES.get('file')
+        if not file:
+            return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ext = file.name.lower().rsplit('.', 1)[-1] if '.' in file.name else ''
+        if ext not in ('xlsx', 'xls'):
+            return Response({'detail': 'Only .xlsx files are supported.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            wb   = openpyxl.load_workbook(file, read_only=True, data_only=True)
+            ws   = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+        except Exception as e:
+            return Response({'detail': f'Could not read file: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(rows) < 2:
+            return Response({'detail': 'File has no data rows.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        headers = [str(h).strip().lower() if h is not None else '' for h in rows[0]]
+        col_map = {}
+        for i, h in enumerate(headers):
+            key = _HEADER_MAP.get(h)
+            if key and key not in col_map:
+                col_map[key] = i
+
+        if 'name' not in col_map or 'phone' not in col_map:
+            return Response(
+                {'detail': 'Excel must have "Name" and "Phone" columns.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        project_lookup = {p.name.lower(): p for p in Project.objects.all()}
+        created_count  = 0
+        failed_count   = 0
+        errors         = []
+
+        for row_num, row in enumerate(rows[1:], start=2):
+            def cell(key, _row=row):
+                idx = col_map.get(key)
+                if idx is None or idx >= len(_row) or _row[idx] is None:
+                    return ''
+                return str(_row[idx]).strip()
+
+            name  = cell('name')
+            phone = cell('phone')
+
+            if not name or not phone:
+                failed_count += 1
+                errors.append({'row': row_num, 'name': name or '—', 'error': 'Name and Phone are required.'})
+                continue
+
+            if Lead.objects.filter(phone=phone).exists():
+                failed_count += 1
+                errors.append({'row': row_num, 'name': name, 'error': f'Phone {phone} already exists.'})
+                continue
+
+            project     = project_lookup.get(cell('project').lower())
+            lead_source = cell('source') or 'Walk-in'
+            if lead_source not in _VALID_SOURCES:
+                lead_source = 'Walk-in'
+            lead_status = cell('status') or 'New'
+            if lead_status not in _VALID_STATUSES:
+                lead_status = 'New'
+
+            followup = None
+            followup_str = cell('next_followup')
+            if followup_str:
+                try:
+                    followup = date_cls.fromisoformat(followup_str)
+                except ValueError:
+                    pass
+
+            try:
+                lead = Lead.objects.create(
+                    name=name, phone=phone, email=cell('email'),
+                    project=project, source=lead_source, status=lead_status,
+                    budget=cell('budget'), notes=cell('notes'),
+                    next_followup=followup, created_by=request.user,
+                )
+                LeadActivity.objects.create(
+                    lead=lead, type='Enquiry',
+                    note='Lead imported via Excel upload.',
+                    created_by=request.user,
+                )
+                created_count += 1
+            except Exception as e:
+                failed_count += 1
+                errors.append({'row': row_num, 'name': name, 'error': str(e)})
+
+        return Response({
+            'created': created_count,
+            'failed':  failed_count,
+            'total':   created_count + failed_count,
+            'errors':  errors,
+        })
+
+
+class LeadUploadTemplateView(APIView):
+    """GET /api/presales/leads/upload-template/  — public, no auth needed"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        import openpyxl
+        from io import BytesIO
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Leads'
+
+        headers     = ['Name', 'Phone', 'Email', 'Project', 'Source',
+                       'Status', 'Budget', 'Notes', 'Next Followup']
+        header_fill = PatternFill(start_color='1E4080', end_color='1E4080', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(row=1, column=col, value=h)
+            c.fill      = header_fill
+            c.font      = header_font
+            c.alignment = Alignment(horizontal='center')
+            ws.column_dimensions[c.column_letter].width = 20
+
+        ws.append([
+            'Rajesh Sharma', '+91 98765 43210', 'rajesh@example.com',
+            'Vistara Heights', 'Walk-in', 'New', '60L - 70L',
+            'Interested in 2BHK', '2026-07-01',
+        ])
+
+        notes_ws = wb.create_sheet('Valid Values')
+        notes_ws.append(['Column',        'Valid Values'])
+        notes_ws.append(['Source',        'Walk-in, Phone, Online, Reference, Email'])
+        notes_ws.append(['Status',        'New, Cold, Warm, Lost'])
+        notes_ws.append(['Project',       'Must match an existing project name exactly'])
+        notes_ws.append(['Next Followup', 'YYYY-MM-DD format  e.g. 2026-07-15'])
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        resp = HttpResponse(
+            buf.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = 'attachment; filename="leads_upload_template.xlsx"'
+        return resp
