@@ -61,14 +61,16 @@ TEMPLATES = [
 WSGI_APPLICATION = 'vistararealtybackend.wsgi.application'
 
 _db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
+_is_postgres = _db_engine == 'django.db.backends.postgresql'
 DATABASES = {
     'default': {
         'ENGINE': _db_engine,
-        'NAME': os.getenv('DB_NAME', 'db.sqlite3') if _db_engine != 'django.db.backends.sqlite3' else BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
+        'NAME': os.getenv('DB_NAME', 'db.sqlite3') if _is_postgres else BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
         'USER':     os.getenv('DB_USER', ''),
         'PASSWORD': os.getenv('DB_PASSWORD', ''),
         'HOST':     os.getenv('DB_HOST', 'localhost'),
         'PORT':     os.getenv('DB_PORT', '5432'),
+        **({'OPTIONS': {'sslmode': 'require'}} if _is_postgres else {}),
     }
 }
 
