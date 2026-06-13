@@ -71,6 +71,7 @@ DATABASES = {
         'HOST':     os.getenv('DB_HOST', 'localhost'),
         'PORT':     os.getenv('DB_PORT', '5432'),
         **({'OPTIONS': {'sslmode': 'require'}} if _is_postgres else {}),
+        'CONN_MAX_AGE': 60 if _is_postgres else 0,
     }
 }
 
