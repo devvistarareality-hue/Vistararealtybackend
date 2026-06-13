@@ -1,4 +1,5 @@
-from datetime import date, timedelta
+import calendar as cal_module
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.utils import timezone
@@ -122,6 +123,132 @@ class DashboardView(APIView):
                 'leaves_utilised':   leaves_utilised,
             },
             'weekly_attendance': weekly_attendance,
+        })
+
+
+class TodayAttendanceView(APIView):
+    """
+    GET /api/attendance/today/
+    Returns today's sign-in state so the screen can restore itself on mount.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        today = date.today()
+        try:
+            rec = AttendanceRecord.objects.get(user=request.user, date=today)
+            return Response({
+                'signed_in':  rec.in_time is not None and rec.out_time is None,
+                'in_time':    rec.in_time.strftime('%H:%M:%S')  if rec.in_time  else None,
+                'out_time':   rec.out_time.strftime('%H:%M:%S') if rec.out_time else None,
+                'total_hours': _fmt_hours(rec.total_hours),
+            })
+        except AttendanceRecord.DoesNotExist:
+            return Response({'signed_in': False, 'in_time': None, 'out_time': None, 'total_hours': '00:00'})
+
+
+class SignInView(APIView):
+    """
+    POST /api/attendance/sign-in/
+    Records the in-time for today. Fails if already signed in.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        today = date.today()
+        now   = datetime.now().time()
+
+        record, created = AttendanceRecord.objects.get_or_create(
+            user=request.user,
+            date=today,
+            defaults={'in_time': now},
+        )
+
+        if not created:
+            if record.in_time:
+                return Response({'detail': 'Already signed in today.'}, status=status.HTTP_400_BAD_REQUEST)
+            record.in_time = now
+            record.save()
+
+        return Response({
+            'message':  'Signed in successfully.',
+            'in_time':  now.strftime('%H:%M:%S'),
+            'date':     today.strftime('%Y-%m-%d'),
+        }, status=status.HTTP_200_OK)
+
+
+class SignOutView(APIView):
+    """
+    POST /api/attendance/sign-out/
+    Records the out-time and calculates total hours for today.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        today = date.today()
+        now   = datetime.now().time()
+
+        try:
+            record = AttendanceRecord.objects.get(user=request.user, date=today)
+        except AttendanceRecord.DoesNotExist:
+            return Response({'detail': 'No sign-in record found for today.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not record.in_time:
+            return Response({'detail': 'You have not signed in yet.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        record.out_time = now
+        in_dt  = datetime.combine(today, record.in_time)
+        out_dt = datetime.combine(today, now)
+        total_seconds    = max((out_dt - in_dt).total_seconds(), 0)
+        record.total_hours = round(total_seconds / 3600, 2)
+        record.save()
+
+        return Response({
+            'message':     'Signed out successfully.',
+            'out_time':    now.strftime('%H:%M:%S'),
+            'total_hours': _fmt_hours(record.total_hours),
+        }, status=status.HTTP_200_OK)
+
+
+class MonthlyAttendanceView(APIView):
+    """
+    GET /api/attendance/monthly/?year=2025&month=6
+    Returns day-by-day attendance for a given month.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user  = request.user
+        today = date.today()
+        try:
+            year  = int(request.query_params.get('year',  today.year))
+            month = int(request.query_params.get('month', today.month))
+        except ValueError:
+            return Response({'detail': 'Invalid year or month.'}, status=400)
+
+        days_in_month = cal_module.monthrange(year, month)[1]
+        records = AttendanceRecord.objects.filter(user=user, date__year=year, date__month=month)
+        record_map = {r.date.day: r for r in records}
+
+        result = []
+        for day in range(1, days_in_month + 1):
+            d   = date(year, month, day)
+            rec = record_map.get(day)
+            result.append({
+                'day':      day,
+                'date':     d.strftime('%Y-%m-%d'),
+                'weekday':  d.weekday(),   # 0=Mon, 6=Sun
+                'present':  rec is not None,
+                'in_time':  rec.in_time.strftime('%H:%M')  if rec and rec.in_time  else None,
+                'out_time': rec.out_time.strftime('%H:%M') if rec and rec.out_time else None,
+                'total':    _fmt_hours(rec.total_hours)    if rec else None,
+            })
+
+        return Response({
+            'year':       year,
+            'month':      month,
+            'month_name': date(year, month, 1).strftime('%B'),
+            'records':    result,
         })
 
 
