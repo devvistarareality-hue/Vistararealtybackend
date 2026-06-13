@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-me-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,10.0.2.2,192.168.1.19,192.168.1.6').split(',')
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,10.0.2.2,192.168.1.19,192.168.1.6,192.168.1.9').split(',')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -60,10 +60,15 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'vistararealtybackend.wsgi.application'
 
+_db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
 DATABASES = {
     'default': {
-        'ENGINE': os.getenv('DB_ENGINE', 'django.db.backends.sqlite3'),
-        'NAME': BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
+        'ENGINE': _db_engine,
+        'NAME': os.getenv('DB_NAME', 'db.sqlite3') if _db_engine != 'django.db.backends.sqlite3' else BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
+        'USER':     os.getenv('DB_USER', ''),
+        'PASSWORD': os.getenv('DB_PASSWORD', ''),
+        'HOST':     os.getenv('DB_HOST', 'localhost'),
+        'PORT':     os.getenv('DB_PORT', '5432'),
     }
 }
 
