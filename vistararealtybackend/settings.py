@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import timedelta
 import os
+import dj_database_url
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-me-in-production')
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
-ALLOWED_HOSTS = ['*'] if DEBUG else os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -32,6 +33,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -60,20 +62,31 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'vistararealtybackend.wsgi.application'
 
-_db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
-_is_postgres = _db_engine == 'django.db.backends.postgresql'
-DATABASES = {
-    'default': {
-        'ENGINE': _db_engine,
-        'NAME': os.getenv('DB_NAME', 'db.sqlite3') if _is_postgres else BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
-        'USER':     os.getenv('DB_USER', ''),
-        'PASSWORD': os.getenv('DB_PASSWORD', ''),
-        'HOST':     os.getenv('DB_HOST', 'localhost'),
-        'PORT':     os.getenv('DB_PORT', '5432'),
-        **({'OPTIONS': {'sslmode': 'require'}} if _is_postgres else {}),
-        'CONN_MAX_AGE': 60 if _is_postgres else 0,
+# ── Database ─────────────────────────────────────────────────────────
+# Railway injects DATABASE_URL automatically; fall back to local SQLite
+if os.getenv('DATABASE_URL'):
+    DATABASES = {
+        'default': dj_database_url.parse(
+            os.getenv('DATABASE_URL'),
+            conn_max_age=60,
+            ssl_require=not DEBUG,
+        )
     }
-}
+else:
+    _db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
+    _is_postgres = _db_engine == 'django.db.backends.postgresql'
+    DATABASES = {
+        'default': {
+            'ENGINE': _db_engine,
+            'NAME': os.getenv('DB_NAME', 'db.sqlite3') if _is_postgres else BASE_DIR / os.getenv('DB_NAME', 'db.sqlite3'),
+            'USER':     os.getenv('DB_USER', ''),
+            'PASSWORD': os.getenv('DB_PASSWORD', ''),
+            'HOST':     os.getenv('DB_HOST', 'localhost'),
+            'PORT':     os.getenv('DB_PORT', '5432'),
+            **({'OPTIONS': {'sslmode': 'require'}} if _is_postgres else {}),
+            'CONN_MAX_AGE': 60 if _is_postgres else 0,
+        }
+    }
 
 AUTH_USER_MODEL = 'accounts.User'
 
@@ -86,10 +99,14 @@ TIME_ZONE = 'Asia/Kolkata'
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = 'static/'
+# ── Static files (whitenoise serves in production) ────────────────────
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# ── Django REST Framework ────────────────────────────────────────
+# ── Django REST Framework ─────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
@@ -99,16 +116,12 @@ REST_FRAMEWORK = {
     ),
 }
 
-# ── JWT Settings ─────────────────────────────────────────────────
+# ── JWT Settings ──────────────────────────────────────────────────────
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME':  timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
-    'ROTATE_REFRESH_TOKENS': True,
+    'ROTATE_REFRESH_TOKENS':  True,
 }
 
-# ── CORS — allow React Native app (Android emulator uses 10.0.2.2) ─
-CORS_ALLOW_ALL_ORIGINS = DEBUG   # restrict in production
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:8081',
-    'http://10.0.2.2:8000',
-]
+# ── CORS — mobile apps don't enforce CORS (browser-only), allow all ───
+CORS_ALLOW_ALL_ORIGINS = True
