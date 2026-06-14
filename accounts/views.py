@@ -6,7 +6,10 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
 from .models import User
-from .serializers import LoginSerializer, UserSerializer
+from .serializers import (
+    LoginSerializer, UserSerializer,
+    UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
+)
 
 
 def get_tokens_for_user(user):
@@ -70,11 +73,56 @@ class LoginView(APIView):
 
 
 class MeView(APIView):
-    """
-    GET /api/auth/me/
-    Returns current logged-in user's profile. Requires Authorization header.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class UserListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        users = User.objects.filter(company=request.user.company, is_active=True).order_by('name')
+        return Response(UserListSerializer(users, many=True).data)
+
+    def post(self, request):
+        serializer = UserCreateSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response(UserListSerializer(user).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_user(self, pk, company):
+        try:
+            return User.objects.get(pk=pk, company=company)
+        except User.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        user = self._get_user(pk, request.user.company)
+        if not user:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(UserListSerializer(user).data)
+
+    def patch(self, request, pk):
+        user = self._get_user(pk, request.user.company)
+        if not user:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = UserUpdateSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(UserListSerializer(user).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        user = self._get_user(pk, request.user.company)
+        if not user:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        user.is_active = False
+        user.save()
+        return Response(status=status.HTTP_204_NO_CONTENT)
