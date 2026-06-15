@@ -18,7 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'user_code', 'name', 'email', 'phone',
             'role', 'department', 'designation', 'avatar_url',
             'modules', 'manager_modules',
-            'company_code', 'company_name',
+            'company_code', 'company_name', 'is_staff',
         ]
 
 
