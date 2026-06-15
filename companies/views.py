@@ -1,13 +1,22 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
 
 from .models import Company
 from .serializers import (
     CompanyVerifySerializer, CompanySerializer,
     CompanyAdminSerializer, CompanyCodeUpdateSerializer,
 )
+
+
+class IsAdminRoleOrStaff(BasePermission):
+    """Allow is_staff (platform admin) or users with role='Admin' (company admin)."""
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated and
+            (request.user.is_staff or getattr(request.user, 'role', None) == 'Admin')
+        )
 
 
 class VerifyCompanyView(APIView):
@@ -45,27 +54,35 @@ class VerifyCompanyView(APIView):
 class CompanyListView(APIView):
     """
     GET /api/company/all/
-    Returns all companies. Restricted to staff (platform admins).
+    Staff: returns all companies.
+    Admin role: returns only their own company.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRoleOrStaff]
 
     def get(self, request):
-        companies = Company.objects.all().order_by('name')
+        if request.user.is_staff:
+            companies = Company.objects.all().order_by('name')
+        else:
+            companies = Company.objects.filter(pk=request.user.company.pk)
         return Response(CompanyAdminSerializer(companies, many=True).data)
 
 
 class CompanyDetailView(APIView):
     """
     PATCH /api/company/<pk>/
-    Update a company's code or name. Restricted to staff.
+    Staff: can update any company.
+    Admin role: can only update their own company.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAdminRoleOrStaff]
 
     def patch(self, request, pk):
         try:
             company = Company.objects.get(pk=pk)
         except Company.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not request.user.is_staff and request.user.company.pk != company.pk:
+            return Response({'detail': 'You can only update your own company.'}, status=status.HTTP_403_FORBIDDEN)
 
         serializer = CompanyCodeUpdateSerializer(company, data=request.data, partial=True)
         if serializer.is_valid():
