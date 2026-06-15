@@ -41,21 +41,23 @@ class UserListSerializer(serializers.ModelSerializer):
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=6)
+    password         = serializers.CharField(write_only=True, min_length=6)
+    user_code_prefix = serializers.CharField(write_only=True, required=False, max_length=10, default='USR')
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'password', 'role', 'modules', 'manager_modules']
+        fields = ['name', 'email', 'password', 'role', 'modules', 'manager_modules', 'user_code_prefix']
 
     def create(self, validated_data):
         company  = self.context['request'].user.company
         password = validated_data.pop('password')
+        prefix   = validated_data.pop('user_code_prefix', 'USR').upper().strip() or 'USR'
 
         count     = User.objects.filter(company=company).count()
-        user_code = f"USR{str(count + 1).zfill(3)}"
+        user_code = f"{prefix}{str(count + 1).zfill(3)}"
         while User.objects.filter(company=company, user_code=user_code).exists():
             count    += 1
-            user_code = f"USR{str(count + 1).zfill(3)}"
+            user_code = f"{prefix}{str(count + 1).zfill(3)}"
 
         user = User(company=company, user_code=user_code, **validated_data)
         user.set_password(password)
