@@ -10,11 +10,11 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='user',
-            name='designation',
-            field=models.CharField(blank=True, default='', max_length=100),
-            preserve_default=False,
+        # Use raw SQL with IF NOT EXISTS so this is safe whether or not
+        # the column was already added by a previous partial deployment.
+        migrations.RunSQL(
+            sql="ALTER TABLE accounts_user ADD COLUMN IF NOT EXISTS designation VARCHAR(100) NOT NULL DEFAULT '';",
+            reverse_sql="ALTER TABLE accounts_user DROP COLUMN IF EXISTS designation;",
         ),
         migrations.CreateModel(
             name='Designation',
