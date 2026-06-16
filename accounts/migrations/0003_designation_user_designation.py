@@ -13,7 +13,8 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='user',
             name='designation',
-            field=models.CharField(blank=True, max_length=100),
+            field=models.CharField(blank=True, default='', max_length=100),
+            preserve_default=False,
         ),
         migrations.CreateModel(
             name='Designation',
