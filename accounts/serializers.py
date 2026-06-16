@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User
+from .models import User, Designation
 
 
 class LoginSerializer(serializers.Serializer):
@@ -22,6 +22,12 @@ class UserSerializer(serializers.ModelSerializer):
         ]
 
 
+class DesignationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = Designation
+        fields = ['id', 'name', 'module']
+
+
 class UserListSerializer(serializers.ModelSerializer):
     module_count = serializers.SerializerMethodField()
     is_manager   = serializers.SerializerMethodField()
@@ -35,7 +41,7 @@ class UserListSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = [
-            'id', 'user_code', 'name', 'email', 'role',
+            'id', 'user_code', 'name', 'email', 'role', 'designation',
             'modules', 'manager_modules', 'module_count', 'is_manager', 'is_active',
         ]
 
@@ -46,7 +52,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'password', 'role', 'modules', 'manager_modules', 'user_code_prefix']
+        fields = ['name', 'email', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix']
 
     def create(self, validated_data):
         company  = self.context['request'].user.company
@@ -70,7 +76,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'user_code', 'password', 'role', 'modules', 'manager_modules', 'is_active']
+        fields = ['name', 'email', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'is_active']
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
