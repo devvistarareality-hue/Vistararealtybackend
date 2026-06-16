@@ -45,3 +45,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f'{self.user_code} ({self.company.code if self.company else "admin"})'
+
+
+class Designation(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
+    name    = models.CharField(max_length=100)
+    module  = models.CharField(max_length=100)
+
+    class Meta:
+        unique_together = ('company', 'name', 'module')
+        ordering = ['module', 'name']
+
+    def __str__(self):
+        return f'{self.name} ({self.module})'
