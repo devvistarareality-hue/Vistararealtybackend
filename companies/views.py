@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
 from .models import Company
 from .serializers import (
     CompanyVerifySerializer, CompanySerializer,
-    CompanyAdminSerializer, CompanyCodeUpdateSerializer,
+    CompanyAdminSerializer, CompanyCodeUpdateSerializer, CompanyCreateSerializer,
 )
 
 
@@ -53,9 +53,8 @@ class VerifyCompanyView(APIView):
 
 class CompanyListView(APIView):
     """
-    GET /api/company/all/
-    Staff: returns all companies.
-    Admin role: returns only their own company.
+    GET  /api/company/all/  — staff: all companies; admin role: own company only
+    POST /api/company/all/  — staff only: create a new company
     """
     permission_classes = [IsAdminRoleOrStaff]
 
@@ -65,6 +64,15 @@ class CompanyListView(APIView):
         else:
             companies = Company.objects.filter(pk=request.user.company.pk)
         return Response(CompanyAdminSerializer(companies, many=True).data)
+
+    def post(self, request):
+        if not request.user.is_staff:
+            return Response({'detail': 'Only platform staff can create companies.'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = CompanyCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            company = serializer.save()
+            return Response(CompanyAdminSerializer(company).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class CompanyDetailView(APIView):
