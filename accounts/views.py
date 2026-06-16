@@ -11,6 +11,8 @@ from .serializers import (
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
 )
 
+# v2: list returns ALL users (incl. inactive); DELETE is a hard delete
+
 
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
