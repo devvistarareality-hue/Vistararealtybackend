@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from .models import User, Designation
 
+VRL_CODE = 'VRL'
+
 
 class LoginSerializer(serializers.Serializer):
     company_code = serializers.CharField(max_length=20)
@@ -31,6 +33,8 @@ class DesignationSerializer(serializers.ModelSerializer):
 class UserListSerializer(serializers.ModelSerializer):
     module_count = serializers.SerializerMethodField()
     is_manager   = serializers.SerializerMethodField()
+    company_code = serializers.CharField(source='company.code', read_only=True)
+    company_name = serializers.CharField(source='company.name', read_only=True)
 
     def get_module_count(self, obj):
         return len(obj.modules) if obj.modules else 0
@@ -43,21 +47,41 @@ class UserListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user_code', 'name', 'email', 'role', 'designation',
             'modules', 'manager_modules', 'module_count', 'is_manager', 'is_active',
+            'company_code', 'company_name',
         ]
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
     password         = serializers.CharField(write_only=True, min_length=6)
     user_code_prefix = serializers.CharField(write_only=True, required=False, max_length=10, default='USR')
+    company_id       = serializers.IntegerField(write_only=True, required=False)
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix']
+        fields = ['name', 'email', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix', 'company_id']
 
     def create(self, validated_data):
-        company  = self.context['request'].user.company
-        password = validated_data.pop('password')
-        prefix   = validated_data.pop('user_code_prefix', 'USR').upper().strip() or 'USR'
+        from companies.models import Company as CompanyModel
+        request    = self.context['request']
+        company_id = validated_data.pop('company_id', None)
+        password   = validated_data.pop('password')
+        prefix     = validated_data.pop('user_code_prefix', 'USR').upper().strip() or 'USR'
+
+        is_padmin = (
+            request.user.is_staff or (
+                getattr(request.user, 'company', None) and
+                getattr(request.user.company, 'code', '').upper() == VRL_CODE and
+                getattr(request.user, 'role', '') == 'Admin'
+            )
+        )
+
+        if company_id and is_padmin:
+            try:
+                company = CompanyModel.objects.get(pk=company_id)
+            except CompanyModel.DoesNotExist:
+                raise serializers.ValidationError({'company_id': 'Company not found.'})
+        else:
+            company = request.user.company
 
         count     = User.objects.filter(company=company).count()
         user_code = f"{prefix}{str(count + 1).zfill(3)}"
@@ -84,7 +108,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         return value
 
     def validate_user_code(self, value):
-        value = value.upper().strip()
+        value   = value.upper().strip()
         company = self.instance.company
         if User.objects.filter(company=company, user_code=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError('This user code is already taken.')

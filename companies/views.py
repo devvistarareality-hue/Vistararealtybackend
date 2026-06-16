@@ -9,13 +9,27 @@ from .serializers import (
     CompanyAdminSerializer, CompanyCodeUpdateSerializer, CompanyCreateSerializer,
 )
 
+VRL_CODE = 'VRL'
+
+
+def is_platform_admin(user):
+    """VRL Admin or Django staff = platform-level super admin."""
+    return bool(
+        user and user.is_authenticated and (
+            user.is_staff or (
+                getattr(user, 'company', None) and
+                getattr(user.company, 'code', '').upper() == VRL_CODE and
+                getattr(user, 'role', '') == 'Admin'
+            )
+        )
+    )
+
 
 class IsAdminRoleOrStaff(BasePermission):
-    """Allow is_staff (platform admin) or users with role='Admin' (company admin)."""
     def has_permission(self, request, view):
         return bool(
             request.user and request.user.is_authenticated and
-            (request.user.is_staff or getattr(request.user, 'role', None) == 'Admin')
+            (is_platform_admin(request.user) or getattr(request.user, 'role', None) == 'Admin')
         )
 
 
@@ -43,29 +57,31 @@ class VerifyCompanyView(APIView):
             )
 
         return Response(
-            {
-                'valid': True,
-                'company': CompanySerializer(company).data,
-            },
+            {'valid': True, 'company': CompanySerializer(company).data},
             status=status.HTTP_200_OK,
         )
 
 
 class CompanyListView(APIView):
     """
-    GET  /api/company/all/  — staff: all companies; admin role: own company only
-    POST /api/company/all/  — staff only: create a new company
+    GET  /api/company/all/  — platform admin: all companies; others: own company only
+    POST /api/company/all/  — platform admin only: create a new company
     """
     permission_classes = [IsAdminRoleOrStaff]
 
     def get(self, request):
-        if request.user.is_staff:
+        if is_platform_admin(request.user):
             companies = Company.objects.all().order_by('name')
         else:
             companies = Company.objects.filter(pk=request.user.company.pk)
         return Response(CompanyAdminSerializer(companies, many=True).data)
 
     def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response(
+                {'detail': 'Only platform admins can create companies.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = CompanyCreateSerializer(data=request.data)
         if serializer.is_valid():
             company = serializer.save()
@@ -76,8 +92,7 @@ class CompanyListView(APIView):
 class CompanyDetailView(APIView):
     """
     PATCH /api/company/<pk>/
-    Staff: can update any company.
-    Admin role: can only update their own company.
+    Platform admin: any company. Company Admin: own company only.
     """
     permission_classes = [IsAdminRoleOrStaff]
 
@@ -87,8 +102,11 @@ class CompanyDetailView(APIView):
         except Company.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if not request.user.is_staff and request.user.company.pk != company.pk:
-            return Response({'detail': 'You can only update your own company.'}, status=status.HTTP_403_FORBIDDEN)
+        if not is_platform_admin(request.user) and request.user.company.pk != company.pk:
+            return Response(
+                {'detail': 'You can only update your own company.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         serializer = CompanyCodeUpdateSerializer(company, data=request.data, partial=True)
         if serializer.is_valid():
