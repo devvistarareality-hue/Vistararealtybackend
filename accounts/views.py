@@ -83,7 +83,7 @@ class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        users = User.objects.filter(company=request.user.company, is_active=True).order_by('name')
+        users = User.objects.filter(company=request.user.company).order_by('name')
         return Response(UserListSerializer(users, many=True).data)
 
     def post(self, request):
@@ -123,6 +123,5 @@ class UserDetailView(APIView):
         user = self._get_user(pk, request.user.company)
         if not user:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        user.is_active = False
-        user.save()
+        user.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
