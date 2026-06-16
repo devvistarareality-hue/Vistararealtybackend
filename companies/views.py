@@ -66,8 +66,6 @@ class CompanyListView(APIView):
         return Response(CompanyAdminSerializer(companies, many=True).data)
 
     def post(self, request):
-        if not request.user.is_staff:
-            return Response({'detail': 'Only platform staff can create companies.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = CompanyCreateSerializer(data=request.data)
         if serializer.is_valid():
             company = serializer.save()
