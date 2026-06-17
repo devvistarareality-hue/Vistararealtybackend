@@ -465,10 +465,19 @@ class DistributeView(APIView):
         project_id = request.data.get('project_id')
         count      = int(request.data.get('count', 10))
 
-        # Get available team members for this role
-        members = SalesTeamMember.objects.filter(crm_role=dist_type, is_active=True).select_related('user')
+        # Resolve designation for this dist_type
+        desig_map = {'telecaller': 'TELECALLER', 'stm': 'STM'}
+        desig = desig_map.get(dist_type, 'TELECALLER')
+
+        members = list(
+            User.objects.filter(
+                company=request.user.company,
+                designation__iexact=desig,
+                is_active=True,
+            ).only('id', 'name')
+        )
         if not members:
-            return Response({'detail': f'No active {dist_type}s in the sales team.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': f'No active {desig} users in this company.'}, status=status.HTTP_400_BAD_REQUEST)
 
         # Get unassigned leads
         if dist_type == 'telecaller':
@@ -485,22 +494,16 @@ class DistributeView(APIView):
 
         # Round-robin distribution
         assignments = {}
+        now = timezone.now()
         for i, lead in enumerate(unassigned):
-            member = members[i % len(members)]
+            user = members[i % len(members)]
             if dist_type == 'telecaller':
-                lead.telecaller = member.user
-                lead.status     = 'assigned'
-                lead.telecaller_assigned_at = timezone.now()
+                Lead.objects.filter(pk=lead.pk).update(
+                    telecaller=user, status='assigned', telecaller_assigned_at=now,
+                )
             else:
-                lead.stm = member.user
-                lead.stm_assigned_at = timezone.now()
-            Lead.objects.filter(pk=lead.pk).update(
-                **({'telecaller': member.user, 'status': 'assigned', 'telecaller_assigned_at': timezone.now()}
-                   if dist_type == 'telecaller'
-                   else {'stm': member.user, 'stm_assigned_at': timezone.now()})
-            )
-            name = member.user.name
-            assignments[name] = assignments.get(name, 0) + 1
+                Lead.objects.filter(pk=lead.pk).update(stm=user, stm_assigned_at=now)
+            assignments[user.name] = assignments.get(user.name, 0) + 1
 
         log = DistributionLog.objects.create(
             dist_type=dist_type,
