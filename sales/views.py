@@ -350,19 +350,24 @@ class SalesTeamView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        members = SalesTeamMember.objects.select_related('user').filter(is_active=True)
+        company = request.user.company
+        members = SalesTeamMember.objects.select_related('user').filter(
+            user__company=company,
+            is_active=True,
+        )
         crm_role = request.query_params.get('crm_role')
         if crm_role:
             members = members.filter(crm_role=crm_role)
         data = [{
-            'id':       m.id,
-            'user_id':  m.user.id,
-            'name':     m.user.name,
-            'email':    m.user.email,
-            'phone':    m.user.phone,
-            'user_code': m.user.user_code,
-            'crm_role': m.crm_role,
-            'is_active': m.is_active,
+            'id':         m.id,
+            'user_id':    m.user.id,
+            'name':       m.user.name,
+            'email':      m.user.email,
+            'phone':      m.user.phone,
+            'user_code':  m.user.user_code,
+            'department': m.user.department,
+            'crm_role':   m.crm_role,
+            'is_active':  m.is_active,
         } for m in members]
         return Response(data)
 
@@ -372,15 +377,15 @@ class SalesTeamView(APIView):
         user_id  = request.data.get('user_id')
         crm_role = request.data.get('crm_role', 'telecaller')
         try:
-            user = User.objects.get(pk=user_id)
+            user = User.objects.get(pk=user_id, company=request.user.company)
         except User.DoesNotExist:
-            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'detail': 'User not found in your company.'}, status=status.HTTP_404_NOT_FOUND)
         member, created = SalesTeamMember.objects.get_or_create(user=user, defaults={'crm_role': crm_role})
         if not created:
             member.crm_role  = crm_role
             member.is_active = True
             member.save()
-        return Response({'id': member.id, 'user_id': user.id, 'name': user.name, 'crm_role': member.crm_role}, status=status.HTTP_201_CREATED)
+        return Response({'id': member.id, 'user_id': user.id, 'name': user.name, 'crm_role': member.crm_role, 'department': user.department, 'user_code': user.user_code}, status=status.HTTP_201_CREATED)
 
 
 class SalesTeamMemberDetailView(APIView):
@@ -390,7 +395,7 @@ class SalesTeamMemberDetailView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            m = SalesTeamMember.objects.get(pk=pk)
+            m = SalesTeamMember.objects.get(pk=pk, user__company=request.user.company)
         except SalesTeamMember.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if 'crm_role' in request.data:
@@ -404,7 +409,7 @@ class SalesTeamMemberDetailView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            m = SalesTeamMember.objects.get(pk=pk)
+            m = SalesTeamMember.objects.get(pk=pk, user__company=request.user.company)
         except SalesTeamMember.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         m.is_active = False
