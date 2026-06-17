@@ -989,6 +989,9 @@ class MetaWebhookConfigView(APIView):
             config = MetaWebhookConfig.objects.create(
                 verify_token=secrets.token_urlsafe(32),
             )
+        elif not config.verify_token:
+            config.verify_token = secrets.token_urlsafe(32)
+            config.save(update_fields=['verify_token'])
         return config
 
     def get(self, request):
