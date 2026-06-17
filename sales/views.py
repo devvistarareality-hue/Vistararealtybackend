@@ -56,7 +56,12 @@ class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = Lead.objects.select_related('project', 'source', 'telecaller', 'stm')
+        # Defer heavy text blobs not needed for list view
+        qs = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(
+            'telecaller_remarks', 'stm_remarks', 'requirement',
+            'preferred_location', 'budget_min', 'budget_max',
+            'meta_campaign_name', 'meta_ad_name',
+        )
 
         # Filters
         search = request.query_params.get('search', '').strip()
@@ -201,7 +206,7 @@ class ProjectListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        projects = Project.objects.all()
+        projects = Project.objects.annotate(lead_count=Count('leads'))
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         return Response(ProjectSerializer(projects, many=True).data)
@@ -592,61 +597,73 @@ class ReportsView(APIView):
 
     def get(self, request):
         from django.db.models import Count, Sum, Q
+        from concurrent.futures import ThreadPoolExecutor
 
-        # Campaign performance
-        campaign_data = (
-            Lead.objects.exclude(meta_campaign_name='')
-            .values('meta_campaign_name')
-            .annotate(
-                total=Count('id'),
-                warm=Count('id', filter=Q(status__in=['warm_transferred', 'sv_scheduled', 'sv_done', 'closed'])),
-                sv=Count('id', filter=Q(status__in=['sv_done', 'closed'])),
-                closed=Count('id', filter=Q(status='closed')),
+        def get_campaigns():
+            return list(
+                Lead.objects.exclude(meta_campaign_name='')
+                .values('meta_campaign_name')
+                .annotate(
+                    total=Count('id'),
+                    warm=Count('id', filter=Q(status__in=['warm_transferred', 'sv_scheduled', 'sv_done', 'closed'])),
+                    sv=Count('id', filter=Q(status__in=['sv_done', 'closed'])),
+                    closed=Count('id', filter=Q(status='closed')),
+                )
+                .order_by('-total')[:20]
             )
-            .order_by('-total')[:20]
-        )
 
-        # Telecaller performance
-        tc_data = (
-            Lead.objects.exclude(telecaller__isnull=True)
-            .values('telecaller__id', 'telecaller__name')
-            .annotate(
-                total=Count('id'),
-                warm=Count('id', filter=Q(telecaller_status='warm')),
-                transferred=Count('id', filter=Q(status='warm_transferred')),
-                sv=Count('id', filter=Q(status__in=['sv_done', 'closed'])),
+        def get_telecallers():
+            return list(
+                Lead.objects.exclude(telecaller__isnull=True)
+                .values('telecaller__id', 'telecaller__name')
+                .annotate(
+                    total=Count('id'),
+                    warm=Count('id', filter=Q(telecaller_status='warm')),
+                    transferred=Count('id', filter=Q(status='warm_transferred')),
+                    sv=Count('id', filter=Q(status__in=['sv_done', 'closed'])),
+                )
+                .order_by('-total')
             )
-            .order_by('-total')
-        )
 
-        # STM performance
-        stm_data = (
-            Lead.objects.exclude(stm__isnull=True)
-            .values('stm__id', 'stm__name')
-            .annotate(
-                total=Count('id'),
-                hot=Count('id', filter=Q(stm_status='hot')),
-                sv_scheduled=Count('id', filter=Q(stm_status='sv_scheduled')),
-                sv_done=Count('id', filter=Q(stm_status__in=['sv_done'])),
-                closed=Count('id', filter=Q(status='closed')),
+        def get_stms():
+            return list(
+                Lead.objects.exclude(stm__isnull=True)
+                .values('stm__id', 'stm__name')
+                .annotate(
+                    total=Count('id'),
+                    hot=Count('id', filter=Q(stm_status='hot')),
+                    sv_scheduled=Count('id', filter=Q(stm_status='sv_scheduled')),
+                    sv_done=Count('id', filter=Q(stm_status__in=['sv_done'])),
+                    closed=Count('id', filter=Q(status='closed')),
+                )
+                .order_by('-total')
             )
-            .order_by('-total')
-        )
 
-        # Closures
-        closures = Closure.objects.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
-        total_revenue = Closure.objects.aggregate(total=Sum('booking_amount'))['total'] or 0
-
-        return Response({
-            'campaigns': list(campaign_data),
-            'telecallers': list(tc_data),
-            'stms': list(stm_data),
-            'closures': ClosureSerializer(closures, many=True).data,
-            'summary': {
+        def get_summary():
+            agg = Closure.objects.aggregate(total=Sum('booking_amount'), cnt=Count('id'))
+            return {
                 'total_sv':       SiteVisit.objects.count(),
                 'completed_sv':   SiteVisit.objects.filter(status='completed').count(),
-                'total_closures': Closure.objects.count(),
-                'total_revenue':  float(total_revenue),
+                'total_closures': agg['cnt'] or 0,
+                'total_revenue':  float(agg['total'] or 0),
                 'meta_leads':     Lead.objects.exclude(meta_campaign_name='').count(),
             }
+
+        def get_closures():
+            return Closure.objects.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
+
+        # Run all 5 queries in parallel threads
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            f_camp  = ex.submit(get_campaigns)
+            f_tc    = ex.submit(get_telecallers)
+            f_stm   = ex.submit(get_stms)
+            f_summ  = ex.submit(get_summary)
+            f_close = ex.submit(get_closures)
+
+        return Response({
+            'campaigns':  f_camp.result(),
+            'telecallers': f_tc.result(),
+            'stms':        f_stm.result(),
+            'closures':    ClosureSerializer(f_close.result(), many=True).data,
+            'summary':     f_summ.result(),
         })

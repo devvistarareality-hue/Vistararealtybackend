@@ -9,14 +9,11 @@ class LeadSourceSerializer(serializers.ModelSerializer):
 
 
 class ProjectSerializer(serializers.ModelSerializer):
-    lead_count = serializers.SerializerMethodField()
+    lead_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = Project
         fields = ['id', 'name', 'description', 'location', 'project_type', 'is_active', 'lead_count', 'created_at', 'updated_at']
-
-    def get_lead_count(self, obj):
-        return obj.leads.count()
 
 
 class LeadUserSerializer(serializers.Serializer):
