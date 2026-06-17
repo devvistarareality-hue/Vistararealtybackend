@@ -26,18 +26,25 @@ class StatsView(APIView):
 
     def get(self, request):
         today = timezone.localdate()
-        total_leads    = Lead.objects.count()
-        new_leads      = Lead.objects.filter(status='new').count()
-        leads_today    = Lead.objects.filter(created_at__date=today).count()
-        sv_done        = SiteVisit.objects.count()
-        closures       = Closure.objects.count()
-        active_projects = Project.objects.filter(is_active=True).count()
-
-        recent = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
+        # Single aggregate query instead of 6 separate COUNTs
+        agg = Lead.objects.aggregate(
+            total_leads=Count('id'),
+            new_leads=Count('id', filter=Q(status='new')),
+            leads_today=Count('id', filter=Q(created_at__date=today)),
+        )
+        sv_done, closures, active_projects = (
+            SiteVisit.objects.count(),
+            Closure.objects.count(),
+            Project.objects.filter(is_active=True).count(),
+        )
+        recent = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').only(
+            'id', 'name', 'phone', 'status', 'created_at',
+            'project__name', 'source__name', 'telecaller__name', 'stm__name',
+        ).order_by('-created_at')[:8]
         return Response({
-            'total_leads':     total_leads,
-            'new_leads':       new_leads,
-            'leads_today':     leads_today,
+            'total_leads':     agg['total_leads'],
+            'new_leads':       agg['new_leads'],
+            'leads_today':     agg['leads_today'],
             'sv_done':         sv_done,
             'closures':        closures,
             'active_projects': active_projects,
