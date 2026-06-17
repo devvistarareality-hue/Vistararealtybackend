@@ -359,15 +359,15 @@ class SalesTeamView(APIView):
         if crm_role:
             members = members.filter(crm_role=crm_role)
         data = [{
-            'id':         m.id,
-            'user_id':    m.user.id,
-            'name':       m.user.name,
-            'email':      m.user.email,
-            'phone':      m.user.phone,
-            'user_code':  m.user.user_code,
-            'department': m.user.department,
-            'crm_role':   m.crm_role,
-            'is_active':  m.is_active,
+            'id':          m.id,
+            'user_id':     m.user.id,
+            'name':        m.user.name,
+            'email':       m.user.email,
+            'phone':       m.user.phone,
+            'user_code':   m.user.user_code,
+            'designation': m.user.designation,
+            'crm_role':    m.crm_role,
+            'is_active':   m.is_active,
         } for m in members]
         return Response(data)
 
@@ -385,7 +385,7 @@ class SalesTeamView(APIView):
             member.crm_role  = crm_role
             member.is_active = True
             member.save()
-        return Response({'id': member.id, 'user_id': user.id, 'name': user.name, 'crm_role': member.crm_role, 'department': user.department, 'user_code': user.user_code}, status=status.HTTP_201_CREATED)
+        return Response({'id': member.id, 'user_id': user.id, 'name': user.name, 'crm_role': member.crm_role, 'designation': user.designation, 'user_code': user.user_code}, status=status.HTTP_201_CREATED)
 
 
 class SalesTeamMemberDetailView(APIView):
