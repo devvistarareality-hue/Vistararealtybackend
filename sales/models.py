@@ -233,6 +233,45 @@ class SalesTeamMember(models.Model):
         return f'{self.user.name} ({self.crm_role})'
 
 
+class DistributionSettings(models.Model):
+    """Per-company sign-in / sign-out windows for TC and STM distribution."""
+    company = models.OneToOneField(
+        'companies.Company', on_delete=models.CASCADE, related_name='dist_settings'
+    )
+    tc_signin_time  = models.TimeField(default='10:20')
+    tc_signout_time = models.TimeField(default='22:00')
+    stm_signin_time  = models.TimeField(default='10:20')
+    stm_signout_time = models.TimeField(default='22:00')
+    weights_reset_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f'DistSettings({self.company})'
+
+
+class UserAvailability(models.Model):
+    """Daily sign-in record for TC/STM users."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='availability')
+    date = models.DateField()
+    is_available = models.BooleanField(default=False)
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ['user', 'date']
+        ordering = ['-date']
+
+    def __str__(self):
+        return f'{self.user.name} – {self.date} – {"in" if self.is_available else "out"}'
+
+
+class UserDistributionWeight(models.Model):
+    """Per-user weight for weighted round-robin distribution."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='dist_weight')
+    weight = models.PositiveIntegerField(default=1)
+
+    def __str__(self):
+        return f'{self.user.name} w={self.weight}'
+
+
 class DistributionLog(models.Model):
     DIST_TYPE = [('telecaller', 'Telecaller'), ('stm', 'STM')]
     dist_type = models.CharField(max_length=20, choices=DIST_TYPE)

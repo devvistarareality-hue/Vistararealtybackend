@@ -21,5 +21,8 @@ urlpatterns = [
     path('team/<int:pk>/',             views.SalesTeamMemberDetailView.as_view()),
     path('distribute/',                views.DistributeView.as_view()),
     path('distribution-log/',          views.DistributionLogView.as_view()),
+    path('dist-settings/',             views.DistributionSettingsView.as_view()),
+    path('availability/',              views.AvailabilityView.as_view()),
+    path('dist-weight/',               views.DistributionWeightView.as_view()),
     path('reports/',                   views.ReportsView.as_view()),
 ]

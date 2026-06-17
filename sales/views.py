@@ -6,7 +6,11 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
 from accounts.models import User
-from .models import Lead, LeadSource, Project, FollowUp, SiteVisit, Closure, LeadStatusHistory
+from .models import (
+    Lead, LeadSource, Project, FollowUp, SiteVisit, Closure, LeadStatusHistory,
+    DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
+    SalesTeamMember,
+)
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer,
@@ -379,7 +383,7 @@ class CompanyUsersSlimView(APIView):
 
 
 # ── Sales Team Members ──────────────────────────────────────────────────────
-from .models import SalesTeamMember, DistributionLog
+# models already imported at top of file
 
 
 class SalesTeamView(APIView):
@@ -453,6 +457,119 @@ class SalesTeamMemberDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# ── Distribution Settings ─────────────────────────────────────────────────────
+class DistributionSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_or_create(self, company):
+        obj, _ = DistributionSettings.objects.get_or_create(company=company)
+        return obj
+
+    def get(self, request):
+        s = self._get_or_create(request.user.company)
+        return Response({
+            'tc_signin_time':   str(s.tc_signin_time)[:5],
+            'tc_signout_time':  str(s.tc_signout_time)[:5],
+            'stm_signin_time':  str(s.stm_signin_time)[:5],
+            'stm_signout_time': str(s.stm_signout_time)[:5],
+        })
+
+    def put(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        s = self._get_or_create(request.user.company)
+        for field in ('tc_signin_time', 'tc_signout_time', 'stm_signin_time', 'stm_signout_time'):
+            if field in request.data:
+                setattr(s, field, request.data[field])
+        s.save()
+        return Response({'detail': 'Saved.'})
+
+
+# ── Availability ──────────────────────────────────────────────────────────────
+class AvailabilityView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import date as date_cls
+        today = request.query_params.get('date', str(date_cls.today()))
+        desig_map = {'TELECALLER': 'telecaller', 'STM': 'stm'}
+        users = (
+            User.objects
+            .filter(company=request.user.company, is_active=True)
+            .exclude(role='Admin')
+            .filter(designation__in=['TELECALLER', 'STM'])
+            .only('id', 'name', 'designation')
+            .order_by('name')
+        )
+        avail_map = {
+            a.user_id: a.is_available
+            for a in UserAvailability.objects.filter(
+                user__company=request.user.company, date=today
+            )
+        }
+        data = []
+        for u in users:
+            data.append({
+                'user_id':      u.id,
+                'name':         u.name,
+                'role':         desig_map.get(u.designation.upper(), u.designation.lower()),
+                'is_available': avail_map.get(u.id, False),
+            })
+        return Response(data)
+
+    def post(self, request):
+        """Admin toggles any user's availability for today."""
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        from datetime import date as date_cls
+        user_id      = request.data.get('user_id')
+        is_available = request.data.get('is_available', True)
+        today        = str(date_cls.today())
+        try:
+            user = User.objects.get(pk=user_id, company=request.user.company)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=404)
+        obj, _ = UserAvailability.objects.update_or_create(
+            user=user, date=today,
+            defaults={'is_available': is_available, 'checked_in_at': timezone.now()},
+        )
+        return Response({'user_id': user.id, 'is_available': obj.is_available})
+
+
+# ── Distribution Weights ──────────────────────────────────────────────────────
+class DistributionWeightView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        users = (
+            User.objects
+            .filter(company=request.user.company, is_active=True, designation__in=['TELECALLER', 'STM'])
+            .only('id', 'name', 'designation')
+        )
+        weight_map = {
+            w.user_id: w.weight
+            for w in UserDistributionWeight.objects.filter(user__company=request.user.company)
+        }
+        return Response([
+            {'user_id': u.id, 'name': u.name, 'role': u.designation.upper(), 'weight': weight_map.get(u.id, 1)}
+            for u in users
+        ])
+
+    def patch(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        updates = request.data.get('updates', [])  # [{user_id, weight}]
+        for item in updates:
+            uid = item.get('user_id')
+            w   = max(1, int(item.get('weight', 1)))
+            try:
+                user = User.objects.get(pk=uid, company=request.user.company)
+                UserDistributionWeight.objects.update_or_create(user=user, defaults={'weight': w})
+            except User.DoesNotExist:
+                pass
+        return Response({'detail': 'Weights saved.'})
+
+
 # ── Distribution ─────────────────────────────────────────────────────────────
 class DistributeView(APIView):
     permission_classes = [IsAuthenticated]
@@ -461,57 +578,115 @@ class DistributeView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-        dist_type  = request.data.get('type', 'telecaller')   # 'telecaller' | 'stm'
-        project_id = request.data.get('project_id')
-        count      = int(request.data.get('count', 10))
+        from datetime import date as date_cls
+        from zoneinfo import ZoneInfo
 
-        # Resolve designation for this dist_type
+        dist_type = request.data.get('type', 'telecaller')   # 'telecaller' | 'stm'
         desig_map = {'telecaller': 'TELECALLER', 'stm': 'STM'}
-        desig = desig_map.get(dist_type, 'TELECALLER')
+        desig     = desig_map.get(dist_type, 'TELECALLER')
+
+        # Check signout window (IST-aware)
+        settings = DistributionSettings.objects.filter(company=request.user.company).first()
+        if settings:
+            ist = ZoneInfo('Asia/Kolkata')
+            now_ist = timezone.now().astimezone(ist)
+            current_time = now_ist.strftime('%H:%M')
+            signout = str(getattr(settings, f'{dist_type}_signout_time'))[:5]
+            if current_time >= signout:
+                return Response({
+                    'distributed': 0,
+                    'message': f'Distribution window closed (signout at {signout}). Leads will remain unassigned.',
+                })
+
+        today = str(date_cls.today())
+
+        # Only users who are signed in today
+        avail_ids = set(
+            UserAvailability.objects.filter(
+                user__company=request.user.company,
+                user__designation__iexact=desig,
+                date=today,
+                is_available=True,
+            ).values_list('user_id', flat=True)
+        )
+        if not avail_ids:
+            return Response({'distributed': 0, 'message': f'No {desig}s have signed in today.'})
 
         members = list(
-            User.objects.filter(
-                company=request.user.company,
-                designation__iexact=desig,
-                is_active=True,
-            ).only('id', 'name')
+            User.objects.filter(pk__in=avail_ids, is_active=True)
+            .only('id', 'name')
         )
         if not members:
-            return Response({'detail': f'No active {desig} users in this company.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'distributed': 0, 'message': f'No active {desig} users available.'})
+
+        # Load weights
+        weight_map = {
+            w.user_id: w.weight
+            for w in UserDistributionWeight.objects.filter(user__in=members)
+        }
 
         # Get unassigned leads
         if dist_type == 'telecaller':
-            qs = Lead.objects.filter(telecaller__isnull=True)
+            qs = Lead.objects.filter(
+                telecaller__isnull=True, status='new'
+            ).order_by('created_at')
         else:
-            qs = Lead.objects.filter(status='warm_transferred', stm__isnull=True)
+            qs = Lead.objects.filter(
+                status='warm_transferred', stm__isnull=True
+            ).order_by('created_at')
 
-        if project_id:
-            qs = qs.filter(project_id=project_id)
+        leads = list(qs)
+        if not leads:
+            return Response({'distributed': 0, 'message': 'No unassigned leads found.'})
 
-        unassigned = list(qs.order_by('created_at')[:count * len(members)])
-        if not unassigned:
-            return Response({'distributed': 0, 'message': f'No unassigned leads found.'})
+        # Today's existing assignment counts (for fair weighted continuation)
+        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if dist_type == 'telecaller':
+            count_qs = Lead.objects.filter(
+                telecaller__in=members, telecaller_assigned_at__gte=today_start
+            ).values('telecaller_id').annotate(n=Count('id'))
+            counts = {row['telecaller_id']: row['n'] for row in count_qs}
+        else:
+            count_qs = Lead.objects.filter(
+                stm__in=members, stm_assigned_at__gte=today_start
+            ).values('stm_id').annotate(n=Count('id'))
+            counts = {row['stm_id']: row['n'] for row in count_qs}
 
-        # Round-robin distribution
-        assignments = {}
+        for m in members:
+            counts.setdefault(m.id, 0)
+
+        # Weighted round-robin: pick member with lowest (assigned / weight) ratio
+        member_ids = [m.id for m in members]
+        id_to_member = {m.id: m for m in members}
+        user_leads: dict[int, list] = {m.id: [] for m in members}
         now = timezone.now()
-        for i, lead in enumerate(unassigned):
-            user = members[i % len(members)]
+
+        for lead in leads:
+            best = min(member_ids, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
+            user_leads[best].append(lead.pk)
+            counts[best] += 1
+
+        # Batch update
+        assignments = []
+        for uid, pks in user_leads.items():
+            if not pks:
+                continue
             if dist_type == 'telecaller':
-                Lead.objects.filter(pk=lead.pk).update(
-                    telecaller=user, status='assigned', telecaller_assigned_at=now,
+                Lead.objects.filter(pk__in=pks).update(
+                    telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
                 )
             else:
-                Lead.objects.filter(pk=lead.pk).update(stm=user, stm_assigned_at=now)
-            assignments[user.name] = assignments.get(user.name, 0) + 1
+                Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+            assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
 
-        log = DistributionLog.objects.create(
+        distributed = sum(a['count'] for a in assignments)
+        DistributionLog.objects.create(
             dist_type=dist_type,
             triggered_by=request.user,
-            leads_distributed=len(unassigned),
-            details={'assignments': [{'name': k, 'count': v} for k, v in assignments.items()]},
+            leads_distributed=distributed,
+            details={'assignments': assignments},
         )
-        return Response({'distributed': len(unassigned), 'assignments': assignments})
+        return Response({'distributed': distributed, 'assignments': {a['name']: a['count'] for a in assignments}})
 
 
 class DistributionLogView(APIView):
@@ -520,12 +695,12 @@ class DistributionLogView(APIView):
     def get(self, request):
         logs = DistributionLog.objects.select_related('triggered_by').all()[:30]
         data = [{
-            'id':                log.id,
-            'dist_type':         log.dist_type,
-            'leads_distributed': log.leads_distributed,
-            'triggered_by':      log.triggered_by.name if log.triggered_by else 'System',
-            'details':           log.details,
-            'created_at':        log.created_at,
+            'id':                  log.id,
+            'dist_type':           log.dist_type,
+            'leads_distributed':   log.leads_distributed,
+            'triggered_by_name':   log.triggered_by.name if log.triggered_by else 'System',
+            'details':             log.details,
+            'created_at':          log.created_at,
         } for log in logs]
         return Response(data)
 
