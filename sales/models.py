@@ -317,6 +317,18 @@ class DistributionLog(models.Model):
         ordering = ['-created_at']
 
 
+class MetaFormMapping(models.Model):
+    """Maps a Meta Lead Ads form_id to a specific project."""
+    form_id = models.CharField(max_length=100, unique=True)
+    form_name = models.CharField(max_length=200, blank=True)
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='meta_form_mappings')
+    total_leads = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.form_name or self.form_id} → {self.project.name}'
+
+
 class MetaWebhookConfig(models.Model):
     """Singleton config for Meta Lead Ads webhook integration."""
     verify_token = models.CharField(max_length=200)

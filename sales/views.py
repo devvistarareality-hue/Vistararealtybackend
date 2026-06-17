@@ -12,7 +12,7 @@ from accounts.models import User
 from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
-    SalesTeamMember, MetaWebhookConfig,
+    SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -915,23 +915,30 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
     return None
 
 
-def _create_lead_from_meta(field_data, config, campaign_name='', ad_name=''):
+def _create_lead_from_meta(field_data, config, campaign_name='', ad_name='', form_id=''):
     """Parse Meta field_data list and create a Lead."""
     fields = {f['name']: f['values'][0] for f in field_data if f.get('values')}
-    name  = fields.get('full_name') or fields.get('name') or fields.get('first_name', '') + ' ' + fields.get('last_name', '')
-    phone = fields.get('phone_number') or fields.get('phone') or ''
+    name  = fields.get('full_name') or fields.get('name') or (fields.get('first_name', '') + ' ' + fields.get('last_name', '')).strip()
+    phone = (fields.get('phone_number') or fields.get('phone') or '').strip()
     email = fields.get('email', '')
-    name  = name.strip()
-    phone = phone.strip()
     if not name and not phone:
         return None
+
+    # Resolve project: form mapping takes priority over default
+    project = config.default_project
+    if form_id:
+        mapping = MetaFormMapping.objects.filter(form_id=form_id).select_related('project').first()
+        if mapping:
+            project = mapping.project
+            MetaFormMapping.objects.filter(pk=mapping.pk).update(total_leads=mapping.total_leads + 1)
+
     source, _ = LeadSource.objects.get_or_create(name='meta', defaults={'is_active': True})
     lead = Lead.objects.create(
         name=name or 'Meta Lead',
         phone=phone,
         email=email,
         source=source,
-        project=config.default_project,
+        project=project,
         meta_campaign_name=campaign_name,
         meta_ad_name=ad_name,
         status='new',
@@ -973,10 +980,11 @@ class MetaWebhookView(APIView):
                     leadgen_id   = val.get('leadgen_id')
                     campaign     = val.get('campaign_name', '')
                     ad           = val.get('ad_name', '')
+                    form_id      = val.get('form_id', '')
                     if leadgen_id:
                         meta_data = _fetch_meta_lead_data(leadgen_id, config.page_access_token)
                         if meta_data and meta_data.get('field_data'):
-                            _create_lead_from_meta(meta_data['field_data'], config, campaign, ad)
+                            _create_lead_from_meta(meta_data['field_data'], config, campaign, ad, form_id)
         return Response({'ok': True})
 
 
@@ -1023,3 +1031,43 @@ class MetaWebhookConfigView(APIView):
             config.save(update_fields=['page_access_token', 'default_project_id', 'is_active'])
             return Response({'ok': True, 'is_active': config.is_active})
         return Response({'detail': 'Unknown action'}, status=400)
+
+
+class MetaFormMappingView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        mappings = MetaFormMapping.objects.select_related('project').order_by('-created_at')
+        return Response([{
+            'id':          m.id,
+            'form_id':     m.form_id,
+            'form_name':   m.form_name,
+            'project_id':  m.project_id,
+            'project_name':m.project.name,
+            'total_leads': m.total_leads,
+        } for m in mappings])
+
+    def post(self, request):
+        form_id   = request.data.get('form_id', '').strip()
+        form_name = request.data.get('form_name', '').strip()
+        project_id = request.data.get('project_id')
+        if not form_id or not project_id:
+            return Response({'detail': 'form_id and project_id are required.'}, status=400)
+        try:
+            project = Project.objects.get(pk=project_id)
+        except Project.DoesNotExist:
+            return Response({'detail': 'Project not found.'}, status=404)
+        mapping, created = MetaFormMapping.objects.update_or_create(
+            form_id=form_id,
+            defaults={'form_name': form_name, 'project': project},
+        )
+        return Response({
+            'id': mapping.id, 'form_id': mapping.form_id,
+            'form_name': mapping.form_name, 'project_id': mapping.project_id,
+            'project_name': mapping.project.name, 'total_leads': mapping.total_leads,
+        }, status=201 if created else 200)
+
+    def delete(self, request):
+        mid = request.data.get('id')
+        MetaFormMapping.objects.filter(pk=mid).delete()
+        return Response({'ok': True})
