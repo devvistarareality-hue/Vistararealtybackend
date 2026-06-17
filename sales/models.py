@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 from accounts.models import User
 
 
@@ -202,3 +203,33 @@ class Closure(models.Model):
 
     class Meta:
         ordering = ['-closure_date']
+
+
+CRM_ROLES = [
+    ('telecaller', 'Telecaller'),
+    ('stm', 'STM (Sales)'),
+    ('manager', 'Manager'),
+]
+
+
+class SalesTeamMember(models.Model):
+    """Links an ERP user to a CRM role for the Sales module."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='sales_profile')
+    crm_role = models.CharField(max_length=20, choices=CRM_ROLES, default='telecaller')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.user.name} ({self.crm_role})'
+
+
+class DistributionLog(models.Model):
+    DIST_TYPE = [('telecaller', 'Telecaller'), ('stm', 'STM')]
+    dist_type = models.CharField(max_length=20, choices=DIST_TYPE)
+    triggered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    leads_distributed = models.IntegerField(default=0)
+    details = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
