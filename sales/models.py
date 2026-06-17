@@ -315,3 +315,20 @@ class DistributionLog(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class MetaWebhookConfig(models.Model):
+    """Singleton config for Meta Lead Ads webhook integration."""
+    verify_token = models.CharField(max_length=200)
+    page_access_token = models.CharField(max_length=600, blank=True)
+    default_project = models.ForeignKey(
+        Project, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    is_active = models.BooleanField(default=False)
+    total_leads_received = models.IntegerField(default=0)
+    last_lead_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'MetaWebhookConfig (active={self.is_active})'

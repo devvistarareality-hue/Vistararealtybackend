@@ -1,15 +1,18 @@
+import secrets
+import requests as http_requests
 from django.db.models import Q, Count
 from django.utils import timezone
+from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from accounts.models import User
 from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
-    SalesTeamMember,
+    SalesTeamMember, MetaWebhookConfig,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -894,3 +897,126 @@ class ReportsView(APIView):
             'closures':    ClosureSerializer(f_close.result(), many=True).data,
             'summary':     f_summ.result(),
         })
+
+
+# ──────────────────────────────────────────────
+#  Meta Lead Ads Webhook
+# ──────────────────────────────────────────────
+
+def _fetch_meta_lead_data(leadgen_id, page_access_token):
+    """Call Meta Graph API to get lead field data."""
+    try:
+        url = f'https://graph.facebook.com/v19.0/{leadgen_id}'
+        r = http_requests.get(url, params={'access_token': page_access_token}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _create_lead_from_meta(field_data, config, campaign_name='', ad_name=''):
+    """Parse Meta field_data list and create a Lead."""
+    fields = {f['name']: f['values'][0] for f in field_data if f.get('values')}
+    name  = fields.get('full_name') or fields.get('name') or fields.get('first_name', '') + ' ' + fields.get('last_name', '')
+    phone = fields.get('phone_number') or fields.get('phone') or ''
+    email = fields.get('email', '')
+    name  = name.strip()
+    phone = phone.strip()
+    if not name and not phone:
+        return None
+    source, _ = LeadSource.objects.get_or_create(name='meta', defaults={'is_active': True})
+    lead = Lead.objects.create(
+        name=name or 'Meta Lead',
+        phone=phone,
+        email=email,
+        source=source,
+        project=config.default_project,
+        meta_campaign_name=campaign_name,
+        meta_ad_name=ad_name,
+        status='new',
+    )
+    MetaWebhookConfig.objects.filter(pk=config.pk).update(
+        total_leads_received=config.total_leads_received + 1,
+        last_lead_at=timezone.now(),
+        is_active=True,
+    )
+    return lead
+
+
+class MetaWebhookView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        """Meta webhook verification challenge."""
+        mode      = request.GET.get('hub.mode')
+        token     = request.GET.get('hub.verify_token')
+        challenge = request.GET.get('hub.challenge')
+        config = MetaWebhookConfig.objects.first()
+        if mode == 'subscribe' and config and token == config.verify_token:
+            return HttpResponse(challenge, content_type='text/plain')
+        return HttpResponse(status=403)
+
+    def post(self, request):
+        """Receive lead notification from Meta."""
+        data = request.data
+        if data.get('object') != 'page':
+            return Response({'ok': True})
+        config = MetaWebhookConfig.objects.filter(page_access_token__gt='').first()
+        if not config:
+            return Response({'ok': True})
+        for entry in data.get('entry', []):
+            for change in entry.get('changes', []):
+                if change.get('field') == 'leadgen':
+                    val          = change.get('value', {})
+                    leadgen_id   = val.get('leadgen_id')
+                    campaign     = val.get('campaign_name', '')
+                    ad           = val.get('ad_name', '')
+                    if leadgen_id:
+                        meta_data = _fetch_meta_lead_data(leadgen_id, config.page_access_token)
+                        if meta_data and meta_data.get('field_data'):
+                            _create_lead_from_meta(meta_data['field_data'], config, campaign, ad)
+        return Response({'ok': True})
+
+
+class MetaWebhookConfigView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _ensure_config(self):
+        config = MetaWebhookConfig.objects.first()
+        if not config:
+            config = MetaWebhookConfig.objects.create(
+                verify_token=secrets.token_urlsafe(32),
+            )
+        return config
+
+    def get(self, request):
+        config = self._ensure_config()
+        projects = list(Project.objects.filter(is_active=True).values('id', 'name'))
+        return Response({
+            'verify_token':         config.verify_token,
+            'page_access_token':    config.page_access_token,
+            'default_project_id':   config.default_project_id,
+            'is_active':            config.is_active,
+            'total_leads_received': config.total_leads_received,
+            'last_lead_at':         config.last_lead_at,
+            'projects':             projects,
+        })
+
+    def post(self, request):
+        config = self._ensure_config()
+        action = request.data.get('action')
+        if action == 'regenerate_token':
+            config.verify_token = secrets.token_urlsafe(32)
+            config.save(update_fields=['verify_token'])
+            return Response({'verify_token': config.verify_token})
+        if action == 'save':
+            pat = request.data.get('page_access_token', '').strip()
+            pid = request.data.get('default_project_id')
+            config.page_access_token = pat
+            config.default_project_id = pid if pid else None
+            config.is_active = bool(pat)
+            config.save(update_fields=['page_access_token', 'default_project_id', 'is_active'])
+            return Response({'ok': True, 'is_active': config.is_active})
+        return Response({'detail': 'Unknown action'}, status=400)
