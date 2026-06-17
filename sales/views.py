@@ -342,6 +342,30 @@ class TelecallerListView(APIView):
         return Response(data)
 
 
+class CompanyUsersSlimView(APIView):
+    """Lightweight user list for Sales CRM — only fields the UI needs, no heavy JSONField serialization."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        users = (
+            User.objects
+            .filter(company=request.user.company, is_active=True)
+            .exclude(role='Admin')
+            .only('id', 'name', 'user_code', 'designation', 'role', 'phone', 'email')
+            .order_by('name')
+        )
+        data = [{
+            'id':          u.id,
+            'name':        u.name,
+            'user_code':   u.user_code,
+            'designation': u.designation,
+            'role':        u.role,
+            'phone':       u.phone,
+            'email':       u.email,
+        } for u in users]
+        return Response(data)
+
+
 # ── Sales Team Members ──────────────────────────────────────────────────────
 from .models import SalesTeamMember, DistributionLog
 

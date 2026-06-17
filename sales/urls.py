@@ -16,6 +16,7 @@ urlpatterns = [
     path('site-visits/<int:pk>/',      views.SiteVisitDetailView.as_view()),
     path('closures/',                  views.ClosureListView.as_view()),
     path('users/telecallers/',         views.TelecallerListView.as_view()),
+    path('users/slim/',                views.CompanyUsersSlimView.as_view()),
     path('team/',                      views.SalesTeamView.as_view()),
     path('team/<int:pk>/',             views.SalesTeamMemberDetailView.as_view()),
     path('distribute/',                views.DistributeView.as_view()),
