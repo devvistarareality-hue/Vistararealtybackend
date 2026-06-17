@@ -21,7 +21,7 @@ class CompanyAdminSerializer(serializers.ModelSerializer):
 class CompanyCodeUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Company
-        fields = ['code', 'name']
+        fields = ['code', 'name', 'is_active']
 
     def validate_code(self, value):
         value = value.upper().strip()

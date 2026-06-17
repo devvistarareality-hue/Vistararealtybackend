@@ -113,3 +113,16 @@ class CompanyDetailView(APIView):
             serializer.save()
             return Response(CompanyAdminSerializer(company).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        if not is_platform_admin(request.user):
+            return Response(
+                {'detail': 'Only platform admins can delete companies.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            company = Company.objects.get(pk=pk)
+        except Company.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        company.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
