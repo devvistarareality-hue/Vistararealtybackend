@@ -29,8 +29,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     department   = models.CharField(max_length=100, blank=True)
     designation  = models.CharField(max_length=100, blank=True)
     avatar_url      = models.URLField(blank=True)
-    modules         = models.JSONField(default=list, blank=True)
-    manager_modules = models.JSONField(default=list, blank=True)
+    modules            = models.JSONField(default=list, blank=True)
+    manager_modules    = models.JSONField(default=list, blank=True)
+    reporting_manager  = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subordinates'
+    )
     is_active    = models.BooleanField(default=True)
     is_staff     = models.BooleanField(default=False)
     date_joined  = models.DateTimeField(auto_now_add=True)
