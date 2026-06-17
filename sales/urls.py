@@ -25,4 +25,6 @@ urlpatterns = [
     path('availability/',              views.AvailabilityView.as_view()),
     path('dist-weight/',               views.DistributionWeightView.as_view()),
     path('reports/',                   views.ReportsView.as_view()),
+    path('plots/',                     views.PlotListView.as_view()),
+    path('plots/<int:pk>/',            views.PlotDetailView.as_view()),
 ]

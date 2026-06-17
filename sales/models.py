@@ -70,11 +70,44 @@ class Project(models.Model):
     location = models.CharField(max_length=200, blank=True)
     project_type = models.CharField(max_length=50, default='residential')
     is_active = models.BooleanField(default=True)
+    tagline = models.CharField(max_length=300, blank=True)
+    rera = models.CharField(max_length=100, blank=True)
+    total_area = models.CharField(max_length=100, blank=True)
+    total_plots = models.PositiveIntegerField(default=0)
+    price_range = models.CharField(max_length=100, blank=True)
+    possession = models.CharField(max_length=100, blank=True)
+    cover_image_url = models.CharField(max_length=500, blank=True)
+    master_plan_url = models.CharField(max_length=500, blank=True)
+    site_map_image_url = models.CharField(max_length=500, blank=True)
+    site_map_zones = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.name
+
+
+class Plot(models.Model):
+    AVAILABLE = 'available'
+    HOLD = 'hold'
+    SOLD = 'sold'
+    STATUS_CHOICES = [(AVAILABLE, 'Available'), (HOLD, 'Hold'), (SOLD, 'Sold')]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='plots')
+    number = models.CharField(max_length=50)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=AVAILABLE)
+    size = models.CharField(max_length=100, blank=True)
+    cluster_type = models.CharField(max_length=100, blank=True)
+    facing = models.CharField(max_length=50, blank=True)
+    price = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        unique_together = ['project', 'number']
+        ordering = ['number']
+
+    def __str__(self):
+        return f"{self.project.name} – Plot {self.number}"
 
 
 class Lead(models.Model):

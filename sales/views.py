@@ -7,13 +7,13 @@ from rest_framework.permissions import IsAuthenticated
 
 from accounts.models import User
 from .models import (
-    Lead, LeadSource, Project, FollowUp, SiteVisit, Closure, LeadStatusHistory,
+    Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
-    LeadSourceSerializer, ProjectSerializer,
+    LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer,
 )
@@ -206,11 +206,21 @@ class BulkDeleteLeadsView(APIView):
         return Response({'deleted': deleted})
 
 
+def _sync_plots(project):
+    existing_count = project.plots.count()
+    target = project.total_plots or 0
+    if target > existing_count:
+        Plot.objects.bulk_create([
+            Plot(project=project, number=i)
+            for i in range(existing_count + 1, target + 1)
+        ])
+
+
 class ProjectListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        projects = Project.objects.annotate(lead_count=Count('leads'))
+        projects = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots')
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         return Response(ProjectSerializer(projects, many=True).data)
@@ -222,11 +232,20 @@ class ProjectListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
+        _sync_plots(project)
+        project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
 
 
 class ProjectDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        try:
+            project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=pk)
+        except Project.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ProjectSerializer(project).data)
 
     def patch(self, request, pk):
         if not is_admin_or_manager(request.user):
@@ -238,7 +257,10 @@ class ProjectDetailView(APIView):
         ser = ProjectSerializer(project, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(ProjectSerializer(ser.save()).data)
+        project = ser.save()
+        _sync_plots(project)
+        project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
+        return Response(ProjectSerializer(project).data)
 
     def delete(self, request, pk):
         if not is_admin_or_manager(request.user):
@@ -249,6 +271,33 @@ class ProjectDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         project.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PlotListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        project_id = request.query_params.get('project')
+        if not project_id:
+            return Response({'detail': 'project query param required.'}, status=status.HTTP_400_BAD_REQUEST)
+        plots = Plot.objects.filter(project_id=project_id)
+        return Response(PlotSerializer(plots, many=True).data)
+
+
+class PlotDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            plot = Plot.objects.get(pk=pk)
+        except Plot.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        ser = PlotSerializer(plot, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PlotSerializer(ser.save()).data)
 
 
 class LeadSourceListView(APIView):

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import LeadSource, Project, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory
+from .models import LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory
 
 
 class LeadSourceSerializer(serializers.ModelSerializer):
@@ -10,10 +10,32 @@ class LeadSourceSerializer(serializers.ModelSerializer):
 
 class ProjectSerializer(serializers.ModelSerializer):
     lead_count = serializers.IntegerField(read_only=True, default=0)
+    plot_counts = serializers.SerializerMethodField()
 
     class Meta:
         model = Project
-        fields = ['id', 'name', 'description', 'location', 'project_type', 'is_active', 'lead_count', 'created_at', 'updated_at']
+        fields = [
+            'id', 'name', 'description', 'location', 'project_type', 'is_active',
+            'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
+            'cover_image_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
+            'lead_count', 'plot_counts', 'created_at', 'updated_at',
+        ]
+
+    def get_plot_counts(self, obj):
+        plots = obj.plots.all()
+        return {
+            'total':     plots.count(),
+            'available': plots.filter(status='available').count(),
+            'hold':      plots.filter(status='hold').count(),
+            'sold':      plots.filter(status='sold').count(),
+        }
+
+
+class PlotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Plot
+        fields = ['id', 'project', 'number', 'status', 'size', 'cluster_type', 'facing', 'price', 'notes']
+        read_only_fields = ['id', 'project']
 
 
 class LeadUserSerializer(serializers.Serializer):
