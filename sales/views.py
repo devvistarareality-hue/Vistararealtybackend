@@ -67,7 +67,7 @@ class LeadListView(APIView):
         qs = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
-            'meta_campaign_name', 'meta_ad_name',
+            'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
         )
 
         # Filters
@@ -915,7 +915,7 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
     return None
 
 
-def _create_lead_from_meta(field_data, config, campaign_name='', ad_name='', form_id=''):
+def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', ad_name='', form_id=''):
     """Parse Meta field_data list and create a Lead."""
     fields = {f['name']: f['values'][0] for f in field_data if f.get('values') and f.get('name')}
     name  = fields.get('full_name') or fields.get('name') or (fields.get('first_name', '') + ' ' + fields.get('last_name', '')).strip()
@@ -940,6 +940,7 @@ def _create_lead_from_meta(field_data, config, campaign_name='', ad_name='', for
         source=source,
         project=project,
         meta_campaign_name=campaign_name[:200] if campaign_name else '',
+        meta_adset_name=adset_name[:200] if adset_name else '',
         meta_ad_name=ad_name[:200] if ad_name else '',
         status='new',
     )
@@ -980,12 +981,13 @@ class MetaWebhookView(APIView):
                         val        = change.get('value', {})
                         leadgen_id = val.get('leadgen_id')
                         campaign   = val.get('campaign_name', '') or ''
+                        adset      = val.get('adset_name', '') or val.get('adgroup_name', '') or ''
                         ad         = val.get('ad_name', '') or ''
                         form_id    = str(val.get('form_id', '') or '')
                         if leadgen_id:
                             meta_data = _fetch_meta_lead_data(leadgen_id, config.page_access_token)
                             if meta_data and meta_data.get('field_data'):
-                                _create_lead_from_meta(meta_data['field_data'], config, campaign, ad, form_id)
+                                _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
         except Exception:
             pass
         return Response({'ok': True})

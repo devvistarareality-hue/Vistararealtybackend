@@ -79,7 +79,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         fields = [
             'name', 'phone', 'alt_phone', 'email',
             'project', 'source',
-            'meta_campaign_name', 'meta_ad_name',
+            'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status',
         ]
 
