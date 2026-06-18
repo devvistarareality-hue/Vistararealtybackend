@@ -903,10 +903,13 @@ class ReportsView(APIView):
 # ──────────────────────────────────────────────
 
 def _fetch_meta_lead_data(leadgen_id, page_access_token):
-    """Call Meta Graph API to get lead field data."""
+    """Call Meta Graph API to get lead field data plus campaign/ad attribution."""
     try:
         url = f'https://graph.facebook.com/v19.0/{leadgen_id}'
-        r = http_requests.get(url, params={'access_token': page_access_token}, timeout=10)
+        r = http_requests.get(url, params={
+            'access_token': page_access_token,
+            'fields': 'field_data,campaign_name,campaign_id,ad_name,ad_id,adgroup_id',
+        }, timeout=10)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -986,6 +989,9 @@ class MetaWebhookView(APIView):
                         if leadgen_id:
                             meta_data = _fetch_meta_lead_data(leadgen_id, config.page_access_token)
                             if meta_data and meta_data.get('field_data'):
+                                # Graph API values are more reliable than webhook payload
+                                campaign = meta_data.get('campaign_name') or campaign
+                                ad       = meta_data.get('ad_name') or ad
                                 _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
         except Exception:
             pass
