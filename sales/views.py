@@ -67,7 +67,6 @@ class LeadListView(APIView):
         qs = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
-            'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
         )
 
         # Filters
