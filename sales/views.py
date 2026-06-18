@@ -157,31 +157,49 @@ class LeadDetailView(APIView):
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        old_status = lead.status
-        old_tc_status = lead.telecaller_status
-        old_stm_status = lead.stm_status
+        old_status       = lead.status
+        old_tc_status    = lead.telecaller_status
+        old_stm_status   = lead.stm_status
+        old_tc_id        = lead.telecaller_id
+        old_stm_id       = lead.stm_id
+        old_tc_name      = lead.telecaller.name if lead.telecaller else ''
+        old_stm_name     = lead.stm.name        if lead.stm        else ''
 
         ser = LeadUpdateSerializer(lead, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
 
-        # Log status changes
+        history_entries = []
         if old_status != lead.status:
-            LeadStatusHistory.objects.create(
+            history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
                 field_changed='status', old_value=old_status, new_value=lead.status,
-            )
+            ))
         if old_tc_status != lead.telecaller_status:
-            LeadStatusHistory.objects.create(
+            history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
                 field_changed='telecaller_status', old_value=old_tc_status, new_value=lead.telecaller_status,
-            )
+            ))
         if old_stm_status != lead.stm_status:
-            LeadStatusHistory.objects.create(
+            history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
                 field_changed='stm_status', old_value=old_stm_status, new_value=lead.stm_status,
-            )
+            ))
+        if old_tc_id != lead.telecaller_id:
+            new_tc_name = lead.telecaller.name if lead.telecaller else ''
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='telecaller', old_value=old_tc_name, new_value=new_tc_name,
+            ))
+        if old_stm_id != lead.stm_id:
+            new_stm_name = lead.stm.name if lead.stm else ''
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='stm', old_value=old_stm_name, new_value=new_stm_name,
+            ))
+        if history_entries:
+            LeadStatusHistory.objects.bulk_create(history_entries)
 
         return Response(LeadDetailSerializer(lead).data)
 
