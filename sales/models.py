@@ -120,7 +120,8 @@ class Lead(models.Model):
 
     # Meta Ads attribution
     meta_campaign_name = models.CharField(max_length=200, blank=True)
-    meta_ad_name = models.CharField(max_length=200, blank=True)
+    meta_adset_name    = models.CharField(max_length=200, blank=True)
+    meta_ad_name       = models.CharField(max_length=200, blank=True)
 
     # Overall status
     status = models.CharField(max_length=30, choices=LEAD_STATUS, default='new')
