@@ -53,7 +53,9 @@ class LoginView(APIView):
             return Response({'detail': 'Invalid company code.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
-            user = User.objects.get(company=company, user_code=user_code, is_active=True)
+            user = User.objects.select_related('company', 'reporting_manager').get(
+                company=company, user_code=user_code, is_active=True
+            )
         except User.DoesNotExist:
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -68,7 +70,8 @@ class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(UserSerializer(request.user).data)
+        user = User.objects.select_related('company', 'reporting_manager').get(pk=request.user.pk)
+        return Response(UserSerializer(user).data)
 
 
 class UserListCreateView(APIView):

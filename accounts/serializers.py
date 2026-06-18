@@ -17,8 +17,15 @@ class LoginSerializer(serializers.Serializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
-    company_code = serializers.CharField(source='company.code', read_only=True)
-    company_name = serializers.CharField(source='company.name', read_only=True)
+    company_code      = serializers.SerializerMethodField()
+    company_name      = serializers.SerializerMethodField()
+    reporting_manager = ReportingManagerSerializer(read_only=True)
+
+    def get_company_code(self, obj):
+        return obj.company.code if obj.company else ''
+
+    def get_company_name(self, obj):
+        return obj.company.name if obj.company else ''
 
     class Meta:
         model  = User
@@ -27,6 +34,7 @@ class UserSerializer(serializers.ModelSerializer):
             'role', 'department', 'designation', 'avatar_url',
             'modules', 'manager_modules',
             'company_code', 'company_name', 'is_staff',
+            'reporting_manager',
         ]
 
 
