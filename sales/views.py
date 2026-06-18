@@ -1005,8 +1005,54 @@ class MetaWebhookConfigView(APIView):
             config.save(update_fields=['verify_token'])
         return config
 
+    def _fetch_pages_and_forms(self, pat):
+        """Fetch all subscribed pages and their lead forms from Meta API."""
+        pages_data, subscribed = [], []
+        try:
+            pages_r = http_requests.get(
+                'https://graph.facebook.com/v19.0/me/accounts',
+                params={'access_token': pat, 'limit': 50}, timeout=10
+            )
+            if pages_r.status_code == 200:
+                for page in pages_r.json().get('data', []):
+                    page_token = page.get('access_token')
+                    page_id    = page.get('id')
+                    page_name  = page.get('name', page_id)
+                    if not page_token or not page_id:
+                        continue
+                    subscribed.append(page_name)
+                    forms = []
+                    try:
+                        forms_r = http_requests.get(
+                            f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
+                            params={'access_token': page_token, 'fields': 'id,name', 'limit': 50},
+                            timeout=10
+                        )
+                        if forms_r.status_code == 200:
+                            forms = [{'id': f['id'], 'name': f.get('name', '')}
+                                     for f in forms_r.json().get('data', [])]
+                    except Exception:
+                        pass
+                    pages_data.append({'page_id': page_id, 'page_name': page_name, 'forms': forms})
+        except Exception:
+            pass
+        return subscribed, pages_data
+
     def get(self, request):
         config = self._ensure_config()
+        # Auto-refresh pages/forms if stale (older than 2 hours) or never fetched
+        if config.page_access_token:
+            stale = (
+                not config.pages_refreshed_at or
+                (timezone.now() - config.pages_refreshed_at).total_seconds() > 7200
+            )
+            if stale:
+                subscribed, pages_data = self._fetch_pages_and_forms(config.page_access_token)
+                if pages_data:
+                    config.subscribed_pages  = subscribed
+                    config.pages_data        = pages_data
+                    config.pages_refreshed_at = timezone.now()
+                    config.save(update_fields=['subscribed_pages', 'pages_data', 'pages_refreshed_at'])
         projects = list(Project.objects.filter(is_active=True).values('id', 'name'))
         return Response({
             'verify_token':         config.verify_token,
@@ -1083,25 +1129,13 @@ class MetaWebhookConfigView(APIView):
                                 subscribed.append(page_name)
                             else:
                                 failed.append(page_name)
-                            # Fetch forms for this page using its page access token
-                            forms = []
-                            try:
-                                forms_r = http_requests.get(
-                                    f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
-                                    params={'access_token': page_token, 'fields': 'id,name', 'limit': 50},
-                                    timeout=10
-                                )
-                                if forms_r.status_code == 200:
-                                    forms = [{'id': f['id'], 'name': f.get('name', '')}
-                                             for f in forms_r.json().get('data', [])]
-                            except Exception:
-                                pass
-                            pages_data.append({'page_id': page_id, 'page_name': page_name, 'forms': forms})
                 except Exception:
                     pass
-            config.subscribed_pages = subscribed
-            config.pages_data = pages_data
-            config.save(update_fields=['subscribed_pages', 'pages_data'])
+            _, pages_data = self._fetch_pages_and_forms(pat) if pat else ([], [])
+            config.subscribed_pages   = subscribed
+            config.pages_data         = pages_data
+            config.pages_refreshed_at = timezone.now()
+            config.save(update_fields=['subscribed_pages', 'pages_data', 'pages_refreshed_at'])
             return Response({'ok': True, 'is_active': config.is_active,
                              'subscribed_pages': subscribed, 'failed_pages': failed,
                              'pages_data': pages_data})
