@@ -369,6 +369,57 @@ class LeaveActionView(APIView):
         return Response({'message': f'Leave {new_status} successfully.', 'status': new_status})
 
 
+class ModifyAttendanceView(APIView):
+    """
+    PATCH /api/attendance/modify/
+    Allows a user to correct their own attendance record for any past date.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        date_str     = request.data.get('date')
+        in_time_str  = request.data.get('in_time')
+        out_time_str = request.data.get('out_time')
+
+        if not date_str:
+            return Response({'detail': 'date is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'detail': 'Invalid date format. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if target_date > date.today():
+            return Response({'detail': 'Cannot modify future attendance.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            in_t  = datetime.strptime(in_time_str,  '%H:%M').time() if in_time_str  else None
+            out_t = datetime.strptime(out_time_str, '%H:%M').time() if out_time_str else None
+        except ValueError:
+            return Response({'detail': 'Invalid time format. Use HH:MM.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        record, _ = AttendanceRecord.objects.get_or_create(user=request.user, date=target_date)
+
+        if in_t  is not None: record.in_time  = in_t
+        if out_t is not None: record.out_time = out_t
+
+        if record.in_time and record.out_time:
+            in_dt          = datetime.combine(target_date, record.in_time)
+            out_dt         = datetime.combine(target_date, record.out_time)
+            total_seconds  = max((out_dt - in_dt).total_seconds(), 0)
+            record.total_hours = round(total_seconds / 3600, 2)
+
+        record.save()
+
+        return Response({
+            'message':     'Attendance modified successfully.',
+            'date':        target_date.strftime('%Y-%m-%d'),
+            'in_time':     record.in_time.strftime('%H:%M')  if record.in_time  else None,
+            'out_time':    record.out_time.strftime('%H:%M') if record.out_time else None,
+            'total_hours': _fmt_hours(record.total_hours),
+        })
+
+
 class ApplyLeaveView(APIView):
     """
     POST /api/attendance/apply-leave/
