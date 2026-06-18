@@ -340,6 +340,7 @@ class MetaWebhookConfig(models.Model):
     total_leads_received = models.IntegerField(default=0)
     last_lead_at = models.DateTimeField(null=True, blank=True)
     subscribed_pages = models.JSONField(default=list, blank=True)
+    pages_data = models.JSONField(default=list, blank=True)  # [{page_id, page_name, forms:[{id,name}]}]
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -1016,6 +1016,7 @@ class MetaWebhookConfigView(APIView):
             'total_leads_received': config.total_leads_received,
             'last_lead_at':         config.last_lead_at,
             'subscribed_pages':     config.subscribed_pages or [],
+            'pages_data':           config.pages_data or [],
             'projects':             projects,
         })
 
@@ -1034,7 +1035,7 @@ class MetaWebhookConfigView(APIView):
             config.is_active = bool(pat)
             config.save(update_fields=['page_access_token', 'default_project_id', 'is_active'])
             # Subscribe app to all accessible pages' leadgen events
-            subscribed, failed = [], []
+            subscribed, failed, pages_data = [], [], []
             if pat:
                 try:
                     pages_r = http_requests.get(
@@ -1045,6 +1046,7 @@ class MetaWebhookConfigView(APIView):
                         for page in pages_r.json().get('data', []):
                             page_token = page.get('access_token')
                             page_id    = page.get('id')
+                            page_name  = page.get('name', page_id)
                             if not page_token or not page_id:
                                 continue
                             sub_r = http_requests.post(
@@ -1053,15 +1055,31 @@ class MetaWebhookConfigView(APIView):
                                         'subscribed_fields': 'leadgen'}, timeout=10
                             )
                             if sub_r.status_code == 200 and sub_r.json().get('success'):
-                                subscribed.append(page.get('name', page_id))
+                                subscribed.append(page_name)
                             else:
-                                failed.append(page.get('name', page_id))
+                                failed.append(page_name)
+                            # Fetch forms for this page
+                            forms = []
+                            try:
+                                forms_r = http_requests.get(
+                                    f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
+                                    params={'access_token': page_token, 'fields': 'id,name', 'limit': 50},
+                                    timeout=10
+                                )
+                                if forms_r.status_code == 200:
+                                    forms = [{'id': f['id'], 'name': f.get('name', '')}
+                                             for f in forms_r.json().get('data', [])]
+                            except Exception:
+                                pass
+                            pages_data.append({'page_id': page_id, 'page_name': page_name, 'forms': forms})
                 except Exception:
                     pass
             config.subscribed_pages = subscribed
-            config.save(update_fields=['subscribed_pages'])
+            config.pages_data = pages_data
+            config.save(update_fields=['subscribed_pages', 'pages_data'])
             return Response({'ok': True, 'is_active': config.is_active,
-                             'subscribed_pages': subscribed, 'failed_pages': failed})
+                             'subscribed_pages': subscribed, 'failed_pages': failed,
+                             'pages_data': pages_data})
         return Response({'detail': 'Unknown action'}, status=400)
 
 
