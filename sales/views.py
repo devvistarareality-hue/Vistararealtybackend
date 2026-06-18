@@ -420,8 +420,8 @@ class ClosureListView(APIView):
 
 
 class TelecallerListView(APIView):
-    """Users for lead assignment.
-    Priority: SalesTeamMember.crm_role → designation icontains → all Sales users."""
+    """Users for lead assignment. Filters by User.designation icontains crm_role param.
+    Falls back to all Sales-module users if no designation match found."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -430,20 +430,9 @@ class TelecallerListView(APIView):
         sales_qs = base_qs.filter(modules__contains=['Sales']).order_by('name')
 
         if crm_role in ('telecaller', 'stm'):
-            # 1st priority: explicit SalesTeamMember role
-            team_ids = SalesTeamMember.objects.filter(
-                user__company=request.user.company,
-                crm_role=crm_role,
-                is_active=True,
-            ).values_list('user_id', flat=True)
-            if team_ids:
-                users = base_qs.filter(id__in=team_ids).order_by('name')
-            else:
-                # 2nd priority: designation text match
-                users = base_qs.filter(designation__icontains=crm_role).order_by('name')
-                if not users.exists():
-                    # 3rd priority: all Sales users
-                    users = sales_qs
+            users = base_qs.filter(designation__icontains=crm_role).order_by('name')
+            if not users.exists():
+                users = sales_qs
         else:
             users = sales_qs
 
