@@ -418,19 +418,30 @@ class ClosureListView(APIView):
 
 
 class TelecallerListView(APIView):
-    """Users for lead assignment. Filtered by designation when crm_role param is given."""
+    """Users for lead assignment. Filtered by designation when crm_role param is given.
+    Falls back to all Sales-module users if no designation match found."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         crm_role = request.query_params.get('crm_role')
-        base_qs = User.objects.filter(company=request.user.company, is_active=True)
+        base_qs  = User.objects.filter(company=request.user.company, is_active=True)
+        sales_qs = base_qs.filter(modules__contains=['Sales']).order_by('name')
+
         if crm_role == 'telecaller':
             users = base_qs.filter(designation__icontains='telecaller').order_by('name')
+            if not users.exists():
+                users = sales_qs
         elif crm_role == 'stm':
             users = base_qs.filter(designation__icontains='stm').order_by('name')
+            if not users.exists():
+                users = sales_qs
         else:
-            users = base_qs.filter(modules__contains=['Sales']).order_by('name')
-        data = [{'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role} for u in users]
+            users = sales_qs
+
+        data = [
+            {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation}
+            for u in users
+        ]
         return Response(data)
 
 
