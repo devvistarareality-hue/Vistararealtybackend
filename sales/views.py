@@ -94,6 +94,8 @@ class LeadListView(APIView):
             qs = qs.filter(created_at__date__gte=request.query_params['date_from'])
         if request.query_params.get('date_to'):
             qs = qs.filter(created_at__date__lte=request.query_params['date_to'])
+        if request.query_params.get('campaign'):
+            qs = qs.filter(meta_campaign_name__icontains=request.query_params['campaign'])
 
         total = qs.count()
         page = int(request.query_params.get('page', 1))
