@@ -903,12 +903,12 @@ class ReportsView(APIView):
 # ──────────────────────────────────────────────
 
 def _fetch_meta_lead_data(leadgen_id, page_access_token):
-    """Call Meta Graph API to get lead field data plus campaign/ad attribution."""
+    """Call Meta Graph API to get lead field data and ad name."""
     try:
         url = f'https://graph.facebook.com/v19.0/{leadgen_id}'
         r = http_requests.get(url, params={
             'access_token': page_access_token,
-            'fields': 'field_data,campaign_name,campaign_id,ad_name,ad_id,adgroup_id',
+            'fields': 'field_data,ad_id,ad_name',
         }, timeout=10)
         if r.status_code == 200:
             return r.json()
