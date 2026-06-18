@@ -903,7 +903,7 @@ class ReportsView(APIView):
 # ──────────────────────────────────────────────
 
 def _fetch_meta_lead_data(leadgen_id, page_access_token):
-    """Call Meta Graph API to get lead field data and ad name."""
+    """Call Meta Graph API to get lead field data and ad info."""
     try:
         url = f'https://graph.facebook.com/v19.0/{leadgen_id}'
         r = http_requests.get(url, params={
@@ -915,6 +915,26 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
     except Exception:
         pass
     return None
+
+
+def _fetch_ad_campaign_info(ad_id, page_access_token):
+    """Given an ad_id, fetch campaign name and adset name from Meta Graph API."""
+    if not ad_id:
+        return '', ''
+    try:
+        url = f'https://graph.facebook.com/v19.0/{ad_id}'
+        r = http_requests.get(url, params={
+            'access_token': page_access_token,
+            'fields': 'campaign{name},adset{name}',
+        }, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            campaign_name = (data.get('campaign') or {}).get('name', '')
+            adset_name    = (data.get('adset') or {}).get('name', '')
+            return campaign_name, adset_name
+    except Exception:
+        pass
+    return '', ''
 
 
 def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', ad_name='', form_id=''):
@@ -989,9 +1009,10 @@ class MetaWebhookView(APIView):
                         if leadgen_id:
                             meta_data = _fetch_meta_lead_data(leadgen_id, config.page_access_token)
                             if meta_data and meta_data.get('field_data'):
-                                # Graph API values are more reliable than webhook payload
-                                campaign = meta_data.get('campaign_name') or campaign
-                                ad       = meta_data.get('ad_name') or ad
+                                ad    = meta_data.get('ad_name') or ad
+                                ad_id = meta_data.get('ad_id')
+                                if ad_id and not campaign and not adset:
+                                    campaign, adset = _fetch_ad_campaign_info(ad_id, config.page_access_token)
                                 _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
         except Exception:
             pass
