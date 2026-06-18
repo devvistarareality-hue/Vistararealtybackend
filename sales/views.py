@@ -1035,9 +1035,10 @@ class MetaWebhookConfigView(APIView):
                 for page in pages_r.json().get('data', []):
                     page_id = page.get('id')
                     page_name = page.get('name', page_id)
+                    page_tok = page.get('access_token')
                     forms_r = http_requests.get(
                         f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
-                        params={'access_token': pat, 'fields': 'id,name', 'limit': 50}, timeout=10)
+                        params={'access_token': page_tok, 'fields': 'id,name', 'limit': 50}, timeout=10)
                     debug['pages'].append({
                         'page': page_name,
                         'page_id': page_id,
@@ -1082,12 +1083,12 @@ class MetaWebhookConfigView(APIView):
                                 subscribed.append(page_name)
                             else:
                                 failed.append(page_name)
-                            # Fetch forms for this page using system user token (PAT)
+                            # Fetch forms for this page using its page access token
                             forms = []
                             try:
                                 forms_r = http_requests.get(
                                     f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
-                                    params={'access_token': pat, 'fields': 'id,name', 'limit': 50},
+                                    params={'access_token': page_token, 'fields': 'id,name', 'limit': 50},
                                     timeout=10
                                 )
                                 if forms_r.status_code == 200:
