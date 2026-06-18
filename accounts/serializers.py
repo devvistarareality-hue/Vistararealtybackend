@@ -108,7 +108,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
         modules = validated_data.get('modules', [])
         role    = validated_data.get('role', '')
-        validated_data['department'] = modules[0] if modules and role != 'Admin' else ''
+        validated_data['department'] = ' + '.join(modules) if modules and role != 'Admin' else ''
 
         user = User(company=company, user_code=user_code, **validated_data)
         if reporting_manager_id:
@@ -148,6 +148,6 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             instance.set_password(password)
         # Keep department in sync with the first module; admins have no department
         modules = instance.modules or []
-        instance.department = modules[0] if modules and instance.role != 'Admin' else ''
+        instance.department = ' + '.join(modules) if modules and instance.role != 'Admin' else ''
         instance.save()
         return instance
