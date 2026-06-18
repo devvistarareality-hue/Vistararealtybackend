@@ -1029,7 +1029,33 @@ class MetaWebhookConfigView(APIView):
             config.default_project_id = pid if pid else None
             config.is_active = bool(pat)
             config.save(update_fields=['page_access_token', 'default_project_id', 'is_active'])
-            return Response({'ok': True, 'is_active': config.is_active})
+            # Subscribe app to all accessible pages' leadgen events
+            subscribed, failed = [], []
+            if pat:
+                try:
+                    pages_r = http_requests.get(
+                        'https://graph.facebook.com/v19.0/me/accounts',
+                        params={'access_token': pat, 'limit': 50}, timeout=10
+                    )
+                    if pages_r.status_code == 200:
+                        for page in pages_r.json().get('data', []):
+                            page_token = page.get('access_token')
+                            page_id    = page.get('id')
+                            if not page_token or not page_id:
+                                continue
+                            sub_r = http_requests.post(
+                                f'https://graph.facebook.com/v19.0/{page_id}/subscribed_apps',
+                                params={'access_token': page_token,
+                                        'subscribed_fields': 'leadgen'}, timeout=10
+                            )
+                            if sub_r.status_code == 200 and sub_r.json().get('success'):
+                                subscribed.append(page.get('name', page_id))
+                            else:
+                                failed.append(page.get('name', page_id))
+                except Exception:
+                    pass
+            return Response({'ok': True, 'is_active': config.is_active,
+                             'subscribed_pages': subscribed, 'failed_pages': failed})
         return Response({'detail': 'Unknown action'}, status=400)
 
 
