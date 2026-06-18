@@ -74,7 +74,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
 
     def create(self, validated_data):
         from companies.models import Company as CompanyModel
@@ -106,6 +106,10 @@ class UserCreateSerializer(serializers.ModelSerializer):
             count    += 1
             user_code = f"{prefix}{str(count + 1).zfill(3)}"
 
+        modules = validated_data.get('modules', [])
+        role    = validated_data.get('role', '')
+        validated_data['department'] = modules[0] if modules and role != 'Admin' else ''
+
         user = User(company=company, user_code=user_code, **validated_data)
         if reporting_manager_id:
             user.reporting_manager_id = reporting_manager_id
@@ -120,7 +124,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'is_active', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'is_active', 'reporting_manager_id']
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
@@ -142,5 +146,8 @@ class UserUpdateSerializer(serializers.ModelSerializer):
             setattr(instance, attr, value)
         if password:
             instance.set_password(password)
+        # Keep department in sync with the first module; admins have no department
+        modules = instance.modules or []
+        instance.department = modules[0] if modules and instance.role != 'Admin' else ''
         instance.save()
         return instance
