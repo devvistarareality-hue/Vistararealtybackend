@@ -1023,6 +1023,30 @@ class MetaWebhookConfigView(APIView):
     def post(self, request):
         config = self._ensure_config()
         action = request.data.get('action')
+        if action == 'debug_forms':
+            config = self._ensure_config()
+            pat = config.page_access_token
+            debug = {}
+            pages_r = http_requests.get('https://graph.facebook.com/v19.0/me/accounts',
+                                        params={'access_token': pat, 'limit': 50}, timeout=10)
+            debug['accounts_status'] = pages_r.status_code
+            debug['pages'] = []
+            if pages_r.status_code == 200:
+                for page in pages_r.json().get('data', []):
+                    page_id = page.get('id')
+                    page_name = page.get('name', page_id)
+                    forms_r = http_requests.get(
+                        f'https://graph.facebook.com/v19.0/{page_id}/leadgen_forms',
+                        params={'access_token': pat, 'fields': 'id,name', 'limit': 50}, timeout=10)
+                    debug['pages'].append({
+                        'page': page_name,
+                        'page_id': page_id,
+                        'forms_status': forms_r.status_code,
+                        'forms_response': forms_r.json(),
+                    })
+            else:
+                debug['accounts_error'] = pages_r.json()
+            return Response(debug)
         if action == 'regenerate_token':
             config.verify_token = secrets.token_urlsafe(32)
             config.save(update_fields=['verify_token'])
