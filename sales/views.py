@@ -1015,6 +1015,7 @@ class MetaWebhookConfigView(APIView):
             'is_active':            config.is_active,
             'total_leads_received': config.total_leads_received,
             'last_lead_at':         config.last_lead_at,
+            'subscribed_pages':     config.subscribed_pages or [],
             'projects':             projects,
         })
 
@@ -1057,6 +1058,8 @@ class MetaWebhookConfigView(APIView):
                                 failed.append(page.get('name', page_id))
                 except Exception:
                     pass
+            config.subscribed_pages = subscribed
+            config.save(update_fields=['subscribed_pages'])
             return Response({'ok': True, 'is_active': config.is_active,
                              'subscribed_pages': subscribed, 'failed_pages': failed})
         return Response({'detail': 'Unknown action'}, status=400)

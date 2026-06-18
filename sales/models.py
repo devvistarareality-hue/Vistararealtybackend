@@ -339,6 +339,7 @@ class MetaWebhookConfig(models.Model):
     is_active = models.BooleanField(default=False)
     total_leads_received = models.IntegerField(default=0)
     last_lead_at = models.DateTimeField(null=True, blank=True)
+    subscribed_pages = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
