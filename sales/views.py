@@ -116,13 +116,11 @@ class LeadListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Duplicate check
+        # Duplicate check — match last 10 digits regardless of +91 prefix
         phone = ser.validated_data['phone']
         project = ser.validated_data.get('project')
         clean = ''.join(c for c in phone if c.isdigit())[-10:]
-        dup_qs = Lead.objects.filter(phone__endswith=clean)
-        if project:
-            dup_qs = dup_qs.filter(project=project)
+        dup_qs = Lead.objects.filter(phone__regex=r'(^|\D)' + clean + r'$') if clean else Lead.objects.none()
         existing = dup_qs.first()
 
         lead = ser.save(
@@ -339,6 +337,31 @@ class LeadSourceListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         return Response(LeadSourceSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
+
+
+class BackfillDuplicatesView(APIView):
+    """One-time endpoint to mark existing duplicate leads based on last 10 phone digits."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        from collections import defaultdict
+        leads = Lead.objects.only('id', 'phone', 'created_at').order_by('created_at')
+        phone_map = defaultdict(list)
+        for l in leads:
+            clean = ''.join(c for c in (l.phone or '') if c.isdigit())[-10:]
+            if clean:
+                phone_map[clean].append(l.id)
+        marked = 0
+        for clean, ids in phone_map.items():
+            if len(ids) > 1:
+                original_id = ids[0]
+                dup_ids = ids[1:]
+                Lead.objects.filter(id__in=dup_ids).update(is_duplicate=True, duplicate_of_id=original_id)
+                Lead.objects.filter(id=original_id).update(duplicate_count=len(dup_ids))
+                marked += len(dup_ids)
+        return Response({'marked_duplicates': marked})
 
 
 class LeadSourceDetailView(APIView):
@@ -1003,6 +1026,14 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
             MetaFormMapping.objects.filter(pk=mapping.pk).update(total_leads=mapping.total_leads + 1)
 
     source, _ = LeadSource.objects.get_or_create(name='meta', defaults={'is_active': True})
+
+    # Duplicate detection using last 10 digits
+    clean = ''.join(c for c in phone if c.isdigit())[-10:]
+    existing = Lead.objects.filter(phone__regex=r'(^|\D)' + clean + r'$').first() if clean else None
+    if existing:
+        existing.duplicate_count = (existing.duplicate_count or 0) + 1
+        existing.save(update_fields=['duplicate_count'])
+
     lead = Lead.objects.create(
         name=(name or 'Meta Lead')[:200],
         phone=phone,
@@ -1013,6 +1044,8 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         meta_adset_name=adset_name[:200] if adset_name else '',
         meta_ad_name=ad_name[:200] if ad_name else '',
         status='new',
+        is_duplicate=bool(existing),
+        duplicate_of=existing if existing else None,
     )
     MetaWebhookConfig.objects.filter(pk=config.pk).update(
         total_leads_received=config.total_leads_received + 1,

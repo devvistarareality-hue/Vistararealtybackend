@@ -9,6 +9,7 @@ urlpatterns = [
     path('leads/<int:pk>/',            views.LeadDetailView.as_view()),
     path('projects/',                  views.ProjectListView.as_view()),
     path('projects/<int:pk>/',         views.ProjectDetailView.as_view()),
+    path('leads/backfill-duplicates/', views.BackfillDuplicatesView.as_view()),
     path('sources/',                   views.LeadSourceListView.as_view()),
     path('sources/<int:pk>/',          views.LeadSourceDetailView.as_view()),
     path('follow-ups/',                views.FollowUpListView.as_view()),

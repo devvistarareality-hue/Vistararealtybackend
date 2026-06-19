@@ -58,7 +58,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
             'stm', 'stm_name', 'stm_status',
-            'is_duplicate', 'created_at', 'updated_at',
+            'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]
 
 
