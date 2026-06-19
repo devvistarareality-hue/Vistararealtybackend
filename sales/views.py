@@ -283,7 +283,7 @@ class ProjectDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
-        _sync_plots(project)
+        # _sync_plots intentionally NOT called on PATCH — plots are managed via /plots/bulk/
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data)
 
