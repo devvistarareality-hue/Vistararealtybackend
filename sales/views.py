@@ -479,7 +479,7 @@ class SalesTeamView(APIView):
         users = User.objects.filter(
             company=company,
             is_active=True,
-            department__iexact='sales',
+            department__icontains='sales',
         ).order_by('name')
 
         data = [{
