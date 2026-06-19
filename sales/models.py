@@ -56,15 +56,26 @@ CLOSURE_STATUS = [
 
 
 class LeadSource(models.Model):
-    name = models.CharField(max_length=100, unique=True)
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='lead_sources', null=True, blank=True,
+    )
+    name = models.CharField(max_length=100)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('company', 'name')
 
     def __str__(self):
         return self.name
 
 
 class Project(models.Model):
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='projects', null=True, blank=True,
+    )
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     location = models.CharField(max_length=200, blank=True)
@@ -124,6 +135,10 @@ class Plot(models.Model):
 
 
 class Lead(models.Model):
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='leads', null=True, blank=True,
+    )
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=20)
     alt_phone = models.CharField(max_length=20, blank=True)
@@ -172,6 +187,7 @@ class Lead(models.Model):
     class Meta:
         ordering = ['-created_at']
         indexes = [
+            models.Index(fields=['company']),
             models.Index(fields=['status']),
             models.Index(fields=['telecaller_status']),
             models.Index(fields=['stm_status']),
@@ -321,6 +337,10 @@ class UserDistributionWeight(models.Model):
 
 class DistributionLog(models.Model):
     DIST_TYPE = [('telecaller', 'Telecaller'), ('stm', 'STM')]
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='distribution_logs', null=True, blank=True,
+    )
     dist_type = models.CharField(max_length=20, choices=DIST_TYPE)
     triggered_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     leads_distributed = models.IntegerField(default=0)
@@ -333,6 +353,10 @@ class DistributionLog(models.Model):
 
 class MetaFormMapping(models.Model):
     """Maps a Meta Lead Ads form_id to a specific project."""
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='meta_form_mappings', null=True, blank=True,
+    )
     form_id = models.CharField(max_length=100, unique=True)
     form_name = models.CharField(max_length=200, blank=True)
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='meta_form_mappings')
@@ -344,7 +368,11 @@ class MetaFormMapping(models.Model):
 
 
 class MetaWebhookConfig(models.Model):
-    """Singleton config for Meta Lead Ads webhook integration."""
+    """Per-company config for Meta Lead Ads webhook integration."""
+    company = models.OneToOneField(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='meta_webhook_config', null=True, blank=True,
+    )
     verify_token = models.CharField(max_length=200)
     page_access_token = models.CharField(max_length=600, blank=True)
     default_project = models.ForeignKey(
