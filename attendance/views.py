@@ -11,8 +11,57 @@ from rest_framework.pagination import PageNumberPagination
 
 from rest_framework import status
 
+from accounts.permissions import is_platform_admin
 from .models import AttendanceRecord, LeaveBalance, LeaveApplication, LeaveTransaction
 from .serializers import AttendanceRecordSerializer, LeaveApplicationSerializer, LeaveTransactionSerializer
+
+
+def _can_approve(approver, application):
+    """Who may approve/reject a leave application:
+       - a platform admin (VRL admin / staff), anywhere;
+       - a company Admin, for anyone in their own company;
+       - the applicant's reporting manager.
+    A user can never approve their own request (unless they are an admin)."""
+    applicant = application.user
+    if is_platform_admin(approver):
+        return True
+    if approver.company_id != applicant.company_id:
+        return False
+    if getattr(approver, 'role', '') == 'Admin':
+        return True
+    return bool(applicant.reporting_manager_id) and applicant.reporting_manager_id == approver.id
+
+
+def _format_leave_application(app):
+    """Shared serialization for a leave application card (works for self + team views)."""
+    u = app.user
+    session = app.get_day_type_display()
+    if app.day_type == 'half_day' and app.session:
+        session = app.get_session_display()
+    return {
+        'id':          app.id,
+        'name':        u.name,
+        'avatar':      u.avatar_url,
+        'user_code':   u.user_code,
+        'session':     session,
+        'date':        app.from_date.strftime('%a, %b %-d'),
+        'from_date':   app.from_date.strftime('%-d %b %Y'),
+        'to_date':     app.to_date.strftime('%-d %b %Y') if app.to_date else None,
+        'leave_type':  app.get_leave_type_display(),
+        'work_type':   app.get_work_type_display(),
+        'day_type':    app.get_day_type_display(),
+        'description': app.description,
+        'applied_on':  app.applied_on.strftime('%-d %b %Y'),
+        'status':      app.get_status_display(),
+    }
+
+
+def _group_by_month(applications):
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for app in applications:
+        groups[app.from_date.strftime('%B %Y')].append(_format_leave_application(app))
+    return [{'month': month, 'data': items} for month, items in groups.items()]
 
 
 class OptionalPageNumberPagination(PageNumberPagination):
@@ -276,47 +325,49 @@ class LeaveHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        applications = LeaveApplication.objects.filter(user=request.user).order_by('-from_date', '-id')
+        applications = (
+            LeaveApplication.objects.filter(user=request.user)
+            .select_related('user').order_by('-from_date', '-id')
+        )
         if _pagination_requested(request):
             paginator = OptionalPageNumberPagination()
             page = paginator.paginate_queryset(applications, request)
-            sections = self._group_applications(page, request.user)
-            response = paginator.get_paginated_response(sections)
+            response = paginator.get_paginated_response(_group_by_month(page))
             response.data['sections'] = response.data.pop('results')
             return response
 
-        sections = self._group_applications(applications, request.user)
-        return Response(sections)
+        return Response(_group_by_month(applications))
 
-    def _group_applications(self, applications, user):
-        from collections import defaultdict
 
-        groups = defaultdict(list)
-        for app in applications:
-            month_key = app.from_date.strftime('%B %Y')
-            session = app.get_day_type_display()
-            if app.day_type == 'half_day' and app.session:
-                session = app.get_session_display()
-            groups[month_key].append({
-                'id':          app.id,
-                'name':        user.name,
-                'avatar':      user.avatar_url,
-                'session':     session,
-                'date':        app.from_date.strftime('%a, %b %-d'),
-                'from_date':   app.from_date.strftime('%-d %b %Y'),
-                'to_date':     app.to_date.strftime('%-d %b %Y') if app.to_date else None,
-                'leave_type':  app.get_leave_type_display(),
-                'work_type':   app.get_work_type_display(),
-                'day_type':    app.get_day_type_display(),
-                'description': app.description,
-                'applied_on':  app.applied_on.strftime('%-d %b %Y'),
-                'status':      app.get_status_display(),
-            })
+class TeamLeaveRequestsView(APIView):
+    """Leave requests an approver may action: their direct reports (reporting
+    manager), their whole company (company Admin), or everything (platform admin).
+    Optional ?status=pending filter.
+    """
+    permission_classes = [IsAuthenticated]
 
-        return [
-            {'month': month, 'data': items}
-            for month, items in groups.items()
-        ]
+    def get(self, request):
+        user = request.user
+        qs = LeaveApplication.objects.select_related('user').order_by('-applied_on', '-id')
+        if is_platform_admin(user):
+            pass
+        elif getattr(user, 'role', '') == 'Admin':
+            qs = qs.filter(user__company=user.company)
+        else:
+            qs = qs.filter(user__reporting_manager=user)
+
+        status_param = request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+
+        if _pagination_requested(request):
+            paginator = OptionalPageNumberPagination()
+            page = paginator.paginate_queryset(qs, request)
+            response = paginator.get_paginated_response(_group_by_month(page))
+            response.data['sections'] = response.data.pop('results')
+            return response
+
+        return Response(_group_by_month(qs))
 
 
 class LeaveActionView(APIView):
@@ -328,9 +379,17 @@ class LeaveActionView(APIView):
 
     def patch(self, request, pk):
         try:
-            application = LeaveApplication.objects.get(pk=pk)
+            application = LeaveApplication.objects.select_related(
+                'user', 'user__reporting_manager'
+            ).get(pk=pk)
         except LeaveApplication.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _can_approve(request.user, application):
+            return Response(
+                {'detail': 'You are not authorized to action this leave request.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         new_status = request.data.get('status')
         if new_status not in ['approved', 'rejected']:
@@ -350,7 +409,11 @@ class LeaveActionView(APIView):
                     leave_days = Decimal('1')
 
             lb, _ = LeaveBalance.objects.get_or_create(user=application.user)
-            new_balance = lb.available - leave_days
+            # Coerce to Decimal — a freshly created balance carries the float
+            # default (0.0), which can't be combined with Decimal leave_days.
+            available = Decimal(str(lb.available))
+            utilised  = Decimal(str(lb.utilised))
+            new_balance = available - leave_days
 
             LeaveTransaction.objects.create(
                 user=application.user,
@@ -363,7 +426,7 @@ class LeaveActionView(APIView):
             )
 
             lb.available = new_balance
-            lb.utilised  = lb.utilised + leave_days
+            lb.utilised  = utilised + leave_days
             lb.save()
 
         return Response({'message': f'Leave {new_status} successfully.', 'status': new_status})
