@@ -476,24 +476,21 @@ class SalesTeamView(APIView):
 
     def get(self, request):
         company = request.user.company
-        members = SalesTeamMember.objects.select_related('user').filter(
-            user__company=company,
+        users = User.objects.filter(
+            company=company,
             is_active=True,
-        )
-        crm_role = request.query_params.get('crm_role')
-        if crm_role:
-            members = members.filter(crm_role=crm_role)
+            department__iexact='sales',
+        ).order_by('name')
+
         data = [{
-            'id':          m.id,
-            'user_id':     m.user.id,
-            'name':        m.user.name,
-            'email':       m.user.email,
-            'phone':       m.user.phone,
-            'user_code':   m.user.user_code,
-            'designation': m.user.designation,
-            'crm_role':    m.crm_role,
-            'is_active':   m.is_active,
-        } for m in members]
+            'id':          u.id,
+            'name':        u.name,
+            'email':       u.email,
+            'phone':       u.phone,
+            'user_code':   u.user_code,
+            'designation': u.designation,
+            'role':        u.role,
+        } for u in users]
         return Response(data)
 
     def post(self, request):
