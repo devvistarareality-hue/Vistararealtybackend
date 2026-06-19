@@ -82,10 +82,22 @@ class Project(models.Model):
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.name
+
+
+class UserProjectAssignment(models.Model):
+    user    = models.ForeignKey(User, on_delete=models.CASCADE, related_name='project_assignments')
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='user_assignments')
+
+    class Meta:
+        unique_together = ['user', 'project']
+
+    def __str__(self):
+        return f'{self.user.name} → {self.project.name}'
 
 
 class Plot(models.Model):
