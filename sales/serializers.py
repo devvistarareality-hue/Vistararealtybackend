@@ -18,7 +18,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
-            'plot_type_plans', 'lead_count', 'plot_counts', 'created_at', 'updated_at',
+            'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
     def get_plot_counts(self, obj):

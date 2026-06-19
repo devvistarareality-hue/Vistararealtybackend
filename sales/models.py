@@ -80,7 +80,6 @@ class Project(models.Model):
     master_plan_url = models.CharField(max_length=500, blank=True)
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
-    plot_type_plans = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
