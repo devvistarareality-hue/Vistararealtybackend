@@ -47,9 +47,12 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class DesignationSerializer(serializers.ModelSerializer):
+    company_code = serializers.CharField(source='company.code', read_only=True)
+    company_name = serializers.CharField(source='company.name', read_only=True)
+
     class Meta:
         model  = Designation
-        fields = ['id', 'name', 'module']
+        fields = ['id', 'name', 'module', 'company_code', 'company_name']
 
 
 class UserListSerializer(serializers.ModelSerializer):
