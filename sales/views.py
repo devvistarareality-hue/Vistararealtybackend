@@ -1296,3 +1296,18 @@ class PlotBulkCreateView(APIView):
         ]
         Plot.objects.bulk_create(plots)
         return Response({'created': len(plots)}, status=201)
+
+
+class PlotRenameTypeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        old_name   = request.data.get('old_name', '').strip()
+        new_name   = request.data.get('new_name', '').strip()
+        if not project_id or not old_name or not new_name:
+            return Response({'detail': 'project_id, old_name and new_name are required.'}, status=400)
+        updated = Plot.objects.filter(project_id=project_id, cluster_type=old_name).update(cluster_type=new_name)
+        return Response({'updated': updated})
