@@ -341,6 +341,20 @@ class LeadSourceListView(APIView):
         return Response(LeadSourceSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
 
 
+class LeadSourceDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            source = LeadSource.objects.get(pk=pk)
+        except LeadSource.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        source.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class FollowUpListView(APIView):
     permission_classes = [IsAuthenticated]
 
