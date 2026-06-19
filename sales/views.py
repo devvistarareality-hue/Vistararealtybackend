@@ -1347,6 +1347,20 @@ class PlotBulkCreateView(APIView):
         return Response({'created': len(plots)}, status=201)
 
 
+class PlotBulkDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        if not project_id:
+            return Response({'detail': 'project_id is required.'}, status=400)
+        deleted, _ = Plot.objects.filter(project_id=project_id).delete()
+        Project.objects.filter(pk=project_id).update(total_plots=0)
+        return Response({'deleted': deleted})
+
+
 class PlotRenameTypeView(APIView):
     permission_classes = [IsAuthenticated]
 
