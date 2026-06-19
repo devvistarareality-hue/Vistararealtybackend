@@ -1269,3 +1269,30 @@ class UserProjectAssignmentView(APIView):
             UserProjectAssignment(user=user, project_id=pid) for pid in project_ids
         ], ignore_conflicts=True)
         return Response({'user_id': user_id, 'project_ids': project_ids})
+
+
+# ── Bulk Plot Creation ────────────────────────────────────────────────────────
+class PlotBulkCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        plots_data = request.data.get('plots', [])
+        try:
+            project = Project.objects.get(pk=project_id)
+        except Project.DoesNotExist:
+            return Response({'detail': 'Project not found.'}, status=404)
+        plots = [
+            Plot(
+                project=project,
+                number=p.get('number', ''),
+                cluster_type=p.get('cluster_type', ''),
+                status='available',
+            )
+            for p in plots_data
+            if p.get('number')
+        ]
+        Plot.objects.bulk_create(plots)
+        return Response({'created': len(plots)}, status=201)

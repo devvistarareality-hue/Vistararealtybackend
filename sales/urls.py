@@ -26,6 +26,7 @@ urlpatterns = [
     path('dist-weight/',               views.DistributionWeightView.as_view()),
     path('reports/',                   views.ReportsView.as_view()),
     path('plots/',                     views.PlotListView.as_view()),
+    path('plots/bulk/',                views.PlotBulkCreateView.as_view()),
     path('plots/<int:pk>/',            views.PlotDetailView.as_view()),
     path('webhooks/meta/',             views.MetaWebhookView.as_view()),
     path('webhooks/meta/config/',      views.MetaWebhookConfigView.as_view()),
