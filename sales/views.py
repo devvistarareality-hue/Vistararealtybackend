@@ -13,6 +13,7 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
+    UserProjectAssignment,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -231,10 +232,12 @@ class BulkDeleteLeadsView(APIView):
 def _sync_plots(project):
     existing_count = project.plots.count()
     target = project.total_plots or 0
-    if target > existing_count:
+    # Only auto-create numbered plots if NO plots exist yet.
+    # This prevents re-triggering on PATCH (e.g. after bulk typed-plot creation).
+    if target > 0 and existing_count == 0:
         Plot.objects.bulk_create([
-            Plot(project=project, number=i)
-            for i in range(existing_count + 1, target + 1)
+            Plot(project=project, number=str(i))
+            for i in range(1, target + 1)
         ])
 
 
@@ -280,7 +283,7 @@ class ProjectDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
-        _sync_plots(project)
+        # _sync_plots intentionally NOT called on PATCH — plots are managed via /plots/bulk/
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data)
 
@@ -1239,3 +1242,74 @@ class MetaFormMappingView(APIView):
         mid = request.data.get('id')
         MetaFormMapping.objects.filter(pk=mid).delete()
         return Response({'ok': True})
+
+
+# ── User Project Assignments ──────────────────────────────────────────────────
+class UserProjectAssignmentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            return Response({'detail': 'user_id required.'}, status=400)
+        assigned = UserProjectAssignment.objects.filter(
+            user_id=user_id, user__company=request.user.company
+        ).values_list('project_id', flat=True)
+        return Response(list(assigned))
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        user_id     = request.data.get('user_id')
+        project_ids = request.data.get('project_ids', [])
+        try:
+            user = User.objects.get(pk=user_id, company=request.user.company)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=404)
+        UserProjectAssignment.objects.filter(user=user).delete()
+        UserProjectAssignment.objects.bulk_create([
+            UserProjectAssignment(user=user, project_id=pid) for pid in project_ids
+        ], ignore_conflicts=True)
+        return Response({'user_id': user_id, 'project_ids': project_ids})
+
+
+# ── Bulk Plot Creation ────────────────────────────────────────────────────────
+class PlotBulkCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        plots_data = request.data.get('plots', [])
+        try:
+            project = Project.objects.get(pk=project_id)
+        except Project.DoesNotExist:
+            return Response({'detail': 'Project not found.'}, status=404)
+        plots = [
+            Plot(
+                project=project,
+                number=p.get('number', ''),
+                cluster_type=p.get('cluster_type', ''),
+                status='available',
+            )
+            for p in plots_data
+            if p.get('number')
+        ]
+        Plot.objects.bulk_create(plots)
+        return Response({'created': len(plots)}, status=201)
+
+
+class PlotRenameTypeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        old_name   = request.data.get('old_name', '').strip()
+        new_name   = request.data.get('new_name', '').strip()
+        if not project_id or not old_name or not new_name:
+            return Response({'detail': 'project_id, old_name and new_name are required.'}, status=400)
+        updated = Plot.objects.filter(project_id=project_id, cluster_type=old_name).update(cluster_type=new_name)
+        return Response({'updated': updated})
