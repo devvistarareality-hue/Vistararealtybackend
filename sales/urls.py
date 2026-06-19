@@ -30,4 +30,5 @@ urlpatterns = [
     path('webhooks/meta/',             views.MetaWebhookView.as_view()),
     path('webhooks/meta/config/',      views.MetaWebhookConfigView.as_view()),
     path('webhooks/meta/mappings/',    views.MetaFormMappingView.as_view()),
+    path('user-projects/',             views.UserProjectAssignmentView.as_view()),
 ]

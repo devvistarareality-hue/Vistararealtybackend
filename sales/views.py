@@ -13,6 +13,7 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
+    UserProjectAssignment,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -1239,3 +1240,32 @@ class MetaFormMappingView(APIView):
         mid = request.data.get('id')
         MetaFormMapping.objects.filter(pk=mid).delete()
         return Response({'ok': True})
+
+
+# ── User Project Assignments ──────────────────────────────────────────────────
+class UserProjectAssignmentView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            return Response({'detail': 'user_id required.'}, status=400)
+        assigned = UserProjectAssignment.objects.filter(
+            user_id=user_id, user__company=request.user.company
+        ).values_list('project_id', flat=True)
+        return Response(list(assigned))
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        user_id     = request.data.get('user_id')
+        project_ids = request.data.get('project_ids', [])
+        try:
+            user = User.objects.get(pk=user_id, company=request.user.company)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=404)
+        UserProjectAssignment.objects.filter(user=user).delete()
+        UserProjectAssignment.objects.bulk_create([
+            UserProjectAssignment(user=user, project_id=pid) for pid in project_ids
+        ], ignore_conflicts=True)
+        return Response({'user_id': user_id, 'project_ids': project_ids})
