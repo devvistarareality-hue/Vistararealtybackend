@@ -232,10 +232,12 @@ class BulkDeleteLeadsView(APIView):
 def _sync_plots(project):
     existing_count = project.plots.count()
     target = project.total_plots or 0
-    if target > existing_count:
+    # Only auto-create numbered plots if NO plots exist yet.
+    # This prevents re-triggering on PATCH (e.g. after bulk typed-plot creation).
+    if target > 0 and existing_count == 0:
         Plot.objects.bulk_create([
-            Plot(project=project, number=i)
-            for i in range(existing_count + 1, target + 1)
+            Plot(project=project, number=str(i))
+            for i in range(1, target + 1)
         ])
 
 
