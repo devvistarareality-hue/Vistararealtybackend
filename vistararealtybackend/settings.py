@@ -144,3 +144,20 @@ if _cors_origins:
     CORS_ALLOW_CREDENTIALS = True
 else:
     CORS_ALLOW_ALL_ORIGINS = True
+
+# ── Error monitoring (Sentry) ─────────────────────────────────────────
+# No-op unless SENTRY_DSN is set; guarded so a missing package never breaks boot.
+_sentry_dsn = os.getenv('SENTRY_DSN', '').strip()
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            integrations=[DjangoIntegration()],
+            traces_sample_rate=float(os.getenv('SENTRY_TRACES_RATE', '0.1')),
+            send_default_pii=False,
+            environment=os.getenv('RAILWAY_ENVIRONMENT', 'production'),
+        )
+    except Exception:
+        pass

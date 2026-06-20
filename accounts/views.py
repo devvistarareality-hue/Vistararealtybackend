@@ -83,10 +83,13 @@ class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # select_related avoids an N+1: UserListSerializer reads company.code/name and
+        # the nested reporting_manager for every row.
+        base = User.objects.select_related('company', 'reporting_manager')
         if is_platform_admin(request.user):
-            users = User.objects.all().order_by('company__name', 'name')
+            users = base.order_by('company__name', 'name')
         else:
-            users = User.objects.filter(company=request.user.company).order_by('name')
+            users = base.filter(company=request.user.company).order_by('name')
         return Response(UserListSerializer(users, many=True).data)
 
     def post(self, request):

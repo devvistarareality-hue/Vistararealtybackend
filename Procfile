@@ -1,1 +1,1 @@
-web: python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn vistararealtybackend.wsgi --log-file -
+web: python manage.py migrate --noinput && python manage.py collectstatic --noinput && gunicorn vistararealtybackend.wsgi --bind 0.0.0.0:${PORT:-8000} --workers ${WEB_CONCURRENCY:-3} --threads 4 --worker-class gthread --timeout 60 --max-requests 1000 --max-requests-jitter 100 --log-file -
