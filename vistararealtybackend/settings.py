@@ -72,10 +72,16 @@ if os.getenv('DATABASE_URL'):
     DATABASES = {
         'default': dj_database_url.parse(
             os.getenv('DATABASE_URL'),
-            conn_max_age=60,
+            # 0 by default: with Neon's pooled (PgBouncer) endpoint, app-side persistent
+            # connections hold pooler slots — especially now with multiple gunicorn
+            # workers × threads. Override via DB_CONN_MAX_AGE if on a session pooler.
+            conn_max_age=int(os.getenv('DB_CONN_MAX_AGE', '0')),
             ssl_require=not DEBUG,
         )
     }
+    # PgBouncer transaction mode doesn't keep server-side cursors across pooled
+    # connections; disable them so .iterator()/large queries stay correct.
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
 else:
     _db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
     _is_postgres = _db_engine == 'django.db.backends.postgresql'
