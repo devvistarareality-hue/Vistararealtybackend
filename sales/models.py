@@ -9,6 +9,11 @@ LEAD_STATUS = [
     ('contacted', 'Contacted'),
     ('not_reachable', 'Not Reachable'),
     ('warm_transferred', 'Warm Transferred'),
+    # STM-driven stages (Overall mirrors the STM status once with sales)
+    ('hot', 'Hot'),
+    ('warm', 'Warm'),
+    ('cold', 'Cold'),
+    ('not_interested', 'Not Interested'),
     ('sv_scheduled', 'SV Scheduled'),
     ('sv_done', 'SV Done'),
     ('closed', 'Closed'),
@@ -16,7 +21,6 @@ LEAD_STATUS = [
 ]
 
 TC_STATUS = [
-    ('hot', 'Hot'),
     ('warm', 'Warm'),
     ('cold', 'Cold'),
     ('not_interested', 'Not Interested'),
