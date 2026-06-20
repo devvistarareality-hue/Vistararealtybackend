@@ -569,7 +569,14 @@ class BackfillDuplicatesView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=403)
         from collections import defaultdict
-        leads = scope_to_company(Lead.objects.all(), request.user).only('id', 'phone', 'created_at').order_by('created_at')
+        # Stream rows with .iterator() so the whole Lead table is never materialised in
+        # memory at once (prevents OOM on large tenants). Only id/phone are accumulated.
+        leads = (
+            scope_to_company(Lead.objects.all(), request.user)
+            .only('id', 'phone', 'created_at')
+            .order_by('created_at')
+            .iterator(chunk_size=2000)
+        )
         phone_map = defaultdict(list)
         for l in leads:
             clean = ''.join(c for c in (l.phone or '') if c.isdigit())[-10:]

@@ -200,6 +200,13 @@ class Lead(models.Model):
             models.Index(fields=['stm']),
             models.Index(fields=['created_at']),
             models.Index(fields=['is_duplicate']),
+            # Composite indexes matching the actual list-query shape
+            # (WHERE <owner> [AND <status>] ORDER BY created_at) so the paginated
+            # leads list can satisfy filter+sort+LIMIT from one index instead of
+            # filtering on one single-column index and then sorting the whole set.
+            models.Index(fields=['company', '-created_at'], name='lead_company_created_idx'),
+            models.Index(fields=['telecaller', 'telecaller_status', '-created_at'], name='lead_tc_status_created_idx'),
+            models.Index(fields=['stm', 'stm_status', '-created_at'], name='lead_stm_status_created_idx'),
         ]
 
     def __str__(self):
@@ -236,6 +243,12 @@ class FollowUp(models.Model):
 
     class Meta:
         ordering = ['scheduled_at']
+        indexes = [
+            # Follow-Ups page / lead-detail query: WHERE assigned_to=X [AND lead=Y]
+            # ORDER BY scheduled_at.
+            models.Index(fields=['assigned_to', 'scheduled_at'], name='followup_assignee_sched_idx'),
+            models.Index(fields=['lead'], name='followup_lead_idx'),
+        ]
 
 
 class SiteVisit(models.Model):

@@ -22,13 +22,15 @@ class ProjectSerializer(serializers.ModelSerializer):
         ]
 
     def get_plot_counts(self, obj):
-        plots = obj.plots.all()
-        return {
-            'total':     plots.count(),
-            'available': plots.filter(status='available').count(),
-            'hold':      plots.filter(status='hold').count(),
-            'sold':      plots.filter(status='sold').count(),
-        }
+        # Count over the prefetched plots in Python — the views prefetch_related('plots'),
+        # so this uses the cached rows (0 queries) instead of firing 4 COUNT queries per
+        # project (the previous .count()/.filter().count() chain caused an N+1).
+        counts = {'total': 0, 'available': 0, 'hold': 0, 'sold': 0}
+        for p in obj.plots.all():
+            counts['total'] += 1
+            if p.status in counts:
+                counts[p.status] += 1
+        return counts
 
 
 class PlotSerializer(serializers.ModelSerializer):
