@@ -9,11 +9,42 @@
       "Bash(echo \"exit: $?\")",
       "Bash(env)",
       "Bash(neonctl projects *)",
-      "Bash(neonctl branches *)"
+      "Bash(neonctl branches *)",
+      "Bash(ls vistaraweb/src/app)",
+      "Bash(ls Vistarafront/src/screens)",
+      "Bash(npx eslint *)",
+      "Bash(git -C \"/Users/princemac/Desktop/Vistara Reality ERP/Vistararealtybackend\" diff --stat)",
+      "Bash(git -C \"/Users/princemac/Desktop/Vistara Reality ERP/vistaraweb\" diff --stat)",
+      "Bash(git -C \"/Users/princemac/Desktop/Vistara Reality ERP/Vistarafront\" diff --stat)",
+      "Bash(node -e \"const p=require\\('./vistaraweb/package.json'\\);console.log\\(JSON.stringify\\(p.scripts\\)\\)\")",
+      "Bash(node -e \"const p=require\\('./Vistarafront/package.json'\\);console.log\\(JSON.stringify\\(p.scripts\\)\\)\")",
+      "Bash(npm run *)",
+      "Bash(echo \"BUILD EXIT: $?\")",
+      "Bash(node -e ' *)",
+      "Bash(echo \"APP PARSE EXIT: $?\")",
+      "Bash(cd \"/Users/princemac/Desktop/Vistara Reality ERP/vistaraweb\" && tail -25 /tmp/web_build.log | grep -iE \"compiled|error|warn|follow-ups|leads|route|✓|fail\" | head -30)",
+      "Read(//private/tmp/**)",
+      "Bash(ls babel.config.js babel.config.json .babelrc)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\('babel:',JSON.stringify\\(p.babel||'none'\\)\\)\")",
+      "Bash(ls babel.config.* metro.config.* app.json)",
+      "Bash(ls node_modules/@babel/parser)",
+      "Bash(echo \"APP SYNTAX EXIT: $?\")",
+      "Bash(npx --no-install playwright --version)",
+      "Read(//Applications/Google Chrome.app/**)",
+      "Bash(sed -i '' \"s/chromium.launch\\({ headless: true }\\)/chromium.launch\\({ headless: true, channel: 'chrome' }\\)/\" /tmp/verify.cjs)",
+      "Bash(node /tmp/verify.cjs)",
+      "Read(//tmp/**)",
+      "Bash(python3 -)",
+      "Bash(pkill -f \"manage.py runserver 127.0.0.1:8000\")",
+      "Bash(pkill -f \"next start -p 3007\")",
+      "Bash(pkill -f \"next-server\")",
+      "Bash(rm -f verify_tmp.sqlite3 /tmp/seed_verify.py /tmp/verify.cjs)",
+      "Bash(ls verify_tmp.sqlite3)"
     ],
     "additionalDirectories": [
       "/Users/princemac/Desktop/Vistara Reality ERP/vistaraweb/src/app/sales",
-      "/Users/princemac/Desktop/Vistara Reality ERP/Vistarafront/src/screens/Splashscreen"
+      "/Users/princemac/Desktop/Vistara Reality ERP/Vistarafront/src/screens/Splashscreen",
+      "/Users/princemac/Desktop/Vistara Reality ERP/Vistarafront/src/navigation"
     ]
   }
 }
