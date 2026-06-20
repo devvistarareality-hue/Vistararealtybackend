@@ -117,6 +117,10 @@ class LeadListView(APIView):
         if request.query_params.get('campaign'):
             qs = qs.filter(meta_campaign_name__icontains=request.query_params['campaign'])
 
+        # Platform admin: filter by a specific company (used by admin company picker)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+
         total = qs.count()
         page = int(request.query_params.get('page', 1))
         offset = (page - 1) * PAGE_SIZE
