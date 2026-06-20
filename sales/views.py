@@ -549,8 +549,16 @@ class TelecallerListView(APIView):
 
     def get(self, request):
         crm_role = request.query_params.get('crm_role')
-        company  = _resolve_company(request)
-        base_qs  = User.objects.filter(company=company, is_active=True)
+        cid      = request.query_params.get('company_id')
+        if is_platform_admin(request.user):
+            if cid:
+                from companies.models import Company as Co
+                co = Co.objects.filter(pk=cid).first()
+                base_qs = User.objects.filter(company=co, is_active=True) if co else User.objects.none()
+            else:
+                base_qs = User.objects.filter(is_active=True)
+        else:
+            base_qs = User.objects.filter(company=request.user.company, is_active=True)
         sales_qs = base_qs.filter(modules__contains=['Sales']).order_by('name')
 
         if crm_role in ('telecaller', 'stm'):
@@ -605,12 +613,17 @@ class SalesTeamView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company = _resolve_company(request)
-        users = User.objects.filter(
-            company=company,
-            is_active=True,
-            department__icontains='sales',
-        ).order_by('name')
+        cid = request.query_params.get('company_id')
+        if is_platform_admin(request.user):
+            if cid:
+                from companies.models import Company as Co
+                company = Co.objects.filter(pk=cid).first()
+                users = User.objects.filter(company=company, is_active=True, department__icontains='sales') if company else User.objects.none()
+            else:
+                users = User.objects.filter(is_active=True, department__icontains='sales')
+        else:
+            users = User.objects.filter(company=request.user.company, is_active=True, department__icontains='sales')
+        users = users.order_by('name')
 
         data = [{
             'id':          u.id,
