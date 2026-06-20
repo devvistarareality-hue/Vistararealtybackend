@@ -296,6 +296,8 @@ class ProjectListView(APIView):
         )
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            projects = projects.filter(company_id=request.query_params['company_id'])
         return Response(ProjectSerializer(projects, many=True).data)
 
     def post(self, request):
@@ -383,6 +385,8 @@ class LeadSourceListView(APIView):
 
     def get(self, request):
         sources = scope_to_company(LeadSource.objects.filter(is_active=True), request.user)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            sources = sources.filter(company_id=request.query_params['company_id'])
         return Response(LeadSourceSerializer(sources, many=True).data)
 
     def post(self, request):
@@ -558,9 +562,15 @@ class CompanyUsersSlimView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        company_id = request.query_params.get('company_id')
+        company = (
+            __import__('companies.models', fromlist=['Company']).Company.objects.filter(pk=company_id).first()
+            if company_id and is_platform_admin(request.user)
+            else request.user.company
+        )
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True)
+            .filter(company=company, is_active=True)
             .exclude(role='Admin')
             .only('id', 'name', 'user_code', 'designation', 'role', 'phone', 'email')
             .order_by('name')
@@ -889,7 +899,10 @@ class DistributionLogView(APIView):
     def get(self, request):
         logs = scope_to_company(
             DistributionLog.objects.select_related('triggered_by'), request.user
-        )[:30]
+        )
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            logs = logs.filter(company_id=request.query_params['company_id'])
+        logs = logs[:30]
         data = [{
             'id':                  log.id,
             'dist_type':           log.dist_type,
@@ -989,6 +1002,11 @@ class ReportsView(APIView):
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
         closure_qs = scope_to_company(Closure.objects.all(), user, 'lead__company')
+        company_id = request.query_params.get('company_id')
+        if company_id and is_platform_admin(user):
+            leads_qs   = leads_qs.filter(company_id=company_id)
+            sv_qs      = sv_qs.filter(lead__company_id=company_id)
+            closure_qs = closure_qs.filter(lead__company_id=company_id)
 
         def get_campaigns():
             return list(

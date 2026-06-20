@@ -5,7 +5,7 @@ from .models import LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closur
 class LeadSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadSource
-        fields = ['id', 'name', 'is_active', 'created_at']
+        fields = ['id', 'company_id', 'name', 'is_active', 'created_at']
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -15,7 +15,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = [
-            'id', 'name', 'description', 'location', 'project_type', 'is_active',
+            'id', 'company_id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'lead_count', 'plot_counts', 'created_at', 'updated_at',
