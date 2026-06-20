@@ -10,6 +10,15 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
+
+
+def _resolve_company(request):
+    """Return the company for the request, honouring ?company_id for platform admins."""
+    cid = request.query_params.get('company_id') or request.data.get('company_id')
+    if cid and is_platform_admin(request.user):
+        Company = __import__('companies.models', fromlist=['Company']).Company
+        return Company.objects.filter(pk=cid).first() or request.user.company
+    return request.user.company
 from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
@@ -668,7 +677,7 @@ class DistributionSettingsView(APIView):
         return obj
 
     def get(self, request):
-        s = self._get_or_create(request.user.company)
+        s = self._get_or_create(_resolve_company(request))
         return Response({
             'tc_signin_time':   str(s.tc_signin_time)[:5],
             'tc_signout_time':  str(s.tc_signout_time)[:5],
@@ -679,7 +688,7 @@ class DistributionSettingsView(APIView):
     def put(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        s = self._get_or_create(request.user.company)
+        s = self._get_or_create(_resolve_company(request))
         for field in ('tc_signin_time', 'tc_signout_time', 'stm_signin_time', 'stm_signout_time'):
             if field in request.data:
                 setattr(s, field, request.data[field])
@@ -694,10 +703,11 @@ class AvailabilityView(APIView):
     def get(self, request):
         from datetime import date as date_cls
         today = request.query_params.get('date', str(date_cls.today()))
+        company = _resolve_company(request)
         desig_map = {'TELECALLER': 'telecaller', 'STM': 'stm'}
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True)
+            .filter(company=company, is_active=True)
             .exclude(role='Admin')
             .filter(designation__in=['TELECALLER', 'STM'])
             .only('id', 'name', 'designation')
@@ -706,7 +716,7 @@ class AvailabilityView(APIView):
         avail_map = {
             a.user_id: a.is_available
             for a in UserAvailability.objects.filter(
-                user__company=request.user.company, date=today
+                user__company=company, date=today
             )
         }
         data = []
@@ -727,8 +737,9 @@ class AvailabilityView(APIView):
         user_id      = request.data.get('user_id')
         is_available = request.data.get('is_available', True)
         today        = str(date_cls.today())
+        company      = _resolve_company(request)
         try:
-            user = User.objects.get(pk=user_id, company=request.user.company)
+            user = User.objects.get(pk=user_id, company=company)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=404)
         obj, _ = UserAvailability.objects.update_or_create(
@@ -743,14 +754,15 @@ class DistributionWeightView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        company = _resolve_company(request)
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True, designation__in=['TELECALLER', 'STM'])
+            .filter(company=company, is_active=True, designation__in=['TELECALLER', 'STM'])
             .only('id', 'name', 'designation')
         )
         weight_map = {
             w.user_id: w.weight
-            for w in UserDistributionWeight.objects.filter(user__company=request.user.company)
+            for w in UserDistributionWeight.objects.filter(user__company=company)
         }
         return Response([
             {'user_id': u.id, 'name': u.name, 'role': u.designation.upper(), 'weight': weight_map.get(u.id, 1)}
@@ -760,12 +772,13 @@ class DistributionWeightView(APIView):
     def patch(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
         updates = request.data.get('updates', [])  # [{user_id, weight}]
         for item in updates:
             uid = item.get('user_id')
             w   = max(1, int(item.get('weight', 1)))
             try:
-                user = User.objects.get(pk=uid, company=request.user.company)
+                user = User.objects.get(pk=uid, company=company)
                 UserDistributionWeight.objects.update_or_create(user=user, defaults={'weight': w})
             except User.DoesNotExist:
                 pass
@@ -786,9 +799,10 @@ class DistributeView(APIView):
         dist_type = request.data.get('type', 'telecaller')   # 'telecaller' | 'stm'
         desig_map = {'telecaller': 'TELECALLER', 'stm': 'STM'}
         desig     = desig_map.get(dist_type, 'TELECALLER')
+        company   = _resolve_company(request)
 
         # Check signout window (IST-aware)
-        settings = DistributionSettings.objects.filter(company=request.user.company).first()
+        settings = DistributionSettings.objects.filter(company=company).first()
         if settings:
             ist = ZoneInfo('Asia/Kolkata')
             now_ist = timezone.now().astimezone(ist)
@@ -805,7 +819,7 @@ class DistributeView(APIView):
         # Only users who are signed in today
         avail_ids = set(
             UserAvailability.objects.filter(
-                user__company=request.user.company,
+                user__company=company,
                 user__designation__iexact=desig,
                 date=today,
                 is_available=True,
@@ -827,8 +841,8 @@ class DistributeView(APIView):
             for w in UserDistributionWeight.objects.filter(user__in=members)
         }
 
-        # Get unassigned leads (scoped to this company)
-        company_leads = scope_to_company(Lead.objects.all(), request.user)
+        # Get unassigned leads (scoped to the resolved company)
+        company_leads = Lead.objects.filter(company=company)
         if dist_type == 'telecaller':
             qs = company_leads.filter(
                 telecaller__isnull=True, status='new'
@@ -916,7 +930,10 @@ class DistributionLogView(APIView):
     def delete(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        scope_to_company(DistributionLog.objects.all(), request.user).delete()
+        qs = scope_to_company(DistributionLog.objects.all(), request.user)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        qs.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1234,7 +1251,7 @@ class MetaWebhookConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _ensure_config(self, request):
-        company = request.user.company
+        company = _resolve_company(request)
         config, created = MetaWebhookConfig.objects.get_or_create(
             company=company,
             defaults={'verify_token': secrets.token_urlsafe(32)},
@@ -1388,8 +1405,9 @@ class MetaFormMappingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        mappings = scope_to_company(
-            MetaFormMapping.objects.select_related('project'), request.user
+        company = _resolve_company(request)
+        mappings = MetaFormMapping.objects.select_related('project').filter(
+            company=company
         ).order_by('-created_at')
         return Response([{
             'id':          m.id,
@@ -1406,8 +1424,9 @@ class MetaFormMappingView(APIView):
         project_id = request.data.get('project_id')
         if not form_id or not project_id:
             return Response({'detail': 'form_id and project_id are required.'}, status=400)
+        company = _resolve_company(request)
         try:
-            project = scope_to_company(Project.objects.all(), request.user).get(pk=project_id)
+            project = Project.objects.filter(company=company).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
         mapping, created = MetaFormMapping.objects.update_or_create(
@@ -1422,7 +1441,7 @@ class MetaFormMappingView(APIView):
 
     def delete(self, request):
         mid = request.data.get('id')
-        scope_to_company(MetaFormMapping.objects.filter(pk=mid), request.user).delete()
+        MetaFormMapping.objects.filter(pk=mid, company=_resolve_company(request)).delete()
         return Response({'ok': True})
 
 
