@@ -1,5 +1,7 @@
+import logging
 import secrets
 import requests as http_requests
+from django.db import transaction
 from django.db.models import Q, Count
 from django.utils import timezone
 from django.http import HttpResponse
@@ -7,6 +9,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
+
+logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
@@ -855,69 +859,71 @@ class DistributeView(APIView):
             for w in UserDistributionWeight.objects.filter(user__in=members)
         }
 
-        # Get unassigned leads (scoped to the resolved company)
-        company_leads = Lead.objects.filter(company=company)
-        if dist_type == 'telecaller':
-            qs = company_leads.filter(
-                telecaller__isnull=True, status='new'
-            ).order_by('created_at')
-        else:
-            qs = company_leads.filter(
-                status='warm_transferred', stm__isnull=True
-            ).order_by('created_at')
-
-        leads = list(qs)
-        if not leads:
-            return Response({'distributed': 0, 'message': 'No unassigned leads found.'})
-
-        # Today's existing assignment counts (for fair weighted continuation)
-        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        if dist_type == 'telecaller':
-            count_qs = Lead.objects.filter(
-                telecaller__in=members, telecaller_assigned_at__gte=today_start
-            ).values('telecaller_id').annotate(n=Count('id'))
-            counts = {row['telecaller_id']: row['n'] for row in count_qs}
-        else:
-            count_qs = Lead.objects.filter(
-                stm__in=members, stm_assigned_at__gte=today_start
-            ).values('stm_id').annotate(n=Count('id'))
-            counts = {row['stm_id']: row['n'] for row in count_qs}
-
-        for m in members:
-            counts.setdefault(m.id, 0)
-
-        # Weighted round-robin: pick member with lowest (assigned / weight) ratio
-        member_ids = [m.id for m in members]
-        id_to_member = {m.id: m for m in members}
-        user_leads: dict[int, list] = {m.id: [] for m in members}
-        now = timezone.now()
-
-        for lead in leads:
-            best = min(member_ids, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
-            user_leads[best].append(lead.pk)
-            counts[best] += 1
-
-        # Batch update
-        assignments = []
-        for uid, pks in user_leads.items():
-            if not pks:
-                continue
+        with transaction.atomic():
+            # Lock unassigned leads so concurrent distribution requests can't grab the same rows
+            company_leads = Lead.objects.filter(company=company)
             if dist_type == 'telecaller':
-                Lead.objects.filter(pk__in=pks).update(
-                    telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
-                )
+                qs = company_leads.filter(
+                    telecaller__isnull=True, status='new'
+                ).select_for_update(skip_locked=True).order_by('created_at')
             else:
-                Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
-            assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+                qs = company_leads.filter(
+                    status='warm_transferred', stm__isnull=True
+                ).select_for_update(skip_locked=True).order_by('created_at')
 
-        distributed = sum(a['count'] for a in assignments)
-        DistributionLog.objects.create(
-            company=request.user.company,
-            dist_type=dist_type,
-            triggered_by=request.user,
-            leads_distributed=distributed,
-            details={'assignments': assignments},
-        )
+            leads = list(qs)
+            if not leads:
+                return Response({'distributed': 0, 'message': 'No unassigned leads found.'})
+
+            # Today's existing assignment counts (for fair weighted continuation)
+            today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            if dist_type == 'telecaller':
+                count_qs = Lead.objects.filter(
+                    telecaller__in=members, telecaller_assigned_at__gte=today_start
+                ).values('telecaller_id').annotate(n=Count('id'))
+                counts = {row['telecaller_id']: row['n'] for row in count_qs}
+            else:
+                count_qs = Lead.objects.filter(
+                    stm__in=members, stm_assigned_at__gte=today_start
+                ).values('stm_id').annotate(n=Count('id'))
+                counts = {row['stm_id']: row['n'] for row in count_qs}
+
+            for m in members:
+                counts.setdefault(m.id, 0)
+
+            # Weighted round-robin: pick member with lowest (assigned / weight) ratio
+            member_ids = [m.id for m in members]
+            id_to_member = {m.id: m for m in members}
+            user_leads: dict[int, list] = {m.id: [] for m in members}
+            now = timezone.now()
+
+            for lead in leads:
+                best = min(member_ids, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
+                user_leads[best].append(lead.pk)
+                counts[best] += 1
+
+            # Batch update inside the same transaction
+            assignments = []
+            for uid, pks in user_leads.items():
+                if not pks:
+                    continue
+                if dist_type == 'telecaller':
+                    Lead.objects.filter(pk__in=pks).update(
+                        telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
+                    )
+                else:
+                    Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+                assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+
+            distributed = sum(a['count'] for a in assignments)
+            DistributionLog.objects.create(
+                company=request.user.company,
+                dist_type=dist_type,
+                triggered_by=request.user,
+                leads_distributed=distributed,
+                details={'assignments': assignments},
+            )
+
         return Response({'distributed': distributed, 'assignments': {a['name']: a['count'] for a in assignments}})
 
 
@@ -1124,7 +1130,7 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
         if r.status_code == 200:
             return r.json()
     except Exception:
-        pass
+        logger.exception('Meta: failed to fetch lead data for leadgen_id=%s', leadgen_id)
     return None
 
 
@@ -1144,7 +1150,7 @@ def _fetch_ad_campaign_info(ad_id, page_access_token):
             adset_name    = (data.get('adset') or {}).get('name', '')
             return campaign_name, adset_name
     except Exception:
-        pass
+        logger.exception('Meta: failed to fetch campaign info for ad_id=%s', ad_id)
     return '', ''
 
 
@@ -1257,7 +1263,7 @@ class MetaWebhookView(APIView):
                                     campaign, adset = _fetch_ad_campaign_info(ad_id, config.page_access_token)
                                 _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
         except Exception:
-            pass
+            logger.exception('Meta webhook: unhandled error processing payload')
         return Response({'ok': True})
 
 
@@ -1302,10 +1308,10 @@ class MetaWebhookConfigView(APIView):
                             forms = [{'id': f['id'], 'name': f.get('name', '')}
                                      for f in forms_r.json().get('data', [])]
                     except Exception:
-                        pass
+                        logger.exception('Meta: failed to fetch forms for page_id=%s', page_id)
                     pages_data.append({'page_id': page_id, 'page_name': page_name, 'forms': forms})
         except Exception:
-            pass
+            logger.exception('Meta: failed to fetch pages list')
         return subscribed, pages_data
 
     def get(self, request):
@@ -1403,7 +1409,7 @@ class MetaWebhookConfigView(APIView):
                             else:
                                 failed.append(page_name)
                 except Exception:
-                    pass
+                    logger.exception('Meta: failed to subscribe pages to app')
             _, pages_data = self._fetch_pages_and_forms(pat) if pat else ([], [])
             config.subscribed_pages   = subscribed
             config.pages_data         = pages_data
