@@ -50,6 +50,17 @@ class StatsView(APIView):
     def get(self, request):
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
+
+        # Platform admin: filter by a specific company (used by admin company picker)
+        company_id = request.query_params.get('company_id')
+        if company_id and is_platform_admin(request.user):
+            leads_qs   = leads_qs.filter(company_id=company_id)
+            sv_filter  = {'lead__company_id': company_id}
+            cl_filter  = {'lead__company_id': company_id}
+            prj_filter = {'company_id': company_id}
+        else:
+            sv_filter = cl_filter = prj_filter = {}
+
         # Single aggregate query instead of 6 separate COUNTs
         agg = leads_qs.aggregate(
             total_leads=Count('id'),
@@ -57,9 +68,9 @@ class StatsView(APIView):
             leads_today=Count('id', filter=Q(created_at__date=today)),
         )
         sv_done, closures, active_projects = (
-            scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').count(),
-            scope_to_company(Closure.objects.all(), request.user, 'lead__company').count(),
-            scope_to_company(Project.objects.filter(is_active=True), request.user).count(),
+            scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').filter(**sv_filter).count(),
+            scope_to_company(Closure.objects.all(), request.user, 'lead__company').filter(**cl_filter).count(),
+            scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
         recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').only(
             'id', 'name', 'phone', 'status', 'created_at',
