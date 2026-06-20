@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la Vistarafront/)",
+      "Bash(ls -la vistaraweb/)",
+      "Bash(python3 -c 'import sqlite3; c=sqlite3.connect\\('\\\\''db.sqlite3'\\\\''\\); *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(env)",
+      "Bash(neonctl projects *)",
+      "Bash(neonctl branches *)"
+    ],
+    "additionalDirectories": [
+      "/Users/princemac/Desktop/Vistara Reality ERP/vistaraweb/src/app/sales",
+      "/Users/princemac/Desktop/Vistara Reality ERP/Vistarafront/src/screens/Splashscreen"
+    ]
+  }
+}

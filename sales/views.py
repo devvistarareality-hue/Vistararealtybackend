@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from accounts.models import User
+from accounts.permissions import is_platform_admin, scope_to_company
 from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
@@ -29,23 +30,49 @@ def is_admin_or_manager(user):
     return user.role in ('Admin', 'Manager') or user.is_staff
 
 
+def _lead_in_scope(request, lead_id):
+    """True if the given lead belongs to the requester's company (or requester is platform admin)."""
+    if not lead_id:
+        return False
+    return scope_to_company(Lead.objects.filter(pk=lead_id), request.user).exists()
+
+
+def _project_in_scope(request, project_id):
+    """True if the given project belongs to the requester's company (or requester is platform admin)."""
+    if not project_id:
+        return False
+    return scope_to_company(Project.objects.filter(pk=project_id), request.user).exists()
+
+
 class StatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         today = timezone.localdate()
+        leads_qs = scope_to_company(Lead.objects.all(), request.user)
+
+        # Platform admin: filter by a specific company (used by admin company picker)
+        company_id = request.query_params.get('company_id')
+        if company_id and is_platform_admin(request.user):
+            leads_qs   = leads_qs.filter(company_id=company_id)
+            sv_filter  = {'lead__company_id': company_id}
+            cl_filter  = {'lead__company_id': company_id}
+            prj_filter = {'company_id': company_id}
+        else:
+            sv_filter = cl_filter = prj_filter = {}
+
         # Single aggregate query instead of 6 separate COUNTs
-        agg = Lead.objects.aggregate(
+        agg = leads_qs.aggregate(
             total_leads=Count('id'),
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
         )
         sv_done, closures, active_projects = (
-            SiteVisit.objects.count(),
-            Closure.objects.count(),
-            Project.objects.filter(is_active=True).count(),
+            scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').filter(**sv_filter).count(),
+            scope_to_company(Closure.objects.all(), request.user, 'lead__company').filter(**cl_filter).count(),
+            scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
-        recent = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').only(
+        recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').only(
             'id', 'name', 'phone', 'status', 'created_at',
             'project__name', 'source__name', 'telecaller__name', 'stm__name',
         ).order_by('-created_at')[:8]
@@ -65,7 +92,10 @@ class LeadListView(APIView):
 
     def get(self, request):
         # Defer heavy text blobs not needed for list view
-        qs = Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(
+        qs = scope_to_company(
+            Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+            request.user,
+        ).defer(
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
         )
@@ -98,6 +128,10 @@ class LeadListView(APIView):
         if request.query_params.get('campaign'):
             qs = qs.filter(meta_campaign_name__icontains=request.query_params['campaign'])
 
+        # Platform admin: filter by a specific company (used by admin company picker)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+
         total = qs.count()
         page = int(request.query_params.get('page', 1))
         offset = (page - 1) * PAGE_SIZE
@@ -116,16 +150,24 @@ class LeadListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Duplicate check
-        phone = ser.validated_data['phone']
+        company = request.user.company
+
+        # If a project is supplied it must belong to the requester's company.
         project = ser.validated_data.get('project')
+        if project and not _project_in_scope(request, project.id):
+            return Response({'detail': 'Invalid project for your company.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Duplicate check — match last 10 digits regardless of +91 prefix, scoped to company
+        phone = ser.validated_data['phone']
         clean = ''.join(c for c in phone if c.isdigit())[-10:]
-        dup_qs = Lead.objects.filter(phone__endswith=clean)
-        if project:
-            dup_qs = dup_qs.filter(project=project)
+        dup_qs = (
+            scope_to_company(Lead.objects.all(), request.user).filter(phone__regex=r'(^|\D)' + clean + r'$')
+            if clean else Lead.objects.none()
+        )
         existing = dup_qs.first()
 
         lead = ser.save(
+            company=company,
             is_duplicate=bool(existing),
             duplicate_of=existing if existing else None,
         )
@@ -139,14 +181,17 @@ class LeadListView(APIView):
 class LeadDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _get_lead(self, pk):
+    def _get_lead(self, request, pk):
         try:
-            return Lead.objects.select_related('project', 'source', 'telecaller', 'stm').get(pk=pk)
+            return scope_to_company(
+                Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+                request.user,
+            ).get(pk=pk)
         except Lead.DoesNotExist:
             return None
 
     def get(self, request, pk):
-        lead = self._get_lead(pk)
+        lead = self._get_lead(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         data = LeadDetailSerializer(lead).data
@@ -156,7 +201,7 @@ class LeadDetailView(APIView):
         return Response(data)
 
     def patch(self, request, pk):
-        lead = self._get_lead(pk)
+        lead = self._get_lead(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -209,7 +254,7 @@ class LeadDetailView(APIView):
     def delete(self, request, pk):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        lead = self._get_lead(pk)
+        lead = self._get_lead(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         lead.delete()
@@ -225,7 +270,7 @@ class BulkDeleteLeadsView(APIView):
         ids = request.data.get('ids', [])
         if not ids:
             return Response({'detail': 'No IDs provided.'}, status=status.HTTP_400_BAD_REQUEST)
-        deleted, _ = Lead.objects.filter(id__in=ids).delete()
+        deleted, _ = scope_to_company(Lead.objects.filter(id__in=ids), request.user).delete()
         return Response({'deleted': deleted})
 
 
@@ -245,7 +290,10 @@ class ProjectListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        projects = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots')
+        projects = scope_to_company(
+            Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
+            request.user,
+        )
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         return Response(ProjectSerializer(projects, many=True).data)
@@ -256,7 +304,7 @@ class ProjectListView(APIView):
         ser = ProjectSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        project = ser.save()
+        project = ser.save(company=request.user.company)
         _sync_plots(project)
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
@@ -267,7 +315,10 @@ class ProjectDetailView(APIView):
 
     def get(self, request, pk):
         try:
-            project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=pk)
+            project = scope_to_company(
+                Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
+                request.user,
+            ).get(pk=pk)
         except Project.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(ProjectSerializer(project).data)
@@ -276,14 +327,14 @@ class ProjectDetailView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            project = Project.objects.get(pk=pk)
+            project = scope_to_company(Project.objects.all(), request.user).get(pk=pk)
         except Project.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         ser = ProjectSerializer(project, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
-        _sync_plots(project)
+        # _sync_plots intentionally NOT called on PATCH — plots are managed via /plots/bulk/
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data)
 
@@ -291,7 +342,7 @@ class ProjectDetailView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            project = Project.objects.get(pk=pk)
+            project = scope_to_company(Project.objects.all(), request.user).get(pk=pk)
         except Project.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         project.delete()
@@ -305,6 +356,8 @@ class PlotListView(APIView):
         project_id = request.query_params.get('project')
         if not project_id:
             return Response({'detail': 'project query param required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not _project_in_scope(request, project_id):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         plots = Plot.objects.filter(project_id=project_id)
         return Response(PlotSerializer(plots, many=True).data)
 
@@ -316,7 +369,7 @@ class PlotDetailView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            plot = Plot.objects.get(pk=pk)
+            plot = scope_to_company(Plot.objects.all(), request.user, 'project__company').get(pk=pk)
         except Plot.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         ser = PlotSerializer(plot, data=request.data, partial=True)
@@ -329,7 +382,7 @@ class LeadSourceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        sources = LeadSource.objects.filter(is_active=True)
+        sources = scope_to_company(LeadSource.objects.filter(is_active=True), request.user)
         return Response(LeadSourceSerializer(sources, many=True).data)
 
     def post(self, request):
@@ -338,14 +391,56 @@ class LeadSourceListView(APIView):
         ser = LeadSourceSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(LeadSourceSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
+        return Response(LeadSourceSerializer(ser.save(company=request.user.company)).data, status=status.HTTP_201_CREATED)
+
+
+class BackfillDuplicatesView(APIView):
+    """One-time endpoint to mark existing duplicate leads based on last 10 phone digits."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        from collections import defaultdict
+        leads = scope_to_company(Lead.objects.all(), request.user).only('id', 'phone', 'created_at').order_by('created_at')
+        phone_map = defaultdict(list)
+        for l in leads:
+            clean = ''.join(c for c in (l.phone or '') if c.isdigit())[-10:]
+            if clean:
+                phone_map[clean].append(l.id)
+        marked = 0
+        for clean, ids in phone_map.items():
+            if len(ids) > 1:
+                original_id = ids[0]
+                dup_ids = ids[1:]
+                Lead.objects.filter(id__in=dup_ids).update(is_duplicate=True, duplicate_of_id=original_id)
+                Lead.objects.filter(id=original_id).update(duplicate_count=len(dup_ids))
+                marked += len(dup_ids)
+        return Response({'marked_duplicates': marked})
+
+
+class LeadSourceDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            source = scope_to_company(LeadSource.objects.all(), request.user).get(pk=pk)
+        except LeadSource.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        source.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class FollowUpListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = FollowUp.objects.select_related('lead', 'assigned_to')
+        qs = scope_to_company(
+            FollowUp.objects.select_related('lead', 'assigned_to'),
+            request.user, 'lead__company',
+        )
         if not is_admin_or_manager(request.user):
             qs = qs.filter(assigned_to=request.user)
         if request.query_params.get('lead_id'):
@@ -356,6 +451,8 @@ class FollowUpListView(APIView):
         ser = FollowUpSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not _lead_in_scope(request, request.data.get('lead')):
+            return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         followup = ser.save(created_by=request.user)
         return Response(FollowUpSerializer(followup).data, status=status.HTTP_201_CREATED)
 
@@ -365,7 +462,7 @@ class FollowUpDetailView(APIView):
 
     def patch(self, request, pk):
         try:
-            followup = FollowUp.objects.get(pk=pk)
+            followup = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company').get(pk=pk)
         except FollowUp.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         ser = FollowUpSerializer(followup, data=request.data, partial=True)
@@ -378,7 +475,10 @@ class SiteVisitListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = SiteVisit.objects.select_related('lead', 'project', 'stm')
+        qs = scope_to_company(
+            SiteVisit.objects.select_related('lead', 'project', 'stm'),
+            request.user, 'lead__company',
+        )
         if not is_admin_or_manager(request.user):
             qs = qs.filter(stm=request.user)
         if request.query_params.get('lead_id'):
@@ -389,6 +489,8 @@ class SiteVisitListView(APIView):
         ser = SiteVisitSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not _lead_in_scope(request, request.data.get('lead')):
+            return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(SiteVisitSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
 
 
@@ -397,7 +499,7 @@ class SiteVisitDetailView(APIView):
 
     def patch(self, request, pk):
         try:
-            sv = SiteVisit.objects.get(pk=pk)
+            sv = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').get(pk=pk)
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         ser = SiteVisitSerializer(sv, data=request.data, partial=True)
@@ -410,7 +512,10 @@ class ClosureListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = Closure.objects.select_related('lead', 'project', 'stm')
+        qs = scope_to_company(
+            Closure.objects.select_related('lead', 'project', 'stm'),
+            request.user, 'lead__company',
+        )
         if not is_admin_or_manager(request.user):
             qs = qs.filter(stm=request.user)
         return Response(ClosureSerializer(qs, many=True).data)
@@ -419,6 +524,8 @@ class ClosureListView(APIView):
         ser = ClosureSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if not _lead_in_scope(request, request.data.get('lead')):
+            return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(ClosureSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
 
 
@@ -710,13 +817,14 @@ class DistributeView(APIView):
             for w in UserDistributionWeight.objects.filter(user__in=members)
         }
 
-        # Get unassigned leads
+        # Get unassigned leads (scoped to this company)
+        company_leads = scope_to_company(Lead.objects.all(), request.user)
         if dist_type == 'telecaller':
-            qs = Lead.objects.filter(
+            qs = company_leads.filter(
                 telecaller__isnull=True, status='new'
             ).order_by('created_at')
         else:
-            qs = Lead.objects.filter(
+            qs = company_leads.filter(
                 status='warm_transferred', stm__isnull=True
             ).order_by('created_at')
 
@@ -766,6 +874,7 @@ class DistributeView(APIView):
 
         distributed = sum(a['count'] for a in assignments)
         DistributionLog.objects.create(
+            company=request.user.company,
             dist_type=dist_type,
             triggered_by=request.user,
             leads_distributed=distributed,
@@ -778,7 +887,9 @@ class DistributionLogView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        logs = DistributionLog.objects.select_related('triggered_by').all()[:30]
+        logs = scope_to_company(
+            DistributionLog.objects.select_related('triggered_by'), request.user
+        )[:30]
         data = [{
             'id':                  log.id,
             'dist_type':           log.dist_type,
@@ -792,7 +903,7 @@ class DistributionLogView(APIView):
     def delete(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        DistributionLog.objects.all().delete()
+        scope_to_company(DistributionLog.objects.all(), request.user).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -807,19 +918,29 @@ class BulkImportLeadsView(APIView):
         rows       = request.data.get('leads', [])
         project_id = request.data.get('project_id')
         source_id  = request.data.get('source_id')
+        company    = request.user.company
 
         if not rows:
             return Response({'detail': 'No leads provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # A supplied project/source must belong to the requester's company.
+        if project_id and not _project_in_scope(request, project_id):
+            return Response({'detail': 'Invalid project for your company.'}, status=status.HTTP_400_BAD_REQUEST)
+        if source_id and not scope_to_company(LeadSource.objects.filter(pk=source_id), request.user).exists():
+            return Response({'detail': 'Invalid source for your company.'}, status=status.HTTP_400_BAD_REQUEST)
 
         imported = 0
         duplicates = 0
         errors = 0
         failed = []
 
-        # Build existing phone set for quick dup check
-        existing_phones = set(
-            Lead.objects.filter(project_id=project_id).values_list('phone', flat=True)
-        ) if project_id else set(Lead.objects.values_list('phone', flat=True))
+        # Build existing dup set (last-10-digits) scoped to this company — O(n) once.
+        company_leads = scope_to_company(Lead.objects.all(), request.user)
+        existing_keys = {
+            ''.join(c for c in (p or '') if c.isdigit())[-10:]
+            for p in company_leads.values_list('phone', flat=True)
+        }
+        existing_keys.discard('')
 
         to_create = []
         for i, row in enumerate(rows):
@@ -831,9 +952,10 @@ class BulkImportLeadsView(APIView):
                 continue
 
             clean = ''.join(c for c in phone if c.isdigit())[-10:]
-            is_dup = any(''.join(c for c in p if c.isdigit())[-10:] == clean for p in existing_phones)
+            is_dup = bool(clean) and clean in existing_keys
 
             to_create.append(Lead(
+                company=company,
                 name=name,
                 phone=phone,
                 alt_phone=str(row.get('alt_phone', '')).strip(),
@@ -848,7 +970,8 @@ class BulkImportLeadsView(APIView):
                 duplicates += 1
             else:
                 imported += 1
-                existing_phones.add(phone)
+                if clean:
+                    existing_keys.add(clean)  # catch in-batch duplicates too
 
         Lead.objects.bulk_create(to_create, ignore_conflicts=True)
         return Response({'imported': imported, 'duplicates': duplicates, 'errors': errors, 'failed': failed})
@@ -862,9 +985,14 @@ class ReportsView(APIView):
         from django.db.models import Count, Sum, Q
         from concurrent.futures import ThreadPoolExecutor
 
+        user      = request.user
+        leads_qs  = scope_to_company(Lead.objects.all(), user)
+        sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
+        closure_qs = scope_to_company(Closure.objects.all(), user, 'lead__company')
+
         def get_campaigns():
             return list(
-                Lead.objects.exclude(meta_campaign_name='')
+                leads_qs.exclude(meta_campaign_name='')
                 .values('meta_campaign_name')
                 .annotate(
                     total=Count('id'),
@@ -877,7 +1005,7 @@ class ReportsView(APIView):
 
         def get_telecallers():
             return list(
-                Lead.objects.exclude(telecaller__isnull=True)
+                leads_qs.exclude(telecaller__isnull=True)
                 .values('telecaller__id', 'telecaller__name')
                 .annotate(
                     total=Count('id'),
@@ -890,7 +1018,7 @@ class ReportsView(APIView):
 
         def get_stms():
             return list(
-                Lead.objects.exclude(stm__isnull=True)
+                leads_qs.exclude(stm__isnull=True)
                 .values('stm__id', 'stm__name')
                 .annotate(
                     total=Count('id'),
@@ -903,17 +1031,17 @@ class ReportsView(APIView):
             )
 
         def get_summary():
-            agg = Closure.objects.aggregate(total=Sum('booking_amount'), cnt=Count('id'))
+            agg = closure_qs.aggregate(total=Sum('booking_amount'), cnt=Count('id'))
             return {
-                'total_sv':       SiteVisit.objects.count(),
-                'completed_sv':   SiteVisit.objects.filter(status='completed').count(),
+                'total_sv':       sv_qs.count(),
+                'completed_sv':   sv_qs.filter(status='completed').count(),
                 'total_closures': agg['cnt'] or 0,
                 'total_revenue':  float(agg['total'] or 0),
-                'meta_leads':     Lead.objects.exclude(meta_campaign_name='').count(),
+                'meta_leads':     leads_qs.exclude(meta_campaign_name='').count(),
             }
 
         def get_closures():
-            return Closure.objects.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
+            return closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
 
         # Run all 5 queries in parallel threads
         with ThreadPoolExecutor(max_workers=5) as ex:
@@ -988,8 +1116,27 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
             project = mapping.project
             MetaFormMapping.objects.filter(pk=mapping.pk).update(total_leads=mapping.total_leads + 1)
 
-    source, _ = LeadSource.objects.get_or_create(name='meta', defaults={'is_active': True})
+    # Tenant for the incoming lead: project's company → config's company
+    company = (project.company if project and project.company_id else None) or config.company
+    if company is None:
+        return None  # Can't attribute to a tenant — drop rather than leak globally.
+
+    source, _ = LeadSource.objects.get_or_create(
+        company=company, name='meta', defaults={'is_active': True},
+    )
+
+    # Duplicate detection using last 10 digits, scoped to this company
+    clean = ''.join(c for c in phone if c.isdigit())[-10:]
+    existing = (
+        Lead.objects.filter(company=company, phone__regex=r'(^|\D)' + clean + r'$').first()
+        if clean else None
+    )
+    if existing:
+        existing.duplicate_count = (existing.duplicate_count or 0) + 1
+        existing.save(update_fields=['duplicate_count'])
+
     lead = Lead.objects.create(
+        company=company,
         name=(name or 'Meta Lead')[:200],
         phone=phone,
         email=email,
@@ -999,6 +1146,8 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         meta_adset_name=adset_name[:200] if adset_name else '',
         meta_ad_name=ad_name[:200] if ad_name else '',
         status='new',
+        is_duplicate=bool(existing),
+        duplicate_of=existing if existing else None,
     )
     MetaWebhookConfig.objects.filter(pk=config.pk).update(
         total_leads_received=config.total_leads_received + 1,
@@ -1017,10 +1166,20 @@ class MetaWebhookView(APIView):
         mode      = request.GET.get('hub.mode')
         token     = request.GET.get('hub.verify_token')
         challenge = request.GET.get('hub.challenge')
-        config = MetaWebhookConfig.objects.first()
-        if mode == 'subscribe' and config and token == config.verify_token:
+        # Match any company's verify token (each tenant has its own config).
+        if mode == 'subscribe' and token and MetaWebhookConfig.objects.filter(verify_token=token).exists():
             return HttpResponse(challenge, content_type='text/plain')
         return HttpResponse(status=403)
+
+    def _config_for_page(self, page_id):
+        """Find the tenant config that owns the given Meta page id."""
+        configs = list(MetaWebhookConfig.objects.filter(page_access_token__gt=''))
+        if page_id:
+            for cfg in configs:
+                for p in (cfg.pages_data or []):
+                    if str(p.get('page_id')) == str(page_id):
+                        return cfg
+        return configs[0] if configs else None
 
     def post(self, request):
         """Receive lead notification from Meta."""
@@ -1028,10 +1187,10 @@ class MetaWebhookView(APIView):
             data = request.data
             if data.get('object') != 'page':
                 return Response({'ok': True})
-            config = MetaWebhookConfig.objects.filter(page_access_token__gt='').first()
-            if not config:
-                return Response({'ok': True})
             for entry in data.get('entry', []):
+                config = self._config_for_page(entry.get('id'))
+                if not config:
+                    continue
                 for change in entry.get('changes', []):
                     if change.get('field') == 'leadgen':
                         val        = change.get('value', {})
@@ -1056,13 +1215,13 @@ class MetaWebhookView(APIView):
 class MetaWebhookConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _ensure_config(self):
-        config = MetaWebhookConfig.objects.first()
-        if not config:
-            config = MetaWebhookConfig.objects.create(
-                verify_token=secrets.token_urlsafe(32),
-            )
-        elif not config.verify_token:
+    def _ensure_config(self, request):
+        company = request.user.company
+        config, created = MetaWebhookConfig.objects.get_or_create(
+            company=company,
+            defaults={'verify_token': secrets.token_urlsafe(32)},
+        )
+        if not config.verify_token:
             config.verify_token = secrets.token_urlsafe(32)
             config.save(update_fields=['verify_token'])
         return config
@@ -1101,7 +1260,7 @@ class MetaWebhookConfigView(APIView):
         return subscribed, pages_data
 
     def get(self, request):
-        config = self._ensure_config()
+        config = self._ensure_config(request)
         # Auto-refresh pages/forms if stale (older than 2 hours) or never fetched
         if config.page_access_token:
             stale = (
@@ -1115,7 +1274,9 @@ class MetaWebhookConfigView(APIView):
                     config.pages_data        = pages_data
                     config.pages_refreshed_at = timezone.now()
                     config.save(update_fields=['subscribed_pages', 'pages_data', 'pages_refreshed_at'])
-        projects = list(Project.objects.filter(is_active=True).values('id', 'name'))
+        projects = list(
+            scope_to_company(Project.objects.filter(is_active=True), request.user).values('id', 'name')
+        )
         return Response({
             'verify_token':         config.verify_token,
             'page_access_token':    config.page_access_token,
@@ -1129,10 +1290,9 @@ class MetaWebhookConfigView(APIView):
         })
 
     def post(self, request):
-        config = self._ensure_config()
+        config = self._ensure_config(request)
         action = request.data.get('action')
         if action == 'debug_forms':
-            config = self._ensure_config()
             pat = config.page_access_token
             debug = {}
             pages_r = http_requests.get('https://graph.facebook.com/v19.0/me/accounts',
@@ -1163,6 +1323,8 @@ class MetaWebhookConfigView(APIView):
         if action == 'save':
             pat = request.data.get('page_access_token', '').strip()
             pid = request.data.get('default_project_id')
+            if pid and not _project_in_scope(request, pid):
+                return Response({'detail': 'Invalid project for your company.'}, status=400)
             config.page_access_token = pat
             config.default_project_id = pid if pid else None
             config.is_active = bool(pat)
@@ -1208,7 +1370,9 @@ class MetaFormMappingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        mappings = MetaFormMapping.objects.select_related('project').order_by('-created_at')
+        mappings = scope_to_company(
+            MetaFormMapping.objects.select_related('project'), request.user
+        ).order_by('-created_at')
         return Response([{
             'id':          m.id,
             'form_id':     m.form_id,
@@ -1225,12 +1389,12 @@ class MetaFormMappingView(APIView):
         if not form_id or not project_id:
             return Response({'detail': 'form_id and project_id are required.'}, status=400)
         try:
-            project = Project.objects.get(pk=project_id)
+            project = scope_to_company(Project.objects.all(), request.user).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
         mapping, created = MetaFormMapping.objects.update_or_create(
             form_id=form_id,
-            defaults={'form_name': form_name, 'project': project},
+            defaults={'form_name': form_name, 'project': project, 'company': project.company},
         )
         return Response({
             'id': mapping.id, 'form_id': mapping.form_id,
@@ -1240,7 +1404,7 @@ class MetaFormMappingView(APIView):
 
     def delete(self, request):
         mid = request.data.get('id')
-        MetaFormMapping.objects.filter(pk=mid).delete()
+        scope_to_company(MetaFormMapping.objects.filter(pk=mid), request.user).delete()
         return Response({'ok': True})
 
 
@@ -1252,8 +1416,9 @@ class UserProjectAssignmentView(APIView):
         user_id = request.query_params.get('user_id')
         if not user_id:
             return Response({'detail': 'user_id required.'}, status=400)
-        assigned = UserProjectAssignment.objects.filter(
-            user_id=user_id, user__company=request.user.company
+        assigned = scope_to_company(
+            UserProjectAssignment.objects.filter(user_id=user_id),
+            request.user, 'user__company',
         ).values_list('project_id', flat=True)
         return Response(list(assigned))
 
@@ -1266,11 +1431,16 @@ class UserProjectAssignmentView(APIView):
             user = User.objects.get(pk=user_id, company=request.user.company)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=404)
+        # Only allow assigning projects that belong to the requester's company.
+        valid_ids = list(
+            scope_to_company(Project.objects.filter(pk__in=project_ids), request.user)
+            .values_list('id', flat=True)
+        )
         UserProjectAssignment.objects.filter(user=user).delete()
         UserProjectAssignment.objects.bulk_create([
-            UserProjectAssignment(user=user, project_id=pid) for pid in project_ids
+            UserProjectAssignment(user=user, project_id=pid) for pid in valid_ids
         ], ignore_conflicts=True)
-        return Response({'user_id': user_id, 'project_ids': project_ids})
+        return Response({'user_id': user_id, 'project_ids': valid_ids})
 
 
 # ── Bulk Plot Creation ────────────────────────────────────────────────────────
@@ -1283,7 +1453,7 @@ class PlotBulkCreateView(APIView):
         project_id = request.data.get('project_id')
         plots_data = request.data.get('plots', [])
         try:
-            project = Project.objects.get(pk=project_id)
+            project = scope_to_company(Project.objects.all(), request.user).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
         plots = [
@@ -1300,6 +1470,22 @@ class PlotBulkCreateView(APIView):
         return Response({'created': len(plots)}, status=201)
 
 
+class PlotBulkDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=403)
+        project_id = request.data.get('project_id')
+        if not project_id:
+            return Response({'detail': 'project_id is required.'}, status=400)
+        if not _project_in_scope(request, project_id):
+            return Response({'detail': 'Project not found.'}, status=404)
+        deleted, _ = Plot.objects.filter(project_id=project_id).delete()
+        Project.objects.filter(pk=project_id).update(total_plots=0)
+        return Response({'deleted': deleted})
+
+
 class PlotRenameTypeView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1311,5 +1497,7 @@ class PlotRenameTypeView(APIView):
         new_name   = request.data.get('new_name', '').strip()
         if not project_id or not old_name or not new_name:
             return Response({'detail': 'project_id, old_name and new_name are required.'}, status=400)
+        if not _project_in_scope(request, project_id):
+            return Response({'detail': 'Project not found.'}, status=404)
         updated = Plot.objects.filter(project_id=project_id, cluster_type=old_name).update(cluster_type=new_name)
         return Response({'updated': updated})
