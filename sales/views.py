@@ -1,6 +1,8 @@
+import logging
 import secrets
 from datetime import timedelta
 import requests as http_requests
+from django.db import transaction
 from django.db.models import Q, Count
 from django.utils import timezone
 from django.http import HttpResponse
@@ -9,8 +11,19 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
+logger = logging.getLogger(__name__)
+
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
+
+
+def _resolve_company(request):
+    """Return the company for the request, honouring ?company_id for platform admins."""
+    cid = request.query_params.get('company_id') or request.data.get('company_id')
+    if cid and is_platform_admin(request.user):
+        Company = __import__('companies.models', fromlist=['Company']).Company
+        return Company.objects.filter(pk=cid).first() or request.user.company
+    return request.user.company
 from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
@@ -420,6 +433,8 @@ class ProjectListView(APIView):
         )
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            projects = projects.filter(company_id=request.query_params['company_id'])
         return Response(ProjectSerializer(projects, many=True).data)
 
     def post(self, request):
@@ -507,6 +522,8 @@ class LeadSourceListView(APIView):
 
     def get(self, request):
         sources = scope_to_company(LeadSource.objects.filter(is_active=True), request.user)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            sources = sources.filter(company_id=request.query_params['company_id'])
         return Response(LeadSourceSerializer(sources, many=True).data)
 
     def post(self, request):
@@ -686,7 +703,16 @@ class TelecallerListView(APIView):
 
     def get(self, request):
         crm_role = request.query_params.get('crm_role')
-        base_qs  = User.objects.filter(company=request.user.company, is_active=True)
+        cid      = request.query_params.get('company_id')
+        if is_platform_admin(request.user):
+            if cid:
+                from companies.models import Company as Co
+                co = Co.objects.filter(pk=cid).first()
+                base_qs = User.objects.filter(company=co, is_active=True) if co else User.objects.none()
+            else:
+                base_qs = User.objects.filter(is_active=True)
+        else:
+            base_qs = User.objects.filter(company=request.user.company, is_active=True)
         sales_qs = base_qs.filter(modules__contains=['Sales']).order_by('name')
 
         if crm_role in ('telecaller', 'stm'):
@@ -708,9 +734,15 @@ class CompanyUsersSlimView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        company_id = request.query_params.get('company_id')
+        company = (
+            __import__('companies.models', fromlist=['Company']).Company.objects.filter(pk=company_id).first()
+            if company_id and is_platform_admin(request.user)
+            else request.user.company
+        )
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True)
+            .filter(company=company, is_active=True)
             .exclude(role='Admin')
             .only('id', 'name', 'user_code', 'designation', 'role', 'phone', 'email')
             .order_by('name')
@@ -735,12 +767,17 @@ class SalesTeamView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company = request.user.company
-        users = User.objects.filter(
-            company=company,
-            is_active=True,
-            department__icontains='sales',
-        ).order_by('name')
+        cid = request.query_params.get('company_id')
+        if is_platform_admin(request.user):
+            if cid:
+                from companies.models import Company as Co
+                company = Co.objects.filter(pk=cid).first()
+                users = User.objects.filter(company=company, is_active=True, department__icontains='sales') if company else User.objects.none()
+            else:
+                users = User.objects.filter(is_active=True, department__icontains='sales')
+        else:
+            users = User.objects.filter(company=request.user.company, is_active=True, department__icontains='sales')
+        users = users.order_by('name')
 
         data = [{
             'id':          u.id,
@@ -808,7 +845,7 @@ class DistributionSettingsView(APIView):
         return obj
 
     def get(self, request):
-        s = self._get_or_create(request.user.company)
+        s = self._get_or_create(_resolve_company(request))
         return Response({
             'tc_signin_time':   str(s.tc_signin_time)[:5],
             'tc_signout_time':  str(s.tc_signout_time)[:5],
@@ -819,7 +856,7 @@ class DistributionSettingsView(APIView):
     def put(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        s = self._get_or_create(request.user.company)
+        s = self._get_or_create(_resolve_company(request))
         for field in ('tc_signin_time', 'tc_signout_time', 'stm_signin_time', 'stm_signout_time'):
             if field in request.data:
                 setattr(s, field, request.data[field])
@@ -834,10 +871,11 @@ class AvailabilityView(APIView):
     def get(self, request):
         from datetime import date as date_cls
         today = request.query_params.get('date', str(date_cls.today()))
+        company = _resolve_company(request)
         desig_map = {'TELECALLER': 'telecaller', 'STM': 'stm'}
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True)
+            .filter(company=company, is_active=True)
             .exclude(role='Admin')
             .filter(designation__in=['TELECALLER', 'STM'])
             .only('id', 'name', 'designation')
@@ -878,8 +916,9 @@ class AvailabilityView(APIView):
         user_id      = request.data.get('user_id')
         is_available = request.data.get('is_available', True)
         today        = str(date_cls.today())
+        company      = _resolve_company(request)
         try:
-            user = User.objects.get(pk=user_id, company=request.user.company)
+            user = User.objects.get(pk=user_id, company=company)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=404)
         obj, _ = UserAvailability.objects.update_or_create(
@@ -937,14 +976,15 @@ class DistributionWeightView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        company = _resolve_company(request)
         users = (
             User.objects
-            .filter(company=request.user.company, is_active=True, designation__in=['TELECALLER', 'STM'])
+            .filter(company=company, is_active=True, designation__in=['TELECALLER', 'STM'])
             .only('id', 'name', 'designation')
         )
         weight_map = {
             w.user_id: w.weight
-            for w in UserDistributionWeight.objects.filter(user__company=request.user.company)
+            for w in UserDistributionWeight.objects.filter(user__company=company)
         }
         return Response([
             {'user_id': u.id, 'name': u.name, 'role': u.designation.upper(), 'weight': weight_map.get(u.id, 1)}
@@ -954,12 +994,13 @@ class DistributionWeightView(APIView):
     def patch(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
         updates = request.data.get('updates', [])  # [{user_id, weight}]
         for item in updates:
             uid = item.get('user_id')
             w   = max(1, int(item.get('weight', 1)))
             try:
-                user = User.objects.get(pk=uid, company=request.user.company)
+                user = User.objects.get(pk=uid, company=company)
                 UserDistributionWeight.objects.update_or_create(user=user, defaults={'weight': w})
             except User.DoesNotExist:
                 pass
@@ -1031,94 +1072,97 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
         for w in UserDistributionWeight.objects.filter(user__in=members)
     }
 
-    # Current unassigned bucket (prev-day leftovers + today's live leads).
-    company_leads = Lead.objects.filter(company=company)
-    if dist_type == 'telecaller':
-        qs = company_leads.filter(telecaller__isnull=True, status='new').order_by('created_at')
-    else:
-        qs = company_leads.filter(status='warm_transferred', stm__isnull=True).order_by('created_at')
-
-    leads = list(qs)
-    if not leads:
-        return {'distributed': 0, 'message': 'No unassigned leads found.'}
-
-    # Today's existing assignment counts (for fair weighted continuation across runs).
-    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    if dist_type == 'telecaller':
-        count_qs = Lead.objects.filter(
-            telecaller__in=members, telecaller_assigned_at__gte=today_start
-        ).values('telecaller_id').annotate(n=Count('id'))
-        counts = {row['telecaller_id']: row['n'] for row in count_qs}
-    else:
-        count_qs = Lead.objects.filter(
-            stm__in=members, stm_assigned_at__gte=today_start
-        ).values('stm_id').annotate(n=Count('id'))
-        counts = {row['stm_id']: row['n'] for row in count_qs}
-    for m in members:
-        counts.setdefault(m.id, 0)
-
-    # Project assignments (STRICT): a member only receives leads of the project(s)
-    # assigned to them. A member with NO project assigned receives NOTHING — and a
-    # lead with no project can't be routed to anyone.
-    proj_map = {}
-    for uid, pid in UserProjectAssignment.objects.filter(
-        user__in=members
-    ).values_list('user_id', 'project_id'):
-        proj_map.setdefault(uid, set()).add(pid)
-
-    def _eligible(uid, lead):
-        assigned = proj_map.get(uid)
-        if not assigned or lead.project_id is None:
-            return False
-        return lead.project_id in assigned
-
-    member_ids   = [m.id for m in members]
-    id_to_member = {m.id: m for m in members}
-    user_leads   = {m.id: [] for m in members}
-    now = timezone.now()
-    skipped = 0
-
-    for lead in leads:
-        eligible = [uid for uid in member_ids if _eligible(uid, lead)]
-        if not eligible:
-            skipped += 1
-            continue
-        best = min(eligible, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
-        user_leads[best].append(lead.pk)
-        counts[best] += 1
-
-    assignments = []
-    history_rows = []
-    note = 'Auto-assigned' if triggered_by is None else 'Manually assigned'
-    for uid, pks in user_leads.items():
-        if not pks:
-            continue
+    with transaction.atomic():
+        # Lock unassigned leads row-by-row so concurrent distribution calls
+        # (auto + manual firing simultaneously) can't grab the same leads.
+        company_leads = Lead.objects.filter(company=company)
         if dist_type == 'telecaller':
-            Lead.objects.filter(pk__in=pks).update(
-                telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
-            )
+            qs = company_leads.filter(telecaller__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
         else:
-            Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
-        for pk in pks:
-            history_rows.append(LeadStatusHistory(
-                lead_id=pk, changed_by=triggered_by,
-                field_changed=dist_type, old_value='', new_value=id_to_member[uid].name,
-                remarks=note,
-            ))
-        assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+            qs = company_leads.filter(status='warm_transferred', stm__isnull=True).select_for_update(skip_locked=True).order_by('created_at')
 
-    if history_rows:
-        LeadStatusHistory.objects.bulk_create(history_rows)
+        leads = list(qs)
+        if not leads:
+            return {'distributed': 0, 'message': 'No unassigned leads found.'}
 
-    distributed = sum(a['count'] for a in assignments)
-    if distributed:
-        DistributionLog.objects.create(
-            company=company,
-            dist_type=dist_type,
-            triggered_by=triggered_by,
-            leads_distributed=distributed,
-            details={'assignments': assignments, 'auto': triggered_by is None},
-        )
+        # Today's existing assignment counts (for fair weighted continuation across runs).
+        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        if dist_type == 'telecaller':
+            count_qs = Lead.objects.filter(
+                telecaller__in=members, telecaller_assigned_at__gte=today_start
+            ).values('telecaller_id').annotate(n=Count('id'))
+            counts = {row['telecaller_id']: row['n'] for row in count_qs}
+        else:
+            count_qs = Lead.objects.filter(
+                stm__in=members, stm_assigned_at__gte=today_start
+            ).values('stm_id').annotate(n=Count('id'))
+            counts = {row['stm_id']: row['n'] for row in count_qs}
+        for m in members:
+            counts.setdefault(m.id, 0)
+
+        # Project assignments (STRICT): a member only receives leads of the project(s)
+        # assigned to them. A member with NO project assigned receives NOTHING — and a
+        # lead with no project can't be routed to anyone.
+        proj_map = {}
+        for uid, pid in UserProjectAssignment.objects.filter(
+            user__in=members
+        ).values_list('user_id', 'project_id'):
+            proj_map.setdefault(uid, set()).add(pid)
+
+        def _eligible(uid, lead):
+            assigned = proj_map.get(uid)
+            if not assigned or lead.project_id is None:
+                return False
+            return lead.project_id in assigned
+
+        member_ids   = [m.id for m in members]
+        id_to_member = {m.id: m for m in members}
+        user_leads   = {m.id: [] for m in members}
+        now = timezone.now()
+        skipped = 0
+
+        for lead in leads:
+            eligible = [uid for uid in member_ids if _eligible(uid, lead)]
+            if not eligible:
+                skipped += 1
+                continue
+            best = min(eligible, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
+            user_leads[best].append(lead.pk)
+            counts[best] += 1
+
+        assignments = []
+        history_rows = []
+        note = 'Auto-assigned' if triggered_by is None else 'Manually assigned'
+        for uid, pks in user_leads.items():
+            if not pks:
+                continue
+            if dist_type == 'telecaller':
+                Lead.objects.filter(pk__in=pks).update(
+                    telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
+                )
+            else:
+                Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+            for pk in pks:
+                history_rows.append(LeadStatusHistory(
+                    lead_id=pk, changed_by=triggered_by,
+                    field_changed=dist_type, old_value='', new_value=id_to_member[uid].name,
+                    remarks=note,
+                ))
+            assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+
+        if history_rows:
+            LeadStatusHistory.objects.bulk_create(history_rows)
+
+        distributed = sum(a['count'] for a in assignments)
+        if distributed:
+            DistributionLog.objects.create(
+                company=company,
+                dist_type=dist_type,
+                triggered_by=triggered_by,
+                leads_distributed=distributed,
+                details={'assignments': assignments, 'auto': triggered_by is None},
+            )
+
     resp = {'distributed': distributed, 'assignments': {a['name']: a['count'] for a in assignments}}
     if skipped:
         resp['message'] = f'{skipped} lead(s) left unassigned — no available {desig} is assigned to their project.'
@@ -1142,9 +1186,10 @@ class DistributeView(APIView):
     def post(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        dist_type = request.data.get('type', 'telecaller')   # 'telecaller' | 'stm'
+        dist_type = request.data.get('dist_type', request.data.get('type', 'telecaller'))
+        company   = _resolve_company(request)
         # Manual admin trigger: weight-based, allowed before sign-in, blocked after sign-out.
-        resp = _run_distribution(request.user.company, dist_type, triggered_by=request.user, gate='signout')
+        resp = _run_distribution(company, dist_type, triggered_by=request.user, gate='signout')
         return Response(resp)
 
 
@@ -1154,7 +1199,10 @@ class DistributionLogView(APIView):
     def get(self, request):
         logs = scope_to_company(
             DistributionLog.objects.select_related('triggered_by'), request.user
-        )[:30]
+        )
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            logs = logs.filter(company_id=request.query_params['company_id'])
+        logs = logs[:30]
         data = [{
             'id':                  log.id,
             'dist_type':           log.dist_type,
@@ -1168,7 +1216,10 @@ class DistributionLogView(APIView):
     def delete(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        scope_to_company(DistributionLog.objects.all(), request.user).delete()
+        qs = scope_to_company(DistributionLog.objects.all(), request.user)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        qs.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -1257,6 +1308,11 @@ class ReportsView(APIView):
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
         closure_qs = scope_to_company(Closure.objects.all(), user, 'lead__company')
+        company_id = request.query_params.get('company_id')
+        if company_id and is_platform_admin(user):
+            leads_qs   = leads_qs.filter(company_id=company_id)
+            sv_qs      = sv_qs.filter(lead__company_id=company_id)
+            closure_qs = closure_qs.filter(lead__company_id=company_id)
 
         def get_campaigns():
             return list(
@@ -1343,7 +1399,7 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
         if r.status_code == 200:
             return r.json()
     except Exception:
-        pass
+        logger.exception('Meta: failed to fetch lead data for leadgen_id=%s', leadgen_id)
     return None
 
 
@@ -1363,7 +1419,7 @@ def _fetch_ad_campaign_info(ad_id, page_access_token):
             adset_name    = (data.get('adset') or {}).get('name', '')
             return campaign_name, adset_name
     except Exception:
-        pass
+        logger.exception('Meta: failed to fetch campaign info for ad_id=%s', ad_id)
     return '', ''
 
 
@@ -1479,7 +1535,7 @@ class MetaWebhookView(APIView):
                                     campaign, adset = _fetch_ad_campaign_info(ad_id, config.page_access_token)
                                 _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
         except Exception:
-            pass
+            logger.exception('Meta webhook: unhandled error processing payload')
         return Response({'ok': True})
 
 
@@ -1487,7 +1543,7 @@ class MetaWebhookConfigView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _ensure_config(self, request):
-        company = request.user.company
+        company = _resolve_company(request)
         config, created = MetaWebhookConfig.objects.get_or_create(
             company=company,
             defaults={'verify_token': secrets.token_urlsafe(32)},
@@ -1524,10 +1580,10 @@ class MetaWebhookConfigView(APIView):
                             forms = [{'id': f['id'], 'name': f.get('name', '')}
                                      for f in forms_r.json().get('data', [])]
                     except Exception:
-                        pass
+                        logger.exception('Meta: failed to fetch forms for page_id=%s', page_id)
                     pages_data.append({'page_id': page_id, 'page_name': page_name, 'forms': forms})
         except Exception:
-            pass
+            logger.exception('Meta: failed to fetch pages list')
         return subscribed, pages_data
 
     def get(self, request):
@@ -1625,7 +1681,7 @@ class MetaWebhookConfigView(APIView):
                             else:
                                 failed.append(page_name)
                 except Exception:
-                    pass
+                    logger.exception('Meta: failed to subscribe pages to app')
             _, pages_data = self._fetch_pages_and_forms(pat) if pat else ([], [])
             config.subscribed_pages   = subscribed
             config.pages_data         = pages_data
@@ -1641,8 +1697,9 @@ class MetaFormMappingView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        mappings = scope_to_company(
-            MetaFormMapping.objects.select_related('project'), request.user
+        company = _resolve_company(request)
+        mappings = MetaFormMapping.objects.select_related('project').filter(
+            company=company
         ).order_by('-created_at')
         return Response([{
             'id':          m.id,
@@ -1659,8 +1716,9 @@ class MetaFormMappingView(APIView):
         project_id = request.data.get('project_id')
         if not form_id or not project_id:
             return Response({'detail': 'form_id and project_id are required.'}, status=400)
+        company = _resolve_company(request)
         try:
-            project = scope_to_company(Project.objects.all(), request.user).get(pk=project_id)
+            project = Project.objects.filter(company=company).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
         mapping, created = MetaFormMapping.objects.update_or_create(
@@ -1675,7 +1733,7 @@ class MetaFormMappingView(APIView):
 
     def delete(self, request):
         mid = request.data.get('id')
-        scope_to_company(MetaFormMapping.objects.filter(pk=mid), request.user).delete()
+        MetaFormMapping.objects.filter(pk=mid, company=_resolve_company(request)).delete()
         return Response({'ok': True})
 
 

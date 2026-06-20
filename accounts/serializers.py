@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from .models import User, Designation
 
@@ -111,21 +112,27 @@ class UserCreateSerializer(serializers.ModelSerializer):
         else:
             company = request.user.company
 
-        count     = User.objects.filter(company=company).count()
-        user_code = f"{prefix}{str(count + 1).zfill(3)}"
-        while User.objects.filter(company=company, user_code=user_code).exists():
-            count    += 1
-            user_code = f"{prefix}{str(count + 1).zfill(3)}"
-
         modules = validated_data.get('modules', [])
         role    = validated_data.get('role', '')
         validated_data['department'] = ' + '.join(modules) if modules and role != 'Admin' else ''
 
-        user = User(company=company, user_code=user_code, **validated_data)
-        if reporting_manager_id:
-            user.reporting_manager_id = reporting_manager_id
-        user.set_password(password)
-        user.save()
+        with transaction.atomic():
+            # Lock the company row so concurrent user-creation requests for the
+            # same company can't both read the same count and generate the same code.
+            company.__class__.objects.select_for_update().get(pk=company.pk)
+
+            count     = User.objects.filter(company=company).count()
+            user_code = f"{prefix}{str(count + 1).zfill(3)}"
+            while User.objects.filter(company=company, user_code=user_code).exists():
+                count    += 1
+                user_code = f"{prefix}{str(count + 1).zfill(3)}"
+
+            user = User(company=company, user_code=user_code, **validated_data)
+            if reporting_manager_id:
+                user.reporting_manager_id = reporting_manager_id
+            user.set_password(password)
+            user.save()
+
         return user
 
 
