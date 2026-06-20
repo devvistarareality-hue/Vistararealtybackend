@@ -1,4 +1,5 @@
 import secrets
+from datetime import timedelta
 import requests as http_requests
 from django.db.models import Q, Count
 from django.utils import timezone
@@ -30,6 +31,58 @@ def is_admin_or_manager(user):
     return user.role in ('Admin', 'Manager') or user.is_staff
 
 
+def _designation(user):
+    return (getattr(user, 'designation', '') or '').lower()
+
+
+def is_telecaller(user):
+    d = _designation(user)
+    return 'telecaller' in d or 'tele caller' in d
+
+
+def is_stm(user):
+    d = _designation(user)
+    return 'stm' in d or 'sales team' in d or 'sales executive' in d
+
+
+def can_assign_leads(user):
+    """Telecallers & STMs cannot (re)assign leads — only everyone else (admins/managers/Sales CRM)."""
+    return not (is_telecaller(user) or is_stm(user))
+
+
+def _dist_type_for(user):
+    """'telecaller' | 'stm' | None for a user based on their designation."""
+    if is_telecaller(user):
+        return 'telecaller'
+    if is_stm(user):
+        return 'stm'
+    return None
+
+
+# Self-marked availability stays active for this many hours, then auto-resets.
+AVAILABILITY_TTL_HOURS = 12
+
+
+
+def _availability_active(avail):
+    """True only if the user is marked available AND checked in within the last 12 hours."""
+    if not avail or not avail.is_available or not avail.checked_in_at:
+        return False
+    return (timezone.now() - avail.checked_in_at) < timedelta(hours=AVAILABILITY_TTL_HOURS)
+
+
+def scope_leads_to_role(qs, user, lead_prefix=''):
+    """Restrict a Lead-related queryset to the leads assigned to the requester:
+    telecallers see only leads where they are the telecaller, STMs only where they are the STM.
+    Admins / managers / Sales CRM see everything. `lead_prefix` lets callers scope related
+    models (e.g. 'lead__' for SiteVisit / Closure)."""
+    if is_telecaller(user):
+        return qs.filter(**{f'{lead_prefix}telecaller': user})
+    if is_stm(user):
+        return qs.filter(**{f'{lead_prefix}stm': user})
+    return qs
+
+
 def _lead_in_scope(request, lead_id):
     """True if the given lead belongs to the requester's company (or requester is platform admin)."""
     if not lead_id:
@@ -51,6 +104,9 @@ class StatsView(APIView):
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
 
+        # Telecallers / STMs only see stats for leads assigned to them.
+        leads_qs = scope_leads_to_role(leads_qs, request.user)
+
         # Platform admin: filter by a specific company (used by admin company picker)
         company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(request.user):
@@ -68,8 +124,8 @@ class StatsView(APIView):
             leads_today=Count('id', filter=Q(created_at__date=today)),
         )
         sv_done, closures, active_projects = (
-            scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').filter(**sv_filter).count(),
-            scope_to_company(Closure.objects.all(), request.user, 'lead__company').filter(**cl_filter).count(),
+            scope_leads_to_role(scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company'), request.user, 'lead__').filter(**sv_filter).count(),
+            scope_leads_to_role(scope_to_company(Closure.objects.all(), request.user, 'lead__company'), request.user, 'lead__').filter(**cl_filter).count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
         recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').only(
@@ -99,6 +155,9 @@ class LeadListView(APIView):
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
         )
+
+        # Telecallers / STMs only see leads assigned to them.
+        qs = scope_leads_to_role(qs, request.user)
 
         # Filters
         search = request.query_params.get('search', '').strip()
@@ -143,9 +202,8 @@ class LeadListView(APIView):
         })
 
     def post(self, request):
-        if not is_admin_or_manager(request.user):
-            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-
+        # Any authenticated Sales user (incl. telecallers) may add a lead.
+        # Consistent with PATCH (lead update), which has no admin/manager gate.
         ser = LeadCreateSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -175,6 +233,11 @@ class LeadListView(APIView):
             existing.duplicate_count += 1
             existing.save(update_fields=['duplicate_count'])
 
+        _record_lead_created(lead, by=request.user)
+        # Auto-assign to an available telecaller (no-op outside the window / none available).
+        _run_distribution(company, 'telecaller')
+        lead.refresh_from_db()
+
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
 
 
@@ -183,10 +246,13 @@ class LeadDetailView(APIView):
 
     def _get_lead(self, request, pk):
         try:
-            return scope_to_company(
+            qs = scope_to_company(
                 Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
                 request.user,
-            ).get(pk=pk)
+            )
+            # Telecallers / STMs can only open leads assigned to them.
+            qs = scope_leads_to_role(qs, request.user)
+            return qs.get(pk=pk)
         except Lead.DoesNotExist:
             return None
 
@@ -195,7 +261,12 @@ class LeadDetailView(APIView):
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         data = LeadDetailSerializer(lead).data
-        data['history'] = LeadStatusHistorySerializer(lead.history.all()[:20], many=True).data
+        # Most recent 30 events, returned oldest→newest so the timeline reads in order.
+        # Tie-break by id keeps same-second events in their logical creation order
+        # (e.g. status change → warm transfer → STM assigned).
+        recent = list(lead.history.order_by('-created_at', '-id')[:30])
+        recent.reverse()
+        data['history'] = LeadStatusHistorySerializer(recent, many=True).data
         data['follow_ups'] = FollowUpSerializer(lead.follow_ups.all(), many=True).data
         data['site_visits'] = SiteVisitSerializer(lead.site_visits.all(), many=True).data
         return Response(data)
@@ -213,10 +284,51 @@ class LeadDetailView(APIView):
         old_tc_name      = lead.telecaller.name if lead.telecaller else ''
         old_stm_name     = lead.stm.name        if lead.stm        else ''
 
-        ser = LeadUpdateSerializer(lead, data=request.data, partial=True)
+        # Field-level write restrictions (mirrors the portal UI):
+        #  - Telecallers may only write telecaller (TC) fields.
+        #  - STMs may only write STM fields.
+        #  - Neither may (re)assign leads. Admins/managers/Sales CRM may edit everything.
+        data = {k: v for k, v in request.data.items()}
+        if not can_assign_leads(request.user):
+            for f in ('telecaller', 'stm'):
+                data.pop(f, None)
+        if is_telecaller(request.user):
+            for f in ('stm', 'stm_status', 'stm_remarks'):
+                data.pop(f, None)
+        elif is_stm(request.user):
+            for f in ('telecaller', 'telecaller_status', 'telecaller_remarks'):
+                data.pop(f, None)
+
+        ser = LeadUpdateSerializer(lead, data=data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
+
+        # A lead is "warm" when EITHER the telecaller sets TC Status = warm OR the
+        # overall status is set to warm_transferred. Keep both in sync so the TC Status
+        # column always shows 'warm' and Overall always shows 'warm_transferred',
+        # then hand the lead to the STM pipeline. (TC's warm ≠ STM status — stm_status
+        # stays blank.)
+        warm_now = (
+            (old_tc_status != 'warm' and lead.telecaller_status == 'warm') or
+            (old_status != 'warm_transferred' and lead.status == 'warm_transferred')
+        )
+        if warm_now:
+            sync = []
+            if lead.status != 'warm_transferred':
+                lead.status = 'warm_transferred'; sync.append('status')
+            if lead.telecaller_status != 'warm':
+                lead.telecaller_status = 'warm'; sync.append('telecaller_status')
+            if sync:
+                lead.save(update_fields=sync)
+
+        # Once the lead is with sales, the Overall Status mirrors the STM's status
+        # exactly (assigned → on TC assignment; warm_transferred → on TC warm; then
+        # whatever the STM sets — cold, sv_scheduled, sv_done, closed, …).
+        if lead.stm_status and old_stm_status != lead.stm_status:
+            if lead.status != lead.stm_status:
+                lead.status = lead.stm_status
+                lead.save(update_fields=['status'])
 
         history_entries = []
         if old_status != lead.status:
@@ -246,8 +358,20 @@ class LeadDetailView(APIView):
                 lead=lead, changed_by=request.user,
                 field_changed='stm', old_value=old_stm_name, new_value=new_stm_name,
             ))
+        if warm_now:
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
+            ))
         if history_entries:
             LeadStatusHistory.objects.bulk_create(history_entries)
+
+        # Auto-assign whenever the lead is in the warm bucket and has no STM yet —
+        # whether it got there via TC Status = warm OR by setting Overall Status
+        # to 'warm_transferred' directly. Window-gated; no-op if no STM available.
+        if lead.status == 'warm_transferred' and lead.stm_id is None:
+            _run_distribution(lead.company, 'stm')
+            lead.refresh_from_db()
 
         return Response(LeadDetailSerializer(lead).data)
 
@@ -491,7 +615,14 @@ class SiteVisitListView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         if not _lead_in_scope(request, request.data.get('lead')):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(SiteVisitSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
+        sv = ser.save()
+        sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
+        LeadStatusHistory.objects.create(
+            lead=sv.lead, changed_by=request.user, field_changed='site_visit',
+            old_value='', new_value=(f'Scheduled · {sched}' if sched else 'Scheduled')[:100],
+            remarks='Site visit scheduled',
+        )
+        return Response(SiteVisitSerializer(sv).data, status=status.HTTP_201_CREATED)
 
 
 class SiteVisitDetailView(APIView):
@@ -502,10 +633,18 @@ class SiteVisitDetailView(APIView):
             sv = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').get(pk=pk)
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        old_status = sv.status
         ser = SiteVisitSerializer(sv, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(SiteVisitSerializer(ser.save()).data)
+        sv = ser.save()
+        if sv.status != old_status:
+            LeadStatusHistory.objects.create(
+                lead=sv.lead, changed_by=request.user, field_changed='site_visit',
+                old_value=old_status, new_value=sv.get_status_display(),
+                remarks='Site visit updated',
+            )
+        return Response(SiteVisitSerializer(sv).data)
 
 
 class ClosureListView(APIView):
@@ -526,7 +665,18 @@ class ClosureListView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         if not _lead_in_scope(request, request.data.get('lead')):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(ClosureSerializer(ser.save()).data, status=status.HTTP_201_CREATED)
+        closure = ser.save()
+        parts = [closure.get_status_display()]
+        unit = f'{closure.unit_type} {closure.unit_no}'.strip()
+        if unit:
+            parts.append(unit)
+        if closure.total_amount:
+            parts.append(f'₹{closure.total_amount:g}')
+        LeadStatusHistory.objects.create(
+            lead=closure.lead, changed_by=request.user, field_changed='closure',
+            old_value='', new_value=' · '.join(parts)[:100], remarks='Closure recorded',
+        )
+        return Response(ClosureSerializer(closure).data, status=status.HTTP_201_CREATED)
 
 
 class TelecallerListView(APIView):
@@ -693,12 +843,21 @@ class AvailabilityView(APIView):
             .only('id', 'name', 'designation')
             .order_by('name')
         )
-        avail_map = {
-            a.user_id: a.is_available
-            for a in UserAvailability.objects.filter(
-                user__company=request.user.company, date=today
-            )
-        }
+        avail_map = {}
+        checkin_map = {}
+        for a in UserAvailability.objects.filter(user__company=request.user.company, date=today):
+            active = _availability_active(a)
+            avail_map[a.user_id] = active
+            if active and a.checked_in_at:
+                checkin_map[a.user_id] = a.checked_in_at.isoformat()
+        # Assigned projects per user (for the availability label).
+        proj_map: dict[int, list] = {}
+        for uid, pname in (
+            UserProjectAssignment.objects
+            .filter(user__in=users)
+            .values_list('user_id', 'project__name')
+        ):
+            proj_map.setdefault(uid, []).append(pname)
         data = []
         for u in users:
             data.append({
@@ -706,11 +865,13 @@ class AvailabilityView(APIView):
                 'name':         u.name,
                 'role':         desig_map.get(u.designation.upper(), u.designation.lower()),
                 'is_available': avail_map.get(u.id, False),
+                'checked_in_at': checkin_map.get(u.id),
+                'projects':     proj_map.get(u.id, []),
             })
         return Response(data)
 
     def post(self, request):
-        """Admin toggles any user's availability for today."""
+        """Admin toggles any user's availability for today (by user_id)."""
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         from datetime import date as date_cls
@@ -723,9 +884,52 @@ class AvailabilityView(APIView):
             return Response({'detail': 'User not found.'}, status=404)
         obj, _ = UserAvailability.objects.update_or_create(
             user=user, date=today,
-            defaults={'is_available': is_available, 'checked_in_at': timezone.now()},
+            defaults={'is_available': is_available, 'checked_in_at': timezone.now() if is_available else None},
         )
+        # Marking available flushes the unassigned bucket to this role (window-gated).
+        dist_type = _dist_type_for(user)
+        if obj.is_available and dist_type:
+            _run_distribution(user.company, dist_type)
         return Response({'user_id': user.id, 'is_available': obj.is_available})
+
+
+class MyAvailabilityView(APIView):
+    """Self-service availability for telecallers / STMs.
+    Marking available stays active for AVAILABILITY_TTL_HOURS, then auto-resets."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import date as date_cls
+        today = str(date_cls.today())
+        avail = UserAvailability.objects.filter(user=request.user, date=today).first()
+        active = _availability_active(avail)
+        expires_at = None
+        if active and avail and avail.checked_in_at:
+            expires_at = (avail.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat()
+        return Response({
+            'is_available':  active,
+            'checked_in_at': avail.checked_in_at.isoformat() if (avail and avail.checked_in_at) else None,
+            'expires_at':    expires_at,
+            'ttl_hours':     AVAILABILITY_TTL_HOURS,
+        })
+
+    def post(self, request):
+        from datetime import date as date_cls
+        if not (is_telecaller(request.user) or is_stm(request.user)):
+            return Response({'detail': 'Only telecallers and STMs can mark their own availability.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        is_available = request.data.get('is_available', True)
+        today = str(date_cls.today())
+        obj, _ = UserAvailability.objects.update_or_create(
+            user=request.user, date=today,
+            defaults={'is_available': is_available, 'checked_in_at': timezone.now() if is_available else None},
+        )
+        active = _availability_active(obj)
+        # Marking available flushes the unassigned bucket to this user's role (window-gated).
+        if active:
+            _run_distribution(request.user.company, _dist_type_for(request.user))
+        expires_at = (obj.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat() if (active and obj.checked_in_at) else None
+        return Response({'is_available': active, 'expires_at': expires_at, 'ttl_hours': AVAILABILITY_TTL_HOURS})
 
 
 # ── Distribution Weights ──────────────────────────────────────────────────────
@@ -763,124 +967,185 @@ class DistributionWeightView(APIView):
 
 
 # ── Distribution ─────────────────────────────────────────────────────────────
+def _window_state(company, dist_type):
+    """Return 'open' | 'before_signin' | 'after_signout' for the company's
+    sign-in/sign-out window (IST). No settings → treated as 'open'."""
+    from zoneinfo import ZoneInfo
+    settings = DistributionSettings.objects.filter(company=company).first()
+    if not settings:
+        return 'open'
+    field_prefix = 'tc' if dist_type == 'telecaller' else 'stm'
+    now_ist = timezone.now().astimezone(ZoneInfo('Asia/Kolkata')).strftime('%H:%M')
+    signin  = str(getattr(settings, f'{field_prefix}_signin_time'))[:5]
+    signout = str(getattr(settings, f'{field_prefix}_signout_time'))[:5]
+    if now_ist < signin:
+        return 'before_signin'
+    if now_ist >= signout:
+        return 'after_signout'
+    return 'open'
+
+
+def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
+    """Weighted, project-aware, window-gated assignment of the current unassigned
+    bucket to available telecallers/STMs. Reusable by both the manual Distribute
+    button and the automatic triggers (lead created / marked available / warm).
+
+    gate='full'    → only runs when the window is 'open' (auto-assignment).
+    gate='signout' → runs unless 'after_signout' (manual admin override).
+
+    triggered_by=None marks the assignment as automatic ("System") in history.
+    Returns the same dict shape the API has always returned.
+    """
+    from datetime import date as date_cls
+
+    desig = 'TELECALLER' if dist_type == 'telecaller' else 'STM'
+
+    state = _window_state(company, dist_type)
+    if state == 'after_signout':
+        return {'distributed': 0, 'message': f'Distribution window closed for {desig}. Leads remain unassigned.'}
+    if gate == 'full' and state != 'open':
+        return {'distributed': 0, 'message': f'Outside {desig} distribution window. Leads remain unassigned.'}
+
+    today = str(date_cls.today())
+
+    # Only users marked available today and still within the 12h availability window.
+    cutoff = timezone.now() - timedelta(hours=AVAILABILITY_TTL_HOURS)
+    avail_ids = set(
+        UserAvailability.objects.filter(
+            user__company=company,
+            user__designation__iexact=desig,
+            date=today,
+            is_available=True,
+            checked_in_at__gte=cutoff,
+        ).values_list('user_id', flat=True)
+    )
+    if not avail_ids:
+        return {'distributed': 0, 'message': f'No {desig}s have marked available today.'}
+
+    members = list(User.objects.filter(pk__in=avail_ids, is_active=True).only('id', 'name'))
+    if not members:
+        return {'distributed': 0, 'message': f'No active {desig} users available.'}
+
+    weight_map = {
+        w.user_id: w.weight
+        for w in UserDistributionWeight.objects.filter(user__in=members)
+    }
+
+    # Current unassigned bucket (prev-day leftovers + today's live leads).
+    company_leads = Lead.objects.filter(company=company)
+    if dist_type == 'telecaller':
+        qs = company_leads.filter(telecaller__isnull=True, status='new').order_by('created_at')
+    else:
+        qs = company_leads.filter(status='warm_transferred', stm__isnull=True).order_by('created_at')
+
+    leads = list(qs)
+    if not leads:
+        return {'distributed': 0, 'message': 'No unassigned leads found.'}
+
+    # Today's existing assignment counts (for fair weighted continuation across runs).
+    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if dist_type == 'telecaller':
+        count_qs = Lead.objects.filter(
+            telecaller__in=members, telecaller_assigned_at__gte=today_start
+        ).values('telecaller_id').annotate(n=Count('id'))
+        counts = {row['telecaller_id']: row['n'] for row in count_qs}
+    else:
+        count_qs = Lead.objects.filter(
+            stm__in=members, stm_assigned_at__gte=today_start
+        ).values('stm_id').annotate(n=Count('id'))
+        counts = {row['stm_id']: row['n'] for row in count_qs}
+    for m in members:
+        counts.setdefault(m.id, 0)
+
+    # Project assignments (STRICT): a member only receives leads of the project(s)
+    # assigned to them. A member with NO project assigned receives NOTHING — and a
+    # lead with no project can't be routed to anyone.
+    proj_map = {}
+    for uid, pid in UserProjectAssignment.objects.filter(
+        user__in=members
+    ).values_list('user_id', 'project_id'):
+        proj_map.setdefault(uid, set()).add(pid)
+
+    def _eligible(uid, lead):
+        assigned = proj_map.get(uid)
+        if not assigned or lead.project_id is None:
+            return False
+        return lead.project_id in assigned
+
+    member_ids   = [m.id for m in members]
+    id_to_member = {m.id: m for m in members}
+    user_leads   = {m.id: [] for m in members}
+    now = timezone.now()
+    skipped = 0
+
+    for lead in leads:
+        eligible = [uid for uid in member_ids if _eligible(uid, lead)]
+        if not eligible:
+            skipped += 1
+            continue
+        best = min(eligible, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
+        user_leads[best].append(lead.pk)
+        counts[best] += 1
+
+    assignments = []
+    history_rows = []
+    note = 'Auto-assigned' if triggered_by is None else 'Manually assigned'
+    for uid, pks in user_leads.items():
+        if not pks:
+            continue
+        if dist_type == 'telecaller':
+            Lead.objects.filter(pk__in=pks).update(
+                telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
+            )
+        else:
+            Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+        for pk in pks:
+            history_rows.append(LeadStatusHistory(
+                lead_id=pk, changed_by=triggered_by,
+                field_changed=dist_type, old_value='', new_value=id_to_member[uid].name,
+                remarks=note,
+            ))
+        assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+
+    if history_rows:
+        LeadStatusHistory.objects.bulk_create(history_rows)
+
+    distributed = sum(a['count'] for a in assignments)
+    if distributed:
+        DistributionLog.objects.create(
+            company=company,
+            dist_type=dist_type,
+            triggered_by=triggered_by,
+            leads_distributed=distributed,
+            details={'assignments': assignments, 'auto': triggered_by is None},
+        )
+    resp = {'distributed': distributed, 'assignments': {a['name']: a['count'] for a in assignments}}
+    if skipped:
+        resp['message'] = f'{skipped} lead(s) left unassigned — no available {desig} is assigned to their project.'
+    return resp
+
+
+def _record_lead_created(lead, by=None):
+    """Add the opening 'Lead created' entry to a lead's history (with its source)."""
+    src = lead.source.name if lead.source_id else 'manual'
+    campaign = lead.meta_campaign_name or ''
+    new_value = (f'{src} · {campaign}' if campaign else src)[:100]
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=by, field_changed='created',
+        old_value='', new_value=new_value, remarks='Lead created',
+    )
+
+
 class DistributeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-
-        from datetime import date as date_cls
-        from zoneinfo import ZoneInfo
-
         dist_type = request.data.get('type', 'telecaller')   # 'telecaller' | 'stm'
-        desig_map = {'telecaller': 'TELECALLER', 'stm': 'STM'}
-        desig     = desig_map.get(dist_type, 'TELECALLER')
-
-        # Check signout window (IST-aware)
-        settings = DistributionSettings.objects.filter(company=request.user.company).first()
-        if settings:
-            ist = ZoneInfo('Asia/Kolkata')
-            now_ist = timezone.now().astimezone(ist)
-            current_time = now_ist.strftime('%H:%M')
-            signout = str(getattr(settings, f'{dist_type}_signout_time'))[:5]
-            if current_time >= signout:
-                return Response({
-                    'distributed': 0,
-                    'message': f'Distribution window closed (signout at {signout}). Leads will remain unassigned.',
-                })
-
-        today = str(date_cls.today())
-
-        # Only users who are signed in today
-        avail_ids = set(
-            UserAvailability.objects.filter(
-                user__company=request.user.company,
-                user__designation__iexact=desig,
-                date=today,
-                is_available=True,
-            ).values_list('user_id', flat=True)
-        )
-        if not avail_ids:
-            return Response({'distributed': 0, 'message': f'No {desig}s have signed in today.'})
-
-        members = list(
-            User.objects.filter(pk__in=avail_ids, is_active=True)
-            .only('id', 'name')
-        )
-        if not members:
-            return Response({'distributed': 0, 'message': f'No active {desig} users available.'})
-
-        # Load weights
-        weight_map = {
-            w.user_id: w.weight
-            for w in UserDistributionWeight.objects.filter(user__in=members)
-        }
-
-        # Get unassigned leads (scoped to this company)
-        company_leads = scope_to_company(Lead.objects.all(), request.user)
-        if dist_type == 'telecaller':
-            qs = company_leads.filter(
-                telecaller__isnull=True, status='new'
-            ).order_by('created_at')
-        else:
-            qs = company_leads.filter(
-                status='warm_transferred', stm__isnull=True
-            ).order_by('created_at')
-
-        leads = list(qs)
-        if not leads:
-            return Response({'distributed': 0, 'message': 'No unassigned leads found.'})
-
-        # Today's existing assignment counts (for fair weighted continuation)
-        today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        if dist_type == 'telecaller':
-            count_qs = Lead.objects.filter(
-                telecaller__in=members, telecaller_assigned_at__gte=today_start
-            ).values('telecaller_id').annotate(n=Count('id'))
-            counts = {row['telecaller_id']: row['n'] for row in count_qs}
-        else:
-            count_qs = Lead.objects.filter(
-                stm__in=members, stm_assigned_at__gte=today_start
-            ).values('stm_id').annotate(n=Count('id'))
-            counts = {row['stm_id']: row['n'] for row in count_qs}
-
-        for m in members:
-            counts.setdefault(m.id, 0)
-
-        # Weighted round-robin: pick member with lowest (assigned / weight) ratio
-        member_ids = [m.id for m in members]
-        id_to_member = {m.id: m for m in members}
-        user_leads: dict[int, list] = {m.id: [] for m in members}
-        now = timezone.now()
-
-        for lead in leads:
-            best = min(member_ids, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
-            user_leads[best].append(lead.pk)
-            counts[best] += 1
-
-        # Batch update
-        assignments = []
-        for uid, pks in user_leads.items():
-            if not pks:
-                continue
-            if dist_type == 'telecaller':
-                Lead.objects.filter(pk__in=pks).update(
-                    telecaller_id=uid, status='assigned', telecaller_assigned_at=now,
-                )
-            else:
-                Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
-            assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
-
-        distributed = sum(a['count'] for a in assignments)
-        DistributionLog.objects.create(
-            company=request.user.company,
-            dist_type=dist_type,
-            triggered_by=request.user,
-            leads_distributed=distributed,
-            details={'assignments': assignments},
-        )
-        return Response({'distributed': distributed, 'assignments': {a['name']: a['count'] for a in assignments}})
+        # Manual admin trigger: weight-based, allowed before sign-in, blocked after sign-out.
+        resp = _run_distribution(request.user.company, dist_type, triggered_by=request.user, gate='signout')
+        return Response(resp)
 
 
 class DistributionLogView(APIView):
@@ -974,6 +1239,9 @@ class BulkImportLeadsView(APIView):
                     existing_keys.add(clean)  # catch in-batch duplicates too
 
         Lead.objects.bulk_create(to_create, ignore_conflicts=True)
+        # Auto-assign the freshly imported bucket to available telecallers (window-gated).
+        if imported:
+            _run_distribution(company, 'telecaller')
         return Response({'imported': imported, 'duplicates': duplicates, 'errors': errors, 'failed': failed})
 
 
@@ -1154,6 +1422,9 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         last_lead_at=timezone.now(),
         is_active=True,
     )
+    _record_lead_created(lead)  # source = 'meta'
+    # Auto-assign the live lead to an available telecaller (window-gated).
+    _run_distribution(company, 'telecaller')
     return lead
 
 
