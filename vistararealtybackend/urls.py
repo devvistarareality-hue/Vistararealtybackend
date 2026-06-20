@@ -12,10 +12,4 @@ urlpatterns = [
     path('api/auth/', include('accounts.urls')),
     path('api/attendance/', include('attendance.urls')),
     path('api/sales/', include('sales.urls')),
-    # ERP
-    path('api/erp/master/',     include('erp_master.urls')),
-    path('api/erp/execution/',  include('execution.urls')),
-    path('api/erp/purchase/',   include('purchase.urls')),
-    path('api/erp/inventory/',  include('inventory.urls')),
-    path('api/erp/finance/',    include('finance.urls')),
 ]
