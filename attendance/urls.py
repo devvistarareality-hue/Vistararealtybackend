@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     DashboardView, ApplyLeaveView, LeaveBalanceView, LeaveHistoryView,
     LeaveActionView, MonthlyAttendanceView, TodayAttendanceView, SignInView, SignOutView,
-    ModifyAttendanceView,
+    ModifyAttendanceView, TeamLeaveRequestsView,
 )
 
 urlpatterns = [
@@ -15,5 +15,6 @@ urlpatterns = [
     path('apply-leave/',            ApplyLeaveView.as_view(),   name='apply-leave'),
     path('leave-balance/',          LeaveBalanceView.as_view(), name='leave-balance'),
     path('leave-history/',          LeaveHistoryView.as_view(), name='leave-history'),
+    path('team-leaves/',            TeamLeaveRequestsView.as_view(), name='team-leaves'),
     path('leave-action/<int:pk>/',  LeaveActionView.as_view(),  name='leave-action'),
 ]

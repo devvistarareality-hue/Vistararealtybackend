@@ -131,13 +131,22 @@ class DesignationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        desigs = Designation.objects.filter(company=request.user.company)
-        return Response(DesignationSerializer(desigs, many=True).data)
+        if is_platform_admin(request.user):
+            desigs = Designation.objects.all()
+        else:
+            desigs = Designation.objects.filter(company=request.user.company)
+        return Response(DesignationSerializer(desigs.select_related('company'), many=True).data)
 
     def post(self, request):
         serializer = DesignationSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(company=request.user.company)
+            company = request.user.company
+            company_id = request.data.get('company_id')
+            if company_id and is_platform_admin(request.user):
+                company = Company.objects.filter(pk=company_id).first()
+                if company is None:
+                    return Response({'company_id': 'Company not found.'}, status=status.HTTP_400_BAD_REQUEST)
+            serializer.save(company=company)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -146,8 +155,9 @@ class DesignationDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk):
+        qs = Designation.objects.all() if is_platform_admin(request.user) else Designation.objects.filter(company=request.user.company)
         try:
-            desig = Designation.objects.get(pk=pk, company=request.user.company)
+            desig = qs.get(pk=pk)
         except Designation.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         desig.delete()

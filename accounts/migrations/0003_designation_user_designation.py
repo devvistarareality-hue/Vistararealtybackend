@@ -2,6 +2,24 @@ from django.db import migrations, models
 import django.db.models.deletion
 
 
+def add_designation_column(apps, schema_editor):
+    """Idempotently add accounts_user.designation for old partial deployments.
+
+    The column is normally created by 0001_initial; this is only a safety patch
+    for databases that were deployed before the field existed. Postgres-only
+    syntax, so it is skipped on other backends (e.g. SQLite used by tests/CI),
+    where 0001_initial already created the column.
+    """
+    if schema_editor.connection.vendor == 'postgresql':
+        schema_editor.execute(
+            "ALTER TABLE accounts_user ADD COLUMN IF NOT EXISTS designation VARCHAR(100) NOT NULL DEFAULT '';"
+        )
+
+
+def noop(apps, schema_editor):
+    pass
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,12 +28,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # Use raw SQL with IF NOT EXISTS so this is safe whether or not
-        # the column was already added by a previous partial deployment.
-        migrations.RunSQL(
-            sql="ALTER TABLE accounts_user ADD COLUMN IF NOT EXISTS designation VARCHAR(100) NOT NULL DEFAULT '';",
-            reverse_sql="ALTER TABLE accounts_user DROP COLUMN IF EXISTS designation;",
-        ),
+        migrations.RunPython(add_designation_column, noop),
         migrations.CreateModel(
             name='Designation',
             fields=[

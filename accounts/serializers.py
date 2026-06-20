@@ -20,12 +20,20 @@ class UserSerializer(serializers.ModelSerializer):
     company_code      = serializers.SerializerMethodField()
     company_name      = serializers.SerializerMethodField()
     reporting_manager = ReportingManagerSerializer(read_only=True)
+    is_approver       = serializers.SerializerMethodField()
 
     def get_company_code(self, obj):
         return obj.company.code if obj.company else ''
 
     def get_company_name(self, obj):
         return obj.company.name if obj.company else ''
+
+    def get_is_approver(self, obj):
+        # Can this user action leave requests? Admins/staff, or anyone who is a
+        # reporting manager for at least one other user.
+        if obj.is_staff or getattr(obj, 'role', '') == 'Admin':
+            return True
+        return obj.subordinates.exists()
 
     class Meta:
         model  = User
@@ -34,14 +42,17 @@ class UserSerializer(serializers.ModelSerializer):
             'role', 'department', 'designation', 'avatar_url',
             'modules', 'manager_modules',
             'company_code', 'company_name', 'is_staff',
-            'reporting_manager',
+            'reporting_manager', 'is_approver',
         ]
 
 
 class DesignationSerializer(serializers.ModelSerializer):
+    company_code = serializers.CharField(source='company.code', read_only=True)
+    company_name = serializers.CharField(source='company.name', read_only=True)
+
     class Meta:
         model  = Designation
-        fields = ['id', 'name', 'module']
+        fields = ['id', 'name', 'module', 'company_code', 'company_name']
 
 
 class UserListSerializer(serializers.ModelSerializer):
