@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
@@ -37,6 +38,10 @@ def get_tokens_for_user(user):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    # Brute-force / credential-stuffing protection: cap login attempts per client IP.
+    # Rate configured by REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'].
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)

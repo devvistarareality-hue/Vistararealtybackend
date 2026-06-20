@@ -118,6 +118,11 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    # Throttle rates for scoped throttles (applied per-view via throttle_scope).
+    # 'login' guards /api/auth/login/ against brute-force / credential stuffing.
+    'DEFAULT_THROTTLE_RATES': {
+        'login': os.getenv('LOGIN_THROTTLE_RATE', '10/min'),
+    },
 }
 
 # ── JWT Settings ──────────────────────────────────────────────────────
@@ -127,5 +132,15 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS':  True,
 }
 
-# ── CORS — mobile apps don't enforce CORS (browser-only), allow all ───
-CORS_ALLOW_ALL_ORIGINS = True
+# ── CORS ──────────────────────────────────────────────────────────────
+# Mobile apps don't send an Origin header (CORS is browser-only), so locking
+# this down does NOT affect the Expo app — only the web frontend's browser.
+# Set CORS_ALLOWED_ORIGINS in the environment (comma-separated) to restrict to
+# your web origins, e.g. "https://app.vistara.example,https://vrl.vercel.app".
+# Falls back to allow-all only when unset, so existing deploys never break.
+_cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', '').strip()
+if _cors_origins:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
+    CORS_ALLOW_CREDENTIALS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
