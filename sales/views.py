@@ -549,7 +549,8 @@ class TelecallerListView(APIView):
 
     def get(self, request):
         crm_role = request.query_params.get('crm_role')
-        base_qs  = User.objects.filter(company=request.user.company, is_active=True)
+        company  = _resolve_company(request)
+        base_qs  = User.objects.filter(company=company, is_active=True)
         sales_qs = base_qs.filter(modules__contains=['Sales']).order_by('name')
 
         if crm_role in ('telecaller', 'stm'):
@@ -604,7 +605,7 @@ class SalesTeamView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        company = request.user.company
+        company = _resolve_company(request)
         users = User.objects.filter(
             company=company,
             is_active=True,
