@@ -10,3 +10,4 @@ dj-database-url>=2.1
 requests>=2.31
 sentry-sdk>=2.0
 django-redis>=5.4
+cryptography>=42.0

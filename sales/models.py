@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
+from .fields import EncryptedTextField
 
 
 LEAD_STATUS = [
@@ -391,7 +392,9 @@ class MetaWebhookConfig(models.Model):
         related_name='meta_webhook_config', null=True, blank=True,
     )
     verify_token = models.CharField(max_length=200)
-    page_access_token = models.CharField(max_length=600, blank=True)
+    # Encrypted at rest (Fernet). Long-lived FB Page token = full page API access.
+    # verify_token stays plaintext — it's used in an equality lookup and is low-value.
+    page_access_token = EncryptedTextField(blank=True)
     default_project = models.ForeignKey(
         Project, on_delete=models.SET_NULL, null=True, blank=True
     )
