@@ -50,6 +50,18 @@ class User(AbstractBaseUser, PermissionsMixin):
         return f'{self.user_code} ({self.company.code if self.company else "admin"})'
 
 
+class PushToken(models.Model):
+    PLATFORM_CHOICES = [('android', 'Android'), ('ios', 'iOS'), ('web', 'Web')]
+    user      = models.ForeignKey(User, on_delete=models.CASCADE, related_name='push_tokens')
+    token     = models.TextField(unique=True)
+    platform  = models.CharField(max_length=10, choices=PLATFORM_CHOICES, default='android')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.user.user_code} — {self.platform}'
+
+
 class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)
