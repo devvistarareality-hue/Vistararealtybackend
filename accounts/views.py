@@ -194,3 +194,19 @@ class PushTokenView(APIView):
         token = request.data.get('token', '').strip()
         PushToken.objects.filter(user=request.user, token=token).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PushTokenTestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from notifications import send_push_to_user
+        count = PushToken.objects.filter(user=request.user).count()
+        if not count:
+            return Response({'detail': 'No push tokens registered for your account.'}, status=400)
+        send_push_to_user(
+            request.user,
+            'Test Notification',
+            f'Hello {request.user.name}! Push notifications are working.',
+        )
+        return Response({'detail': f'Test notification sent to {count} device(s).'})
