@@ -129,6 +129,7 @@ class ClosureSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
+    referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
 
     class Meta:
         model = Closure

@@ -669,7 +669,10 @@ class SiteVisitListView(APIView):
             request.user, 'lead__company',
         )
         if not is_admin_or_manager(request.user):
-            qs = qs.filter(stm=request.user)
+            if is_telecaller(request.user):
+                qs = qs.filter(referred_by_telecaller=request.user)
+            else:
+                qs = qs.filter(stm=request.user)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
@@ -721,7 +724,10 @@ class ClosureListView(APIView):
             request.user, 'lead__company',
         )
         if not is_admin_or_manager(request.user):
-            qs = qs.filter(stm=request.user)
+            if is_telecaller(request.user):
+                qs = qs.filter(referred_by_telecaller=request.user)
+            else:
+                qs = qs.filter(stm=request.user)
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
