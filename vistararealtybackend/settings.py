@@ -72,10 +72,16 @@ if os.getenv('DATABASE_URL'):
     DATABASES = {
         'default': dj_database_url.parse(
             os.getenv('DATABASE_URL'),
-            conn_max_age=60,
+            # 0 by default: with Neon's pooled (PgBouncer) endpoint, app-side persistent
+            # connections hold pooler slots — especially now with multiple gunicorn
+            # workers × threads. Override via DB_CONN_MAX_AGE if on a session pooler.
+            conn_max_age=int(os.getenv('DB_CONN_MAX_AGE', '0')),
             ssl_require=not DEBUG,
         )
     }
+    # PgBouncer transaction mode doesn't keep server-side cursors across pooled
+    # connections; disable them so .iterator()/large queries stay correct.
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
 else:
     _db_engine = os.getenv('DB_ENGINE', 'django.db.backends.sqlite3')
     _is_postgres = _db_engine == 'django.db.backends.postgresql'
@@ -118,6 +124,11 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    # Throttle rates for scoped throttles (applied per-view via throttle_scope).
+    # 'login' guards /api/auth/login/ against brute-force / credential stuffing.
+    'DEFAULT_THROTTLE_RATES': {
+        'login': os.getenv('LOGIN_THROTTLE_RATE', '10/min'),
+    },
 }
 
 # ── JWT Settings ──────────────────────────────────────────────────────
@@ -127,5 +138,32 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS':  True,
 }
 
-# ── CORS — mobile apps don't enforce CORS (browser-only), allow all ───
-CORS_ALLOW_ALL_ORIGINS = True
+# ── CORS ──────────────────────────────────────────────────────────────
+# Mobile apps don't send an Origin header (CORS is browser-only), so locking
+# this down does NOT affect the Expo app — only the web frontend's browser.
+# Set CORS_ALLOWED_ORIGINS in the environment (comma-separated) to restrict to
+# your web origins, e.g. "https://app.vistara.example,https://vrl.vercel.app".
+# Falls back to allow-all only when unset, so existing deploys never break.
+_cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', '').strip()
+if _cors_origins:
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
+    CORS_ALLOW_CREDENTIALS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
+
+# ── Error monitoring (Sentry) ─────────────────────────────────────────
+# No-op unless SENTRY_DSN is set; guarded so a missing package never breaks boot.
+_sentry_dsn = os.getenv('SENTRY_DSN', '').strip()
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            integrations=[DjangoIntegration()],
+            traces_sample_rate=float(os.getenv('SENTRY_TRACES_RATE', '0.1')),
+            send_default_pii=False,
+            environment=os.getenv('RAILWAY_ENVIRONMENT', 'production'),
+        )
+    except Exception:
+        pass

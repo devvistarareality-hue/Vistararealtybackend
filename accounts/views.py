@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
@@ -37,6 +38,10 @@ def get_tokens_for_user(user):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    # Brute-force / credential-stuffing protection: cap login attempts per client IP.
+    # Rate configured by REST_FRAMEWORK['DEFAULT_THROTTLE_RATES']['login'].
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
@@ -78,14 +83,17 @@ class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # select_related avoids an N+1: UserListSerializer reads company.code/name and
+        # the nested reporting_manager for every row.
+        base = User.objects.select_related('company', 'reporting_manager')
         if is_platform_admin(request.user):
             company_id = request.query_params.get('company_id')
             if company_id:
-                users = User.objects.filter(company_id=company_id).order_by('name')
+                users = base.filter(company_id=company_id).order_by('name')
             else:
-                users = User.objects.all().order_by('company__name', 'name')
+                users = base.order_by('company__name', 'name')
         else:
-            users = User.objects.filter(company=request.user.company).order_by('name')
+            users = base.filter(company=request.user.company).order_by('name')
         return Response(UserListSerializer(users, many=True).data)
 
     def post(self, request):

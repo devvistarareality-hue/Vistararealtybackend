@@ -204,6 +204,32 @@ class LeadListView(APIView):
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(company_id=request.query_params['company_id'])
 
+        # Work split for telecaller / STM portals: separate the leads they still have
+        # to call ('pending') from the ones they've already actioned ('called'),
+        # keyed off their own status field. Admins/managers fall back to overall status.
+        work = request.query_params.get('work')
+        if work == 'pending':
+            if is_telecaller(request.user):
+                qs = qs.filter(telecaller_status='')
+            elif is_stm(request.user):
+                qs = qs.filter(stm_status='')
+            else:
+                qs = qs.filter(status='new')
+        elif work == 'called':
+            if is_telecaller(request.user):
+                qs = qs.exclude(telecaller_status='')
+            elif is_stm(request.user):
+                qs = qs.exclude(stm_status='')
+            else:
+                qs = qs.exclude(status='new')
+
+        # Optional ordering override (default is newest-first from the model Meta).
+        # 'pending' lists use oldest-first (FIFO) so fresh leads queue at the bottom
+        # and never push down the lead currently being worked.
+        ordering = request.query_params.get('ordering')
+        if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at'):
+            qs = qs.order_by(ordering)
+
         total = qs.count()
         page = int(request.query_params.get('page', 1))
         offset = (page - 1) * PAGE_SIZE
@@ -543,7 +569,14 @@ class BackfillDuplicatesView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=403)
         from collections import defaultdict
-        leads = scope_to_company(Lead.objects.all(), request.user).only('id', 'phone', 'created_at').order_by('created_at')
+        # Stream rows with .iterator() so the whole Lead table is never materialised in
+        # memory at once (prevents OOM on large tenants). Only id/phone are accumulated.
+        leads = (
+            scope_to_company(Lead.objects.all(), request.user)
+            .only('id', 'phone', 'created_at')
+            .order_by('created_at')
+            .iterator(chunk_size=2000)
+        )
         phone_map = defaultdict(list)
         for l in leads:
             clean = ''.join(c for c in (l.phone or '') if c.isdigit())[-10:]
@@ -584,8 +617,12 @@ class FollowUpListView(APIView):
         )
         if not is_admin_or_manager(request.user):
             qs = qs.filter(assigned_to=request.user)
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(lead__company_id=request.query_params['company_id'])
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
         return Response(FollowUpSerializer(qs, many=True).data)
 
     def post(self, request):
