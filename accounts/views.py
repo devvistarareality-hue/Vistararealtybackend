@@ -79,7 +79,11 @@ class UserListCreateView(APIView):
 
     def get(self, request):
         if is_platform_admin(request.user):
-            users = User.objects.all().order_by('company__name', 'name')
+            company_id = request.query_params.get('company_id')
+            if company_id:
+                users = User.objects.filter(company_id=company_id).order_by('name')
+            else:
+                users = User.objects.all().order_by('company__name', 'name')
         else:
             users = User.objects.filter(company=request.user.company).order_by('name')
         return Response(UserListSerializer(users, many=True).data)
