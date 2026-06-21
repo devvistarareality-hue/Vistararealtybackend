@@ -16,8 +16,6 @@ media/
 
 # Environment
 .env
-firebase-service-account.json
-
 # IDE
 .idea/
 .vscode/

@@ -6,7 +6,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
-from .models import User, Designation, PushToken
+from .models import User, Designation
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -176,37 +176,3 @@ class DesignationDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class PushTokenView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        token    = request.data.get('token', '').strip()
-        platform = request.data.get('platform', 'android')
-        if not token:
-            return Response({'detail': 'Token required.'}, status=status.HTTP_400_BAD_REQUEST)
-        PushToken.objects.update_or_create(
-            token=token,
-            defaults={'user': request.user, 'platform': platform},
-        )
-        return Response({'detail': 'Token saved.'})
-
-    def delete(self, request):
-        token = request.data.get('token', '').strip()
-        PushToken.objects.filter(user=request.user, token=token).delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-class PushTokenTestView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        from notifications import send_push_to_user
-        count = PushToken.objects.filter(user=request.user).count()
-        if not count:
-            return Response({'detail': 'No push tokens registered for your account.'}, status=400)
-        send_push_to_user(
-            request.user,
-            'Test Notification',
-            f'Hello {request.user.name}! Push notifications are working.',
-        )
-        return Response({'detail': f'Test notification sent to {count} device(s).'})
