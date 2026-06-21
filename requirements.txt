@@ -9,3 +9,4 @@ whitenoise>=6.6
 dj-database-url>=2.1
 requests>=2.31
 sentry-sdk>=2.0
+firebase_admin==7.4.0
