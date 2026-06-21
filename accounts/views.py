@@ -87,7 +87,11 @@ class UserListCreateView(APIView):
         # the nested reporting_manager for every row.
         base = User.objects.select_related('company', 'reporting_manager')
         if is_platform_admin(request.user):
-            users = base.order_by('company__name', 'name')
+            company_id = request.query_params.get('company_id')
+            if company_id:
+                users = base.filter(company_id=company_id).order_by('name')
+            else:
+                users = base.order_by('company__name', 'name')
         else:
             users = base.filter(company=request.user.company).order_by('name')
         return Response(UserListSerializer(users, many=True).data)
