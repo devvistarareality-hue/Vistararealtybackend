@@ -146,9 +146,18 @@ class StatsView(APIView):
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
         )
+        sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
+        if not is_admin_or_manager(request.user):
+            if is_telecaller(request.user):
+                sv_qs = sv_qs.filter(referred_by_telecaller=request.user)
+                cl_qs = cl_qs.filter(referred_by_telecaller=request.user)
+            else:
+                sv_qs = sv_qs.filter(stm=request.user)
+                cl_qs = cl_qs.filter(stm=request.user)
         sv_done, closures, active_projects = (
-            scope_leads_to_role(scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company'), request.user, 'lead__').filter(**sv_filter).count(),
-            scope_leads_to_role(scope_to_company(Closure.objects.all(), request.user, 'lead__company'), request.user, 'lead__').filter(**cl_filter).count(),
+            sv_qs.filter(**sv_filter).count(),
+            cl_qs.filter(**cl_filter).count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
         # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
