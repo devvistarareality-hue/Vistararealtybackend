@@ -139,6 +139,19 @@ class UserDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class NotificationTestView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from notifications import send_push_to_user
+        send_push_to_user(
+            request.user.user_code,
+            'Test Notification',
+            f'Hello {request.user.name}! Notifications are working.',
+        )
+        return Response({'detail': 'Test notification sent.'})
+
+
 class DesignationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -174,3 +187,5 @@ class DesignationDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         desig.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+

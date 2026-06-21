@@ -16,7 +16,6 @@ media/
 
 # Environment
 .env
-
 # IDE
 .idea/
 .vscode/
