@@ -1339,7 +1339,6 @@ class ReportsView(APIView):
 
     def get(self, request):
         from django.db.models import Count, Sum, Q
-        from concurrent.futures import ThreadPoolExecutor
 
         user      = request.user
         leads_qs  = scope_to_company(Lead.objects.all(), user)
@@ -1350,6 +1349,19 @@ class ReportsView(APIView):
             leads_qs   = leads_qs.filter(company_id=company_id)
             sv_qs      = sv_qs.filter(lead__company_id=company_id)
             closure_qs = closure_qs.filter(lead__company_id=company_id)
+
+        # Optional date window — bounds the aggregate scans. No default, so the
+        # existing all-time behaviour is unchanged unless the client sends dates.
+        date_from = request.query_params.get('date_from')
+        date_to   = request.query_params.get('date_to')
+        if date_from:
+            leads_qs   = leads_qs.filter(created_at__date__gte=date_from)
+            sv_qs      = sv_qs.filter(created_at__date__gte=date_from)
+            closure_qs = closure_qs.filter(closure_date__gte=date_from)
+        if date_to:
+            leads_qs   = leads_qs.filter(created_at__date__lte=date_to)
+            sv_qs      = sv_qs.filter(created_at__date__lte=date_to)
+            closure_qs = closure_qs.filter(closure_date__lte=date_to)
 
         def get_campaigns():
             return list(
@@ -1404,20 +1416,16 @@ class ReportsView(APIView):
         def get_closures():
             return closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
 
-        # Run all 5 queries in parallel threads
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            f_camp  = ex.submit(get_campaigns)
-            f_tc    = ex.submit(get_telecallers)
-            f_stm   = ex.submit(get_stms)
-            f_summ  = ex.submit(get_summary)
-            f_close = ex.submit(get_closures)
-
+        # Run sequentially. These are indexed aggregates (fast); the previous
+        # ThreadPoolExecutor opened 5 DB connections per request and didn't close
+        # them in the worker threads — a connection leak that, with the pooled
+        # endpoint + multiple gunicorn workers, risked exhausting Neon.
         return Response({
-            'campaigns':  f_camp.result(),
-            'telecallers': f_tc.result(),
-            'stms':        f_stm.result(),
-            'closures':    ClosureSerializer(f_close.result(), many=True).data,
-            'summary':     f_summ.result(),
+            'campaigns':   get_campaigns(),
+            'telecallers': get_telecallers(),
+            'stms':        get_stms(),
+            'closures':    ClosureSerializer(get_closures(), many=True).data,
+            'summary':     get_summary(),
         })
 
 
