@@ -6,7 +6,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
-from .models import User, Designation
+from .models import User, Designation, PushToken
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -173,4 +173,24 @@ class DesignationDetailView(APIView):
         except Designation.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         desig.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PushTokenView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token    = request.data.get('token', '').strip()
+        platform = request.data.get('platform', 'android')
+        if not token:
+            return Response({'detail': 'Token required.'}, status=status.HTTP_400_BAD_REQUEST)
+        PushToken.objects.update_or_create(
+            token=token,
+            defaults={'user': request.user, 'platform': platform},
+        )
+        return Response({'detail': 'Token saved.'})
+
+    def delete(self, request):
+        token = request.data.get('token', '').strip()
+        PushToken.objects.filter(user=request.user, token=token).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
