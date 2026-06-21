@@ -151,6 +151,28 @@ if _cors_origins:
 else:
     CORS_ALLOW_ALL_ORIGINS = True
 
+# ── Cache ─────────────────────────────────────────────────────────────
+# Uses Redis when REDIS_URL is set (shared across gunicorn workers → makes the
+# login throttle global and caches consistent). Falls back to per-process local
+# memory otherwise, so nothing breaks before Redis is provisioned.
+_redis_url = os.getenv('REDIS_URL', '').strip()
+if _redis_url:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': _redis_url,
+            'OPTIONS': {'CLIENT_CLASS': 'django_redis.client.DefaultClient'},
+            'KEY_PREFIX': 'vistara',
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'vistara-local',
+        }
+    }
+
 # ── Error monitoring (Sentry) ─────────────────────────────────────────
 # No-op unless SENTRY_DSN is set; guarded so a missing package never breaks boot.
 _sentry_dsn = os.getenv('SENTRY_DSN', '').strip()

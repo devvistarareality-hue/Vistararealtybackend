@@ -114,6 +114,17 @@ class StatsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from django.core.cache import cache
+
+        # Dashboard stats are ~5 COUNT/aggregate queries; cache briefly per
+        # (user, company) so repeated dashboard loads don't re-hit Postgres.
+        # 20s TTL keeps numbers near-live. Shared (consistent) once Redis is on.
+        company_id = request.query_params.get('company_id')
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
 
@@ -121,7 +132,6 @@ class StatsView(APIView):
         leads_qs = scope_leads_to_role(leads_qs, request.user)
 
         # Platform admin: filter by a specific company (used by admin company picker)
-        company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(request.user):
             leads_qs   = leads_qs.filter(company_id=company_id)
             sv_filter  = {'lead__company_id': company_id}
@@ -141,11 +151,10 @@ class StatsView(APIView):
             scope_leads_to_role(scope_to_company(Closure.objects.all(), request.user, 'lead__company'), request.user, 'lead__').filter(**cl_filter).count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
-        recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').only(
-            'id', 'name', 'phone', 'status', 'created_at',
-            'project__name', 'source__name', 'telecaller__name', 'stm__name',
-        ).order_by('-created_at')[:8]
-        return Response({
+        # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
+        # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
+        recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
+        payload = {
             'total_leads':     agg['total_leads'],
             'new_leads':       agg['new_leads'],
             'leads_today':     agg['leads_today'],
@@ -153,7 +162,9 @@ class StatsView(APIView):
             'closures':        closures,
             'active_projects': active_projects,
             'recent_leads':    LeadListSerializer(recent, many=True).data,
-        })
+        }
+        cache.set(cache_key, payload, timeout=20)
+        return Response(payload)
 
 
 class LeadListView(APIView):
