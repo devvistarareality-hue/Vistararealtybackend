@@ -203,8 +203,11 @@ class LeadListView(APIView):
             qs = qs.filter(telecaller_status=request.query_params['telecaller_status'])
         if request.query_params.get('stm_status'):
             qs = qs.filter(stm_status=request.query_params['stm_status'])
-        if request.query_params.get('project_id'):
-            qs = qs.filter(project_id=request.query_params['project_id'])
+        project_id = request.query_params.get('project_id')
+        if project_id == 'none':
+            qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
+        elif project_id:
+            qs = qs.filter(project_id=project_id)
         if request.query_params.get('source_id'):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('telecaller_id'):
@@ -1485,7 +1488,9 @@ def _fetch_meta_lead_data(leadgen_id, page_access_token):
         url = f'https://graph.facebook.com/v19.0/{leadgen_id}'
         r = http_requests.get(url, params={
             'access_token': page_access_token,
-            'fields': 'field_data,ad_id,ad_name',
+            # form_id decides project routing — fetch it authoritatively here so we
+            # don't depend on the webhook payload always including it.
+            'fields': 'field_data,ad_id,ad_name,form_id',
         }, timeout=10)
         if r.status_code == 200:
             return r.json()
@@ -1622,6 +1627,9 @@ class MetaWebhookView(APIView):
                             if meta_data and meta_data.get('field_data'):
                                 ad    = meta_data.get('ad_name') or ad
                                 ad_id = meta_data.get('ad_id')
+                                # Prefer the form_id from the Graph lead object; the
+                                # webhook payload doesn't always include it.
+                                form_id = str(meta_data.get('form_id') or form_id or '')
                                 if ad_id and not campaign and not adset:
                                     campaign, adset = _fetch_ad_campaign_info(ad_id, config.page_access_token)
                                 _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
