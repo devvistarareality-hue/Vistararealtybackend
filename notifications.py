@@ -10,8 +10,8 @@ def send_push_to_user(user_code, title, message, data=None):
 
     payload = {
         'app_id': ONESIGNAL_APP_ID,
-        'include_aliases': {'external_id': [str(user_code)]},
-        'target_channel': 'push',
+        'include_external_user_ids': [str(user_code)],
+        'channel_for_external_user_ids': 'push',
         'headings': {'en': title},
         'contents': {'en': message},
     }
