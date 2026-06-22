@@ -411,12 +411,26 @@ class LeadDetailView(APIView):
                 lead=lead, changed_by=request.user,
                 field_changed='telecaller', old_value=old_tc_name, new_value=new_tc_name,
             ))
+            if lead.telecaller:
+                from notifications import send_push_to_user
+                send_push_to_user(
+                    lead.telecaller.user_code,
+                    'New Lead Assigned',
+                    f'A new lead has been assigned to you.',
+                )
         if old_stm_id != lead.stm_id:
             new_stm_name = lead.stm.name if lead.stm else ''
             history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
                 field_changed='stm', old_value=old_stm_name, new_value=new_stm_name,
             ))
+            if lead.stm:
+                from notifications import send_push_to_user
+                send_push_to_user(
+                    lead.stm.user_code,
+                    'New Lead Assigned',
+                    f'A new lead has been assigned to you.',
+                )
         if warm_now:
             history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
@@ -1212,6 +1226,12 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
                     remarks=note,
                 ))
             assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
+            from notifications import send_push_to_user
+            send_push_to_user(
+                id_to_member[uid].user_code,
+                'New Lead Assigned',
+                f'{len(pks)} new lead{"s" if len(pks) > 1 else ""} assigned to you.',
+            )
 
         if history_rows:
             LeadStatusHistory.objects.bulk_create(history_rows)
