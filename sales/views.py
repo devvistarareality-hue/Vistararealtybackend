@@ -58,9 +58,36 @@ def is_stm(user):
     return 'stm' in d or 'sales team' in d or 'sales executive' in d
 
 
+def is_cp(user):
+    """CP Executive — an employee-level Channel Partner who sources & works their
+    own leads (no Meta distribution). Scoped like an STM (by the lead's stm field)."""
+    d = _designation(user)
+    return 'cp executive' in d or 'channel partner' in d
+
+
+def is_cp_head(user):
+    """CP Cluster Head — manages the Channel Partner team. Sees the whole CP team's
+    data (all CP executives' leads/SVs/closures), NOT telecaller/STM/Meta data."""
+    return 'cp cluster head' in _designation(user)
+
+
+def _cp_team_ids(user):
+    """User ids of the Channel Partner team (executives + cluster heads) in the
+    requester's company — used to scope a CP Cluster Head to CP data only."""
+    from django.db.models import Q
+    return list(
+        User.objects.filter(company=user.company).filter(
+            Q(designation__icontains='cp executive')
+            | Q(designation__icontains='channel partner')
+            | Q(designation__icontains='cp cluster head')
+        ).values_list('id', flat=True)
+    )
+
+
 def can_assign_leads(user):
-    """Telecallers & STMs cannot (re)assign leads — only everyone else (admins/managers/Sales CRM)."""
-    return not (is_telecaller(user) or is_stm(user))
+    """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
+    else (admins/managers/Sales CRM)."""
+    return not (is_telecaller(user) or is_stm(user) or is_cp(user))
 
 
 def _dist_type_for(user):
@@ -89,9 +116,16 @@ def scope_leads_to_role(qs, user, lead_prefix=''):
     telecallers see only leads where they are the telecaller, STMs only where they are the STM.
     Admins / managers / Sales CRM see everything. `lead_prefix` lets callers scope related
     models (e.g. 'lead__' for SiteVisit / Closure)."""
+    # CP Cluster Head — the whole CP team's leads (stm is a CP user), not all company.
+    if is_cp_head(user):
+        return qs.filter(**{f'{lead_prefix}stm__in': _cp_team_ids(user)})
+    # Admins & managers always see all company data, regardless of designation.
+    if is_admin_or_manager(user):
+        return qs
     if is_telecaller(user):
         return qs.filter(**{f'{lead_prefix}telecaller': user})
-    if is_stm(user):
+    if is_stm(user) or is_cp(user):
+        # STMs and CP Executives see only the leads where they're the assigned STM.
         return qs.filter(**{f'{lead_prefix}stm': user})
     return qs
 
@@ -148,7 +182,11 @@ class StatsView(APIView):
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
-        if not is_admin_or_manager(request.user):
+        if is_cp_head(request.user):
+            _cp_ids = _cp_team_ids(request.user)
+            sv_qs = sv_qs.filter(stm__in=_cp_ids)
+            cl_qs = cl_qs.filter(stm__in=_cp_ids)
+        elif not is_admin_or_manager(request.user):
             if is_telecaller(request.user):
                 sv_qs = sv_qs.filter(referred_by_telecaller=request.user)
                 cl_qs = cl_qs.filter(referred_by_telecaller=request.user)
@@ -234,14 +272,14 @@ class LeadListView(APIView):
         if work == 'pending':
             if is_telecaller(request.user):
                 qs = qs.filter(telecaller_status='')
-            elif is_stm(request.user):
+            elif is_stm(request.user) or is_cp(request.user):
                 qs = qs.filter(stm_status='')
             else:
                 qs = qs.filter(status='new')
         elif work == 'called':
             if is_telecaller(request.user):
                 qs = qs.exclude(telecaller_status='')
-            elif is_stm(request.user):
+            elif is_stm(request.user) or is_cp(request.user):
                 qs = qs.exclude(stm_status='')
             else:
                 qs = qs.exclude(status='new')
@@ -277,27 +315,40 @@ class LeadListView(APIView):
         if project and not _project_in_scope(request, project.id):
             return Response({'detail': 'Invalid project for your company.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Duplicate check — match last 10 digits regardless of +91 prefix, scoped to company
+        # Duplicate check — match last 10 digits regardless of +91 prefix. Scoped to
+        # the creator's own bucket (telecaller→their leads, STM/CP→their leads) so a
+        # CP's lead is only a duplicate of another CP lead, not of someone else's.
+        # Admins/managers keep the company-wide check.
         phone = ser.validated_data['phone']
         clean = ''.join(c for c in phone if c.isdigit())[-10:]
         dup_qs = (
-            scope_to_company(Lead.objects.all(), request.user).filter(phone__regex=r'(^|\D)' + clean + r'$')
+            scope_leads_to_role(scope_to_company(Lead.objects.all(), request.user), request.user)
+            .filter(phone__regex=r'(^|\D)' + clean + r'$')
             if clean else Lead.objects.none()
         )
         existing = dup_qs.first()
+
+        # CP Executives & STMs self-source leads — assign the new lead to the
+        # creator so it lands in their own pipeline (CPs aren't in Meta distribution).
+        extra = {}
+        if is_cp(request.user) or is_stm(request.user):
+            extra = {'stm': request.user}
 
         lead = ser.save(
             company=company,
             is_duplicate=bool(existing),
             duplicate_of=existing if existing else None,
+            **extra,
         )
         if existing:
             existing.duplicate_count += 1
             existing.save(update_fields=['duplicate_count'])
 
         _record_lead_created(lead, by=request.user)
-        # Auto-assign to an available telecaller (no-op outside the window / none available).
-        _run_distribution(company, 'telecaller')
+        # CP/STM-sourced leads are already owned; only run telecaller distribution
+        # for unowned (e.g. admin-added) leads.
+        if not extra:
+            _run_distribution(company, 'telecaller')
         lead.refresh_from_db()
 
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
@@ -694,7 +745,9 @@ class SiteVisitListView(APIView):
             SiteVisit.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if not is_admin_or_manager(request.user):
+        if is_cp_head(request.user):
+            qs = qs.filter(stm__in=_cp_team_ids(request.user))
+        elif not is_admin_or_manager(request.user):
             if is_telecaller(request.user):
                 qs = qs.filter(referred_by_telecaller=request.user)
             else:
@@ -749,7 +802,9 @@ class ClosureListView(APIView):
             Closure.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if not is_admin_or_manager(request.user):
+        if is_cp_head(request.user):
+            qs = qs.filter(stm__in=_cp_team_ids(request.user))
+        elif not is_admin_or_manager(request.user):
             if is_telecaller(request.user):
                 qs = qs.filter(referred_by_telecaller=request.user)
             else:
@@ -1412,6 +1467,26 @@ class ReportsView(APIView):
             sv_qs      = sv_qs.filter(created_at__date__lte=date_to)
             closure_qs = closure_qs.filter(closure_date__lte=date_to)
 
+        # CP Cluster Head: a team report scoped to the CP team's data only.
+        if is_cp_head(user):
+            team_view = True
+            _cp_ids    = _cp_team_ids(user)
+            leads_qs   = leads_qs.filter(stm__in=_cp_ids)
+            sv_qs      = sv_qs.filter(stm__in=_cp_ids)
+            closure_qs = closure_qs.filter(stm__in=_cp_ids)
+        else:
+            # Non-managers (STM / CP / telecaller) get a personal report scoped to
+            # their own leads/site-visits/closures — not company-wide team metrics.
+            team_view = is_admin_or_manager(user)
+            if not team_view:
+                leads_qs = scope_leads_to_role(leads_qs, user)
+                if is_telecaller(user):
+                    sv_qs      = sv_qs.filter(referred_by_telecaller=user)
+                    closure_qs = closure_qs.filter(referred_by_telecaller=user)
+                else:
+                    sv_qs      = sv_qs.filter(stm=user)
+                    closure_qs = closure_qs.filter(stm=user)
+
         def get_campaigns():
             return list(
                 leads_qs.exclude(meta_campaign_name='')
@@ -1470,9 +1545,11 @@ class ReportsView(APIView):
         # them in the worker threads — a connection leak that, with the pooled
         # endpoint + multiple gunicorn workers, risked exhausting Neon.
         return Response({
-            'campaigns':   get_campaigns(),
-            'telecallers': get_telecallers(),
-            'stms':        get_stms(),
+            # Team-performance tables are management-only; personal reports omit them.
+            'team_view':   team_view,
+            'campaigns':   get_campaigns()   if team_view else [],
+            'telecallers': get_telecallers() if team_view else [],
+            'stms':        get_stms()        if team_view else [],
             'closures':    ClosureSerializer(get_closures(), many=True).data,
             'summary':     get_summary(),
         })
