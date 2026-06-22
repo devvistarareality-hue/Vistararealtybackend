@@ -65,23 +65,41 @@ def is_cp(user):
     return 'cp executive' in d or 'channel partner' in d
 
 
-def is_cp_head(user):
-    """CP Cluster Head — manages the Channel Partner team. Sees the whole CP team's
-    data (all CP executives' leads/SVs/closures), NOT telecaller/STM/Meta data."""
-    return 'cp cluster head' in _designation(user)
+# ── Hierarchy-based visibility ───────────────────────────────────────────────
+# Data visibility is driven by the org tree (User.reporting_manager), NOT by
+# designation strings. A user sees records owned (as STM or telecaller) by
+# themselves or by anyone reporting to them, transitively. This scales to any
+# designation/role without code changes — you only maintain reporting_manager.
+
+def _sees_all_company(user):
+    """Users who see ALL company data: platform admins, staff, the Admin role, and
+    top-of-tree department heads (report to no one but manage others, e.g. a CMO)."""
+    if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
+        return True
+    # Top of the tree: reports to nobody, but has active reports under them.
+    if user.reporting_manager_id is None and User.objects.filter(
+        company=user.company, reporting_manager_id=user.id, is_active=True
+    ).exists():
+        return True
+    return False
 
 
-def _cp_team_ids(user):
-    """User ids of the Channel Partner team (executives + cluster heads) in the
-    requester's company — used to scope a CP Cluster Head to CP data only."""
-    from django.db.models import Q
-    return list(
-        User.objects.filter(company=user.company).filter(
-            Q(designation__icontains='cp executive')
-            | Q(designation__icontains='channel partner')
-            | Q(designation__icontains='cp cluster head')
-        ).values_list('id', flat=True)
-    )
+def _visible_user_ids(user):
+    """Requester's own id + every user reporting to them, transitively, in the same
+    company. Cycle-safe (tracked via the `ids` set) and depth-capped."""
+    ids = {user.id}
+    frontier = [user.id]
+    for _ in range(50):  # safety cap on tree depth
+        children = list(
+            User.objects.filter(
+                company=user.company, reporting_manager_id__in=frontier, is_active=True
+            ).exclude(id__in=ids).values_list('id', flat=True)
+        )
+        if not children:
+            break
+        ids.update(children)
+        frontier = children
+    return ids
 
 
 def can_assign_leads(user):
@@ -112,22 +130,16 @@ def _availability_active(avail):
 
 
 def scope_leads_to_role(qs, user, lead_prefix=''):
-    """Restrict a Lead-related queryset to the leads assigned to the requester:
-    telecallers see only leads where they are the telecaller, STMs only where they are the STM.
-    Admins / managers / Sales CRM see everything. `lead_prefix` lets callers scope related
-    models (e.g. 'lead__' for SiteVisit / Closure)."""
-    # CP Cluster Head — the whole CP team's leads (stm is a CP user), not all company.
-    if is_cp_head(user):
-        return qs.filter(**{f'{lead_prefix}stm__in': _cp_team_ids(user)})
-    # Admins & managers always see all company data, regardless of designation.
-    if is_admin_or_manager(user):
+    """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
+    STM or telecaller) by themselves or by anyone reporting to them, transitively.
+    Admins / staff / top-of-tree heads see all company data. `lead_prefix` lets callers
+    scope related models (e.g. 'lead__' for SiteVisit / Closure)."""
+    if _sees_all_company(user):
         return qs
-    if is_telecaller(user):
-        return qs.filter(**{f'{lead_prefix}telecaller': user})
-    if is_stm(user) or is_cp(user):
-        # STMs and CP Executives see only the leads where they're the assigned STM.
-        return qs.filter(**{f'{lead_prefix}stm': user})
-    return qs
+    ids = _visible_user_ids(user)
+    return qs.filter(
+        Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
+    )
 
 
 def _lead_in_scope(request, lead_id):
@@ -182,17 +194,10 @@ class StatsView(APIView):
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
-        if is_cp_head(request.user):
-            _cp_ids = _cp_team_ids(request.user)
-            sv_qs = sv_qs.filter(stm__in=_cp_ids)
-            cl_qs = cl_qs.filter(stm__in=_cp_ids)
-        elif not is_admin_or_manager(request.user):
-            if is_telecaller(request.user):
-                sv_qs = sv_qs.filter(referred_by_telecaller=request.user)
-                cl_qs = cl_qs.filter(referred_by_telecaller=request.user)
-            else:
-                sv_qs = sv_qs.filter(stm=request.user)
-                cl_qs = cl_qs.filter(stm=request.user)
+        if not _sees_all_company(request.user):
+            _ids = _visible_user_ids(request.user)
+            sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+            cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         sv_done, closures, active_projects = (
             sv_qs.filter(**sv_filter).count(),
             cl_qs.filter(**cl_filter).count(),
@@ -703,8 +708,8 @@ class FollowUpListView(APIView):
             FollowUp.objects.select_related('lead', 'assigned_to'),
             request.user, 'lead__company',
         )
-        if not is_admin_or_manager(request.user):
-            qs = qs.filter(assigned_to=request.user)
+        if not _sees_all_company(request.user):
+            qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(lead__company_id=request.query_params['company_id'])
         if request.query_params.get('lead_id'):
@@ -745,13 +750,9 @@ class SiteVisitListView(APIView):
             SiteVisit.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if is_cp_head(request.user):
-            qs = qs.filter(stm__in=_cp_team_ids(request.user))
-        elif not is_admin_or_manager(request.user):
-            if is_telecaller(request.user):
-                qs = qs.filter(referred_by_telecaller=request.user)
-            else:
-                qs = qs.filter(stm=request.user)
+        if not _sees_all_company(request.user):
+            _ids = _visible_user_ids(request.user)
+            qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
@@ -802,13 +803,9 @@ class ClosureListView(APIView):
             Closure.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if is_cp_head(request.user):
-            qs = qs.filter(stm__in=_cp_team_ids(request.user))
-        elif not is_admin_or_manager(request.user):
-            if is_telecaller(request.user):
-                qs = qs.filter(referred_by_telecaller=request.user)
-            else:
-                qs = qs.filter(stm=request.user)
+        if not _sees_all_company(request.user):
+            _ids = _visible_user_ids(request.user)
+            qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1467,25 +1464,16 @@ class ReportsView(APIView):
             sv_qs      = sv_qs.filter(created_at__date__lte=date_to)
             closure_qs = closure_qs.filter(closure_date__lte=date_to)
 
-        # CP Cluster Head: a team report scoped to the CP team's data only.
-        if is_cp_head(user):
+        # Hierarchy scope: managers (anyone with reports below them) get a team report
+        # over their subtree; leaf users get a personal report. Admins/top heads see all.
+        if _sees_all_company(user):
             team_view = True
-            _cp_ids    = _cp_team_ids(user)
-            leads_qs   = leads_qs.filter(stm__in=_cp_ids)
-            sv_qs      = sv_qs.filter(stm__in=_cp_ids)
-            closure_qs = closure_qs.filter(stm__in=_cp_ids)
         else:
-            # Non-managers (STM / CP / telecaller) get a personal report scoped to
-            # their own leads/site-visits/closures — not company-wide team metrics.
-            team_view = is_admin_or_manager(user)
-            if not team_view:
-                leads_qs = scope_leads_to_role(leads_qs, user)
-                if is_telecaller(user):
-                    sv_qs      = sv_qs.filter(referred_by_telecaller=user)
-                    closure_qs = closure_qs.filter(referred_by_telecaller=user)
-                else:
-                    sv_qs      = sv_qs.filter(stm=user)
-                    closure_qs = closure_qs.filter(stm=user)
+            _ids = _visible_user_ids(user)
+            leads_qs   = leads_qs.filter(Q(stm__in=_ids) | Q(telecaller__in=_ids))
+            sv_qs      = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+            closure_qs = closure_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+            team_view  = len(_ids) > 1  # has at least one subordinate → manager view
 
         def get_campaigns():
             return list(
@@ -1553,6 +1541,59 @@ class ReportsView(APIView):
             'closures':    ClosureSerializer(get_closures(), many=True).data,
             'summary':     get_summary(),
         })
+
+
+class MyTeamView(APIView):
+    """Everyone reporting under the requester (their org subtree), with lead/closure
+    counts — powers the manager 'My Team' view. Returns [] for users with no reports."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        company = user.company
+        ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
+        is_admin = is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
+        if not ids and is_admin:
+            # Admins aren't managers in the reporting tree, but should still see the
+            # whole company org chart (the same view the CMO sees). Include everyone
+            # who participates in a reporting relationship (has a manager or reports),
+            # so unconfigured/standalone users don't clutter the chart.
+            members = list(
+                User.objects.filter(company=company, is_active=True)
+                .filter(Q(reporting_manager__isnull=False) | Q(subordinates__isnull=False))
+                .distinct().select_related('reporting_manager').order_by('name')
+            )
+            ids = {u.id for u in members}
+        elif not ids:
+            return Response([])
+        else:
+            members = list(
+                User.objects.filter(id__in=ids, company=company)
+                .select_related('reporting_manager').order_by('name')
+            )
+        # Owned-lead counts (as STM or telecaller) and closure counts, in a few aggregates.
+        lead_counts, closure_counts = {}, {}
+        for fld in ('stm_id', 'telecaller_id'):
+            for row in Lead.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+                lead_counts[row[fld]] = lead_counts.get(row[fld], 0) + row['c']
+        for fld in ('stm_id', 'referred_by_telecaller_id'):
+            for row in Closure.objects.filter(lead__company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+                closure_counts[row[fld]] = closure_counts.get(row[fld], 0) + row['c']
+        data = [{
+            'id':                u.id,
+            'name':              u.name,
+            'user_code':         u.user_code,
+            'designation':       u.designation,
+            'role':              u.role,
+            'phone':             u.phone,
+            'email':             u.email,
+            'reporting_manager':    u.reporting_manager.name if u.reporting_manager_id else None,
+            'reporting_manager_id': u.reporting_manager_id,
+            'is_direct_report':     u.reporting_manager_id == user.id,
+            'leads':             lead_counts.get(u.id, 0),
+            'closures':          closure_counts.get(u.id, 0),
+        } for u in members]
+        return Response(data)
 
 
 # ──────────────────────────────────────────────

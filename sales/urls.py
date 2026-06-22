@@ -28,6 +28,7 @@ urlpatterns = [
     path('availability/me/',           views.MyAvailabilityView.as_view()),
     path('dist-weight/',               views.DistributionWeightView.as_view()),
     path('reports/',                   views.ReportsView.as_view()),
+    path('my-team/',                   views.MyTeamView.as_view()),
     path('plots/',                     views.PlotListView.as_view()),
     path('plots/bulk/',                views.PlotBulkCreateView.as_view()),
     path('plots/bulk-delete/',         views.PlotBulkDeleteView.as_view()),
