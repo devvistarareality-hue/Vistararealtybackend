@@ -1704,20 +1704,11 @@ class BookingListCreateView(APIView):
                 pass
 
         if not prior:
-            # New booking: hold the plot + mirror a Closure into My Conversions.
+            # New booking: reserve the plot only. The Closure is mirrored into
+            # My Conversions on APPROVAL (see BookingActionView) — so a booking that
+            # is still pending approval does NOT appear as a booked closure.
             if booking.plot_id:
                 Plot.objects.filter(id=booking.plot_id).update(status='hold')
-            if lead_id:
-                Lead.objects.filter(id=lead_id).update(stm=request.user, stm_status='closed')
-                closure = Closure.objects.create(
-                    lead_id=lead_id, project_id=booking.project_id, stm=request.user,
-                    status='booked', closure_date=booking.booking_date or timezone.now().date(),
-                    unit_no=(booking.plot.number if booking.plot_id else booking.area),
-                    unit_type=booking.villa_type or booking.bunglow_type or '',
-                    booking_amount=booking.plot_basic or None, total_amount=booking.final_amount or None,
-                )
-                booking.closure = closure
-                booking.save(update_fields=['closure'])
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
@@ -1766,10 +1757,24 @@ class BookingActionView(APIView):
                 Plot.objects.filter(id=b.plot_id).update(status='sold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
-            b.save(update_fields=['status', 'approval_status'])
             if b.closure_id:
+                # Existing closure (revision / re-approval) → just sync the amounts.
+                b.save(update_fields=['status', 'approval_status'])
                 Closure.objects.filter(id=b.closure_id).update(
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
+            else:
+                # First approval of a new booking → mirror it into My Conversions now.
+                if b.lead_id:
+                    Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed')
+                closure = Closure.objects.create(
+                    lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
+                    status='booked', closure_date=b.booking_date or timezone.now().date(),
+                    unit_no=(b.plot.number if b.plot_id else b.area),
+                    unit_type=b.villa_type or b.bunglow_type or '',
+                    booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
+                )
+                b.closure = closure
+                b.save(update_fields=['status', 'approval_status', 'closure'])
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
