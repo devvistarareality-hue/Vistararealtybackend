@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory
+from .models import LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking
 
 
 class LeadSourceSerializer(serializers.ModelSerializer):
@@ -18,7 +18,8 @@ class ProjectSerializer(serializers.ModelSerializer):
             'id', 'company_id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
-            'plot_type_plans', 'lead_count', 'plot_counts', 'created_at', 'updated_at',
+            'plot_type_plans', 'formula_set', 'allow_unit_switch', 'booking_approvers',
+            'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
     def get_plot_counts(self, obj):
@@ -38,6 +39,18 @@ class PlotSerializer(serializers.ModelSerializer):
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'cluster_type', 'facing', 'price', 'notes']
         read_only_fields = ['id', 'project']
+
+
+class BookingSerializer(serializers.ModelSerializer):
+    project_name = serializers.CharField(source='project.name', read_only=True)
+    plot_number  = serializers.CharField(source='plot.number', read_only=True)
+    stm_name     = serializers.CharField(source='stm.name', read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = '__all__'
+        read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
+                            'project_name', 'plot_number', 'stm_name']
 
 
 class LeadUserSerializer(serializers.Serializer):

@@ -17,6 +17,8 @@ urlpatterns = [
     path('site-visits/',               views.SiteVisitListView.as_view()),
     path('site-visits/<int:pk>/',      views.SiteVisitDetailView.as_view()),
     path('closures/',                  views.ClosureListView.as_view()),
+    path('bookings/',                  views.BookingListCreateView.as_view()),
+    path('bookings/<int:pk>/action/',  views.BookingActionView.as_view()),
     path('users/telecallers/',         views.TelecallerListView.as_view()),
     path('users/slim/',                views.CompanyUsersSlimView.as_view()),
     path('team/',                      views.SalesTeamView.as_view()),

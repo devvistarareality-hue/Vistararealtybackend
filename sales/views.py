@@ -28,13 +28,13 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment,
+    UserProjectAssignment, Booking,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
-    LeadStatusHistorySerializer,
+    LeadStatusHistorySerializer, BookingSerializer,
 )
 
 PAGE_SIZE = 25
@@ -977,12 +977,18 @@ class DistributionSettingsView(APIView):
         return obj
 
     def get(self, request):
-        s = self._get_or_create(_resolve_company(request))
+        company = _resolve_company(request)
+        s = self._get_or_create(company)
+        managers = list(
+            User.objects.filter(company=company, is_active=True, role='Manager')
+            .order_by('name').values('id', 'name', 'designation')
+        )
         return Response({
             'tc_signin_time':   str(s.tc_signin_time)[:5],
             'tc_signout_time':  str(s.tc_signout_time)[:5],
             'stm_signin_time':  str(s.stm_signin_time)[:5],
             'stm_signout_time': str(s.stm_signout_time)[:5],
+            'managers': managers,   # for the per-project booking-approver picker
         })
 
     def put(self, request):
@@ -1615,6 +1621,155 @@ class MyTeamView(APIView):
             'closures':          closure_counts.get(u.id, 0),
         } for u in members]
         return Response(data)
+
+
+# ──────────────────────────────────────────────
+#  Booking  (native plot booking — replaces the GAS web app for Vistara)
+# ──────────────────────────────────────────────
+
+class BookingListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _resolve_company(request)
+        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+        if not _sees_all_company(request.user):
+            qs = qs.filter(stm__in=_visible_user_ids(request.user))
+        if request.query_params.get('closure'):
+            qs = qs.filter(closure_id=request.query_params['closure'])
+        if request.query_params.get('plot'):
+            qs = qs.filter(plot_id=request.query_params['plot'])
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        return Response(BookingSerializer(qs[:200], many=True).data)
+
+    def post(self, request):
+        company = _resolve_company(request)
+        data = request.data
+
+        # Resolve or create the lead (Book Unit flow types a new client; Record Closure
+        # passes an existing lead).
+        lead_id = data.get('lead') or None
+        if not lead_id and (data.get('client_name') or '').strip():
+            src = None
+            sname = (data.get('source') or '').strip()
+            if sname:
+                src = LeadSource.objects.filter(company=company, name__iexact=sname).first()
+            lead = Lead.objects.create(
+                company=company, name=data.get('client_name', '').strip(),
+                phone=(data.get('phone') or '').strip(), status='new',
+                project_id=data.get('project') or None, source=src,
+            )
+            lead_id = lead.id
+
+        # Revision of an existing (sold) booking — carries the prior lead, bumps the
+        # revision number, and leaves the plot/closure untouched until approved.
+        prior = None
+        rev_of = data.get('revision_of')
+        if rev_of:
+            prior = Booking.objects.filter(id=rev_of, company=company).first()
+            if prior:
+                lead_id = prior.lead_id
+
+        ser = BookingSerializer(data=data)
+        ser.is_valid(raise_exception=True)
+        if prior:
+            extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure, plot=prior.plot,
+                         approval_status='REVISION R%d PENDING' % (prior.revision_no + 1))
+        else:
+            extra = dict(revision_no=0, approval_status='PENDING')
+        booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='pending', **extra)
+
+        # Signed LOI (sent as base64 {name,type,data}).
+        lf = data.get('loi_file')
+        if isinstance(lf, dict) and lf.get('data'):
+            import base64
+            from django.core.files.base import ContentFile
+            try:
+                booking.loi_document.save(lf.get('name', 'signed_loi.pdf'),
+                                          ContentFile(base64.b64decode(lf['data'])), save=True)
+            except Exception:
+                pass
+
+        if not prior:
+            # New booking: hold the plot + mirror a Closure into My Conversions.
+            if booking.plot_id:
+                Plot.objects.filter(id=booking.plot_id).update(status='hold')
+            if lead_id:
+                Lead.objects.filter(id=lead_id).update(stm=request.user, stm_status='closed')
+                closure = Closure.objects.create(
+                    lead_id=lead_id, project_id=booking.project_id, stm=request.user,
+                    status='booked', closure_date=booking.booking_date or timezone.now().date(),
+                    unit_no=(booking.plot.number if booking.plot_id else booking.area),
+                    unit_type=booking.villa_type or booking.bunglow_type or '',
+                    booking_amount=booking.plot_basic or None, total_amount=booking.final_amount or None,
+                )
+                booking.closure = closure
+                booking.save(update_fields=['closure'])
+
+        # Notify the admin-selected approvers (managers) via push.
+        _notify_booking_approvers(company, booking, request.user)
+
+        return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+
+
+def _notify_booking_approvers(company, booking, submitter):
+    try:
+        # Approvers are configured per project.
+        ids = (booking.project.booking_approvers if booking.project_id else None) or []
+        if not ids:
+            return
+        from notifications import send_push_to_user
+        unit = booking.plot.number if booking.plot_id else booking.area
+        rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        title = 'Booking approval needed%s' % rev
+        msg = '%s · %s Unit %s · ₹%s — by %s' % (
+            booking.client_name or '—', booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0), getattr(submitter, 'name', ''),
+        )
+        for u in User.objects.filter(id__in=ids, company=company, is_active=True).only('user_code'):
+            if u.user_code:
+                send_push_to_user(u.user_code, title, msg, {'type': 'booking_approval', 'booking_id': booking.id})
+    except Exception:
+        pass
+
+
+class BookingActionView(APIView):
+    """Approve / reject a pending booking (approver = admin or manager)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        try:
+            b = Booking.objects.get(pk=pk, company=company)
+        except Booking.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        action = request.data.get('action')
+        is_rev = b.revision_no and b.revision_no > 0
+
+        if action == 'approve':
+            if b.plot_id:
+                Plot.objects.filter(id=b.plot_id).update(status='sold')
+            b.status = 'sold'
+            b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
+            b.save(update_fields=['status', 'approval_status'])
+            if b.closure_id:
+                Closure.objects.filter(id=b.closure_id).update(
+                    booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
+        elif action == 'reject':
+            b.status = 'rejected'
+            b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
+            b.save(update_fields=['status', 'approval_status'])
+            if not is_rev:
+                if b.plot_id:
+                    Plot.objects.filter(id=b.plot_id).update(status='available')
+                if b.closure_id:
+                    Closure.objects.filter(id=b.closure_id).delete()
+        else:
+            return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(BookingSerializer(b).data)
 
 
 # ──────────────────────────────────────────────

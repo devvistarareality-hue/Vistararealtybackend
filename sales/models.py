@@ -85,6 +85,12 @@ class Project(models.Model):
     description = models.TextField(blank=True)
     location = models.CharField(max_length=200, blank=True)
     project_type = models.CharField(max_length=50, default='residential')
+    # Booking pricing engine variant (mirrors the GAS "Formula Set").
+    FORMULA_SETS = [('kalrav', 'Kalrav'), ('ankhol', 'Ankhol'), ('industrial', 'Industrial')]
+    formula_set = models.CharField(max_length=20, choices=FORMULA_SETS, default='kalrav')
+    allow_unit_switch = models.BooleanField(default=False)  # sq.yd ↔ sq.ft toggle (Kalrav)
+    # Manager user IDs who approve bookings for THIS project (admin-selected).
+    booking_approvers = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     tagline = models.CharField(max_length=300, blank=True)
     rera = models.CharField(max_length=100, blank=True)
@@ -97,6 +103,7 @@ class Project(models.Model):
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
+    approver_email = models.EmailField(max_length=254, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     updated_at = models.DateTimeField(auto_now=True)
@@ -272,6 +279,93 @@ class SiteVisit(models.Model):
         ordering = ['-created_at']
 
 
+class Booking(models.Model):
+    """Full plot-booking record — the ERP-native equivalent of the GAS submission
+    sheet row. Holds client, pricing, schedule, LOI doc and approval state."""
+    STATUS = [('pending', 'Pending Approval'), ('sold', 'Sold'), ('rejected', 'Rejected'), ('hold', 'Hold')]
+
+    company   = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='bookings', null=True, blank=True)
+    project   = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    plot      = models.ForeignKey(Plot, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    lead      = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    closure   = models.ForeignKey('Closure', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    stm       = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+
+    # Client
+    client_name = models.CharField(max_length=200, blank=True)
+    gender      = models.CharField(max_length=10, blank=True)
+    phone       = models.CharField(max_length=20, blank=True)
+    address     = models.TextField(blank=True)
+    source      = models.CharField(max_length=100, blank=True)
+
+    # Plot / type
+    formula_set  = models.CharField(max_length=20, default='kalrav')
+    area         = models.CharField(max_length=30, blank=True)
+    area_unit    = models.CharField(max_length=10, default='sq.yd')
+    const_area   = models.CharField(max_length=30, blank=True)
+    villa_type   = models.CharField(max_length=50, blank=True)
+    bunglow_type = models.CharField(max_length=50, blank=True)
+
+    # Rates
+    land_rate          = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    dev_rate           = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    const_rate         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    sale_deed_rate     = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    dev_agreement_rate = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    maint_rate         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    maint_months       = models.IntegerField(default=0)
+
+    # Amounts
+    plot_basic       = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    plot_dev         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    const_amt        = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    sale_deed        = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    dev_agreement    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    land_sale_deed   = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    const_agreement  = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    stamp_duty       = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    reg_fees         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    gst              = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    maintenance      = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    maint_deposit    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    maint_advance    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    legal_charges    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    premium_location = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    total_extra      = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    discount         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    final_amount     = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+
+    # Toggles
+    apply_reg_fee    = models.CharField(max_length=5, default='Yes')
+    apply_stamp_duty = models.CharField(max_length=5, default='Yes')
+    apply_gst        = models.CharField(max_length=5, default='Yes')
+
+    # Schedule / extras
+    installments   = models.JSONField(default=list, blank=True)
+    extra_work_desc = models.CharField(max_length=300, blank=True)
+    extra_work_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    extra_work_inst = models.JSONField(default=list, blank=True)
+    extra_terms    = models.JSONField(default=list, blank=True)
+
+    booking_date = models.DateField(null=True, blank=True)
+    cp_name      = models.CharField(max_length=200, blank=True)
+    loi_document = models.FileField(upload_to='loi/', null=True, blank=True)
+
+    status          = models.CharField(max_length=20, choices=STATUS, default='pending')
+    approval_status = models.CharField(max_length=40, blank=True)
+    revision_no     = models.IntegerField(default=0)
+    pending_revision = models.JSONField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'Booking {self.project_id}/{self.plot_id} – {self.client_name}'
+
+
 class Closure(models.Model):
     lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='closures')
     site_visit = models.ForeignKey(SiteVisit, on_delete=models.SET_NULL, null=True, blank=True)
@@ -324,6 +418,8 @@ class DistributionSettings(models.Model):
     stm_signin_time  = models.TimeField(default='10:20')
     stm_signout_time = models.TimeField(default='22:00')
     weights_reset_at = models.DateTimeField(null=True, blank=True)
+    # User IDs (managers) the admin picks to approve plot bookings.
+    booking_approvers = models.JSONField(default=list, blank=True)
 
     def __str__(self):
         return f'DistSettings({self.company})'
