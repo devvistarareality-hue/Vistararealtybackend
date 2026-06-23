@@ -1551,18 +1551,34 @@ class MyTeamView(APIView):
     def get(self, request):
         user = request.user
         company = user.company
+        module = (request.query_params.get('module') or '').strip()  # department/module org chart
+        scope  = request.query_params.get('scope')                   # 'all' → full company org
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
         is_admin = is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
-        if not ids and is_admin:
-            # Admins aren't managers in the reporting tree, but should still see the
-            # whole company org chart (the same view the CMO sees). Include everyone
-            # who participates in a reporting relationship (has a manager or reports),
-            # so unconfigured/standalone users don't clutter the chart.
-            members = list(
+
+        def _full_company():
+            # Everyone in a reporting relationship + all Managers (leadership shows
+            # even before anyone reports to them); standalone users stay out.
+            return list(
                 User.objects.filter(company=company, is_active=True)
-                .filter(Q(reporting_manager__isnull=False) | Q(subordinates__isnull=False))
+                .filter(
+                    Q(reporting_manager__isnull=False)
+                    | Q(subordinates__isnull=False)
+                    | Q(role='Manager')
+                )
                 .distinct().select_related('reporting_manager').order_by('name')
             )
+
+        if is_admin and module:
+            # Department/module org chart — users assigned to this module.
+            all_users = (User.objects.filter(company=company, is_active=True)
+                         .select_related('reporting_manager').order_by('name'))
+            members = [u for u in all_users
+                       if module in (u.modules or []) or module in (u.manager_modules or [])]
+            ids = {u.id for u in members}
+        elif is_admin and (scope == 'all' or not ids):
+            # Full company org (User Management / admin default).
+            members = _full_company()
             ids = {u.id for u in members}
         elif not ids:
             return Response([])
