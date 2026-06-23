@@ -1550,7 +1550,8 @@ class MyTeamView(APIView):
 
     def get(self, request):
         user = request.user
-        company = user.company
+        # Honour the admin "Viewing Company" filter (?company_id) for platform admins.
+        company = _resolve_company(request)
         module = (request.query_params.get('module') or '').strip()  # department/module org chart
         scope  = request.query_params.get('scope')                   # 'all' → full company org
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
