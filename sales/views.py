@@ -1627,6 +1627,17 @@ class MyTeamView(APIView):
 #  Booking  (native plot booking — replaces the GAS web app for Vistara)
 # ──────────────────────────────────────────────
 
+def _loi_path(b):
+    """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
+    import re
+    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    proj = san(b.project.name if b.project_id else 'Project')
+    plot = san(b.plot.number if b.plot_id else b.area)
+    client = san(b.client_name)
+    rev = b.revision_no or 0
+    return f'{proj}/Plot {plot} - {client}/R{rev}_LOI_Plot{plot}_{client}.pdf'
+
+
 class BookingListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1680,13 +1691,14 @@ class BookingListCreateView(APIView):
             extra = dict(revision_no=0, approval_status='PENDING')
         booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='pending', **extra)
 
-        # Signed LOI (sent as base64 {name,type,data}).
+        # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
+        # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
         lf = data.get('loi_file')
         if isinstance(lf, dict) and lf.get('data'):
             import base64
             from django.core.files.base import ContentFile
             try:
-                booking.loi_document.save(lf.get('name', 'signed_loi.pdf'),
+                booking.loi_document.save(_loi_path(booking),
                                           ContentFile(base64.b64decode(lf['data'])), save=True)
             except Exception:
                 pass

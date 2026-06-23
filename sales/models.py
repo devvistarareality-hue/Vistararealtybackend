@@ -349,7 +349,7 @@ class Booking(models.Model):
 
     booking_date = models.DateField(null=True, blank=True)
     cp_name      = models.CharField(max_length=200, blank=True)
-    loi_document = models.FileField(upload_to='loi/', null=True, blank=True)
+    loi_document = models.FileField(upload_to='', null=True, blank=True)  # path set explicitly (project/plot/rev)
 
     status          = models.CharField(max_length=20, choices=STATUS, default='pending')
     approval_status = models.CharField(max_length=40, blank=True)

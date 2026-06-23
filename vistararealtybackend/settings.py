@@ -118,6 +118,28 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Supabase Storage for uploaded files (signed LOIs). Activates only when the
+# env vars are present; otherwise falls back to local disk.
+#  - Preferred: REST backend with the service_role key (one secret).
+#  - Alternative: S3-compatible endpoint with S3 access keys.
+SUPABASE_S3_ENDPOINT = os.getenv('SUPABASE_S3_ENDPOINT', '')   # https://<ref>.supabase.co/storage/v1/s3
+if os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
+    DEFAULT_FILE_STORAGE = 'sales.supabase_storage.SupabaseStorage'
+elif SUPABASE_S3_ENDPOINT:
+    DEFAULT_FILE_STORAGE   = 'storages.backends.s3boto3.S3Boto3Storage'
+    AWS_ACCESS_KEY_ID      = os.getenv('SUPABASE_S3_ACCESS_KEY', '')
+    AWS_SECRET_ACCESS_KEY  = os.getenv('SUPABASE_S3_SECRET_KEY', '')
+    AWS_STORAGE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET', 'loi')
+    AWS_S3_ENDPOINT_URL    = SUPABASE_S3_ENDPOINT
+    AWS_S3_REGION_NAME     = os.getenv('SUPABASE_REGION', 'us-east-1')
+    AWS_S3_ADDRESSING_STYLE = 'path'
+    AWS_DEFAULT_ACL        = None          # Supabase ignores ACLs
+    AWS_QUERYSTRING_AUTH   = False         # public bucket → unsigned URLs
+    AWS_S3_FILE_OVERWRITE  = False
+    # Public object URL base so loi_document.url resolves correctly.
+    _ref_host = SUPABASE_S3_ENDPOINT.split('/storage/')[0].replace('https://', '').replace('http://', '')
+    AWS_S3_CUSTOM_DOMAIN   = f'{_ref_host}/storage/v1/object/public/{AWS_STORAGE_BUCKET_NAME}'
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ── Django REST Framework ─────────────────────────────────────────────
