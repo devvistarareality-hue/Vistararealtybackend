@@ -1588,6 +1588,10 @@ class MyTeamView(APIView):
                 User.objects.filter(id__in=ids, company=company)
                 .select_related('reporting_manager').order_by('name')
             )
+        # Admins never appear in the org chart — it reflects the operational hierarchy.
+        members = [m for m in members
+                   if getattr(m, 'role', '') != 'Admin' and not getattr(m, 'is_staff', False)]
+        ids = {m.id for m in members}
         # Owned-lead counts (as STM or telecaller) and closure counts, in a few aggregates.
         lead_counts, closure_counts = {}, {}
         for fld in ('stm_id', 'telecaller_id'):
