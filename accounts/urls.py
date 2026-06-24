@@ -4,7 +4,7 @@ from .views import (
     LoginView, MeView,
     UserListCreateView, UserDetailView,
     DesignationListCreateView, DesignationDetailView,
-    NotificationTestView,
+    NotificationTestView, NotificationListView, NotificationReadView,
 )
 
 urlpatterns = [
@@ -16,4 +16,7 @@ urlpatterns = [
     path('designations/',             DesignationListCreateView.as_view(), name='designation-list'),
     path('designations/<int:pk>/',    DesignationDetailView.as_view(),     name='designation-detail'),
     path('notifications/test/',       NotificationTestView.as_view(),      name='notification-test'),
+    path('notifications/',            NotificationListView.as_view(),      name='notification-list'),
+    path('notifications/read/',       NotificationReadView.as_view(),      name='notification-read-all'),
+    path('notifications/<int:pk>/read/', NotificationReadView.as_view(),   name='notification-read'),
 ]

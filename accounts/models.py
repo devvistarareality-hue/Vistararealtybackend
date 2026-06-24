@@ -50,6 +50,28 @@ class User(AbstractBaseUser, PermissionsMixin):
         return f'{self.user_code} ({self.company.code if self.company else "admin"})'
 
 
+class Notification(models.Model):
+    """In-app / web notification. Mirrors a OneSignal push but is also queryable
+    so the bell shows history + unread counts on web and app."""
+    recipient  = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    type       = models.CharField(max_length=40, blank=True)   # new_lead, followup, sv_done, booking_approved …
+    title      = models.CharField(max_length=180)
+    body       = models.TextField(blank=True)
+    data       = models.JSONField(default=dict, blank=True)     # deep-link payload {lead_id, booking_id, …}
+    is_read    = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['recipient', 'is_read']),
+            models.Index(fields=['recipient', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.type} → {self.recipient_id}: {self.title}'
+
+
 class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)

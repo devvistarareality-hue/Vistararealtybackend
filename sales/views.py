@@ -471,12 +471,9 @@ class LeadDetailView(APIView):
                 field_changed='telecaller', old_value=old_tc_name, new_value=new_tc_name,
             ))
             if lead.telecaller:
-                from notifications import send_push_to_user
-                send_push_to_user(
-                    lead.telecaller.user_code,
-                    'New Lead Assigned',
-                    f'A new lead has been assigned to you.',
-                )
+                from notifications import notify
+                notify(lead.telecaller, 'new_lead', 'New Lead Assigned',
+                       f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
         if old_stm_id != lead.stm_id:
             new_stm_name = lead.stm.name if lead.stm else ''
             history_entries.append(LeadStatusHistory(
@@ -484,12 +481,9 @@ class LeadDetailView(APIView):
                 field_changed='stm', old_value=old_stm_name, new_value=new_stm_name,
             ))
             if lead.stm:
-                from notifications import send_push_to_user
-                send_push_to_user(
-                    lead.stm.user_code,
-                    'New Lead Assigned',
-                    f'A new lead has been assigned to you.',
-                )
+                from notifications import notify
+                notify(lead.stm, 'new_lead', 'New Lead Assigned',
+                       f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
         if warm_now:
             history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
@@ -725,6 +719,12 @@ class FollowUpListView(APIView):
         if not _lead_in_scope(request, request.data.get('lead')):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         followup = ser.save(created_by=request.user)
+        if followup.assigned_to and followup.assigned_to_id != request.user.id:
+            from notifications import notify
+            when = followup.scheduled_at.strftime('%d %b %I:%M %p') if followup.scheduled_at else ''
+            notify(followup.assigned_to, 'followup', 'New Follow-Up',
+                   (f'{followup.lead.name} · {when}').strip(' ·'),
+                   {'lead_id': followup.lead_id, 'followup_id': followup.id})
         return Response(FollowUpSerializer(followup).data, status=status.HTTP_201_CREATED)
 
 
@@ -770,6 +770,12 @@ class SiteVisitListView(APIView):
             old_value='', new_value=(f'Scheduled · {sched}' if sched else 'Scheduled')[:100],
             remarks='Site visit scheduled',
         )
+        from notifications import notify
+        for who in (sv.stm, sv.referred_by_telecaller):
+            if who and who.id != request.user.id:
+                notify(who, 'sv', 'Site Visit Scheduled',
+                       (f'{sv.lead.name} · {sched}').strip(' ·'),
+                       {'lead_id': sv.lead_id, 'sv_id': sv.id})
         return Response(SiteVisitSerializer(sv).data, status=status.HTTP_201_CREATED)
 
 
@@ -792,6 +798,14 @@ class SiteVisitDetailView(APIView):
                 old_value=old_status, new_value=sv.get_status_display(),
                 remarks='Site visit updated',
             )
+            if sv.status == 'completed':
+                # Telecaller who referred the lead + the STM both hear that the SV is done.
+                from notifications import notify
+                for who in (sv.referred_by_telecaller, sv.stm):
+                    if who and who.id != request.user.id:
+                        notify(who, 'sv_done', 'Site Visit Done',
+                               f"{sv.lead.name}'s site visit is complete.",
+                               {'lead_id': sv.lead_id, 'sv_id': sv.id})
         return Response(SiteVisitSerializer(sv).data)
 
 
@@ -825,6 +839,11 @@ class ClosureListView(APIView):
             lead=closure.lead, changed_by=request.user, field_changed='closure',
             old_value='', new_value=' · '.join(parts)[:100], remarks='Closure recorded',
         )
+        if closure.stm:
+            from notifications import notify_many, reporting_chain
+            notify_many(reporting_chain(closure.stm), 'closure', 'New Closure',
+                        (f'{closure.stm.name} closed {closure.lead.name} · {unit}').strip(' ·'),
+                        {'lead_id': closure.lead_id, 'closure_id': closure.id})
         return Response(ClosureSerializer(closure).data, status=status.HTTP_201_CREATED)
 
 
@@ -1287,12 +1306,9 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
                     remarks=note,
                 ))
             assignments.append({'name': id_to_member[uid].name, 'count': len(pks)})
-            from notifications import send_push_to_user
-            send_push_to_user(
-                id_to_member[uid].user_code,
-                'New Lead Assigned',
-                f'{len(pks)} new lead{"s" if len(pks) > 1 else ""} assigned to you.',
-            )
+            from notifications import notify
+            notify(id_to_member[uid], 'new_lead', 'New Leads Assigned',
+                   f'{len(pks)} new lead{"s" if len(pks) > 1 else ""} assigned to you.')
 
         if history_rows:
             LeadStatusHistory.objects.bulk_create(history_rows)
@@ -2094,7 +2110,7 @@ def _notify_booking_approvers(company, booking, submitter):
         ids = (booking.project.booking_approvers if booking.project_id else None) or []
         if not ids:
             return
-        from notifications import send_push_to_user
+        from notifications import notify
         unit = booking.plot.number if booking.plot_id else booking.area
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
         title = 'Booking approval needed%s' % rev
@@ -2102,9 +2118,8 @@ def _notify_booking_approvers(company, booking, submitter):
             booking.client_name or '—', booking.project.name if booking.project_id else '',
             unit, int(booking.final_amount or 0), getattr(submitter, 'name', ''),
         )
-        for u in User.objects.filter(id__in=ids, company=company, is_active=True).only('user_code'):
-            if u.user_code:
-                send_push_to_user(u.user_code, title, msg, {'type': 'booking_approval', 'booking_id': booking.id})
+        for u in User.objects.filter(id__in=ids, company=company, is_active=True):
+            notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
     except Exception:
         pass
 
@@ -2147,6 +2162,17 @@ class BookingActionView(APIView):
                 )
                 b.closure = closure
                 b.save(update_fields=['status', 'approval_status', 'closure'])
+            # Notify the STM (approved) and — on a fresh closure — their manager chain.
+            from notifications import notify, notify_many, reporting_chain
+            _unit = (b.plot.number if b.plot_id else b.area)
+            _rev = (' (R%d)' % b.revision_no) if is_rev else ''
+            if b.stm:
+                notify(b.stm, 'booking_approved', 'Booking Approved%s' % _rev,
+                       f'{b.client_name or "Your booking"} · Unit {_unit} was approved.', {'booking_id': b.id})
+                if not is_rev:
+                    notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
+                                f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
+                                {'booking_id': b.id})
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
@@ -2160,6 +2186,12 @@ class BookingActionView(APIView):
                     Plot.objects.filter(id=b.plot_id).update(status='available')
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
+            from notifications import notify
+            _unit = (b.plot.number if b.plot_id else b.area)
+            _rev = (' (R%d)' % b.revision_no) if is_rev else ''
+            if b.stm:
+                notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
+                       f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
         else:
             return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)

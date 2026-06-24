@@ -6,7 +6,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
-from .models import User, Designation
+from .models import User, Designation, Notification
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -143,13 +143,38 @@ class NotificationTestView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from notifications import send_push_to_user
-        send_push_to_user(
-            request.user.user_code,
-            'Test Notification',
+        from notifications import notify
+        notify(
+            request.user, 'test', 'Test Notification',
             f'Hello {request.user.name}! Notifications are working.',
         )
         return Response({'detail': 'Test notification sent.'})
+
+
+class NotificationListView(APIView):
+    """The bell — recent notifications + unread count for the logged-in user."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = Notification.objects.filter(recipient=request.user)
+        unread = qs.filter(is_read=False).count()
+        rows = [{
+            'id': n.id, 'type': n.type, 'title': n.title, 'body': n.body,
+            'data': n.data, 'is_read': n.is_read, 'created_at': n.created_at,
+        } for n in qs[:50]]
+        return Response({'unread': unread, 'results': rows})
+
+
+class NotificationReadView(APIView):
+    """Mark one notification read (with pk) or all (no pk)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk=None):
+        qs = Notification.objects.filter(recipient=request.user, is_read=False)
+        if pk is not None:
+            qs = qs.filter(pk=pk)
+        n = qs.update(is_read=True)
+        return Response({'ok': True, 'marked': n})
 
 
 class DesignationListCreateView(APIView):
