@@ -612,8 +612,8 @@ class PlotListView(APIView):
 
     def get(self, request):
         project_id = request.query_params.get('project')
-        if not project_id:
-            return Response({'detail': 'project query param required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not project_id or not str(project_id).isdigit():
+            return Response({'detail': 'A valid numeric project query param is required.'}, status=status.HTTP_400_BAD_REQUEST)
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         plots = Plot.objects.filter(project_id=project_id)
