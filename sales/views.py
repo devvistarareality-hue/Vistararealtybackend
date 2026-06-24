@@ -2106,11 +2106,21 @@ class BookingListCreateView(APIView):
 
 def _notify_booking_approvers(company, booking, submitter):
     try:
-        # Approvers are configured per project.
+        from notifications import notify, reporting_chain
+        # 1) Per-project configured approvers (most precise).
         ids = (booking.project.booking_approvers if booking.project_id else None) or []
-        if not ids:
+        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
+        # 2) Fallback: the submitting STM's reporting-manager chain.
+        if not recipients and booking.stm_id:
+            recipients = reporting_chain(booking.stm)
+        # 3) Last resort: every manager/admin in the company (so it's never silent).
+        if not recipients:
+            recipients = list(User.objects.filter(company=company, is_active=True).filter(Q(role='Manager') | Q(is_staff=True)))
+        # Never notify the person who submitted it; de-dup.
+        sub_id = getattr(submitter, 'id', None)
+        recipients = [u for u in recipients if u and u.id != sub_id]
+        if not recipients:
             return
-        from notifications import notify
         unit = booking.plot.number if booking.plot_id else booking.area
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
         title = 'Booking approval needed%s' % rev
@@ -2118,8 +2128,11 @@ def _notify_booking_approvers(company, booking, submitter):
             booking.client_name or '—', booking.project.name if booking.project_id else '',
             unit, int(booking.final_amount or 0), getattr(submitter, 'name', ''),
         )
-        for u in User.objects.filter(id__in=ids, company=company, is_active=True):
-            notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
+        seen = set()
+        for u in recipients:
+            if u.id not in seen:
+                seen.add(u.id)
+                notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
     except Exception:
         pass
 
