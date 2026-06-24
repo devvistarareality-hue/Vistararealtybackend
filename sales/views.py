@@ -1368,6 +1368,59 @@ class DistributionLogView(APIView):
 
 
 # ── Bulk Import ───────────────────────────────────────────────────────────────
+# ── Lead-import helpers (flexible cell parsing for the lifecycle template) ──────
+def _imp_dt(val):
+    """Parse a cell into an aware datetime. Accepts ISO, yyyy-mm-dd, dd-mm-yyyy, dd/mm/yyyy."""
+    from datetime import datetime as _dt, time as _time
+    from django.utils.dateparse import parse_datetime, parse_date
+    import re as _re
+    s = str(val or '').strip()
+    if not s:
+        return None
+    dt = parse_datetime(s)
+    if dt:
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+    d = parse_date(s)
+    if d:
+        # Anchor date-only values at noon so the calendar date is stable across timezones.
+        return timezone.make_aware(_dt.combine(d, _time(12, 0)))
+    m = _re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$', s)
+    if m:
+        dd, mm, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if yy < 100:
+            yy += 2000
+        try:
+            return timezone.make_aware(_dt(yy, mm, dd, 12, 0))
+        except ValueError:
+            return None
+    return None
+
+
+def _imp_date(val):
+    dt = _imp_dt(val)
+    return dt.date() if dt else None
+
+
+def _imp_int(val):
+    s = str(val or '').replace(',', '').strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
+def _imp_dec(val):
+    s = str(val or '').replace(',', '').replace('₹', '').strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
 class BulkImportLeadsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1375,23 +1428,43 @@ class BulkImportLeadsView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
+        from .models import LEAD_STATUS, TC_STATUS, STM_STATUS, SV_STATUS, CLOSURE_STATUS
+
         rows       = request.data.get('leads', [])
-        project_id = request.data.get('project_id')
-        source_id  = request.data.get('source_id')
+        project_id = request.data.get('project_id')   # default project for every row
+        source_id  = request.data.get('source_id')    # default source for every row
         company    = request.user.company
 
         if not rows:
             return Response({'detail': 'No leads provided.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # A supplied project/source must belong to the requester's company.
+        # A supplied default project/source must belong to the requester's company.
         if project_id and not _project_in_scope(request, project_id):
             return Response({'detail': 'Invalid project for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         if source_id and not scope_to_company(LeadSource.objects.filter(pk=source_id), request.user).exists():
             return Response({'detail': 'Invalid source for your company.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Allowed status values + company-scoped lookup tables (resolved once).
+        LEAD_ST = {k for k, _ in LEAD_STATUS}
+        TC_ST   = {k for k, _ in TC_STATUS}
+        STM_ST  = {k for k, _ in STM_STATUS}
+        SV_ST   = {k for k, _ in SV_STATUS}
+        CL_ST   = {k for k, _ in CLOSURE_STATUS}
+        proj_by_name = {p.name.strip().lower(): p.id for p in scope_to_company(Project.objects.all(), request.user)}
+        src_by_name  = {s.name.strip().lower(): s.id for s in scope_to_company(LeadSource.objects.all(), request.user)}
+        uq = User.objects.filter(is_active=True)
+        if company:
+            uq = uq.filter(company=company)
+        valid_user_ids = set(uq.values_list('id', flat=True))
+
+        def _uid(v):
+            i = _imp_int(v)
+            return i if i in valid_user_ids else None
+
         imported = 0
         duplicates = 0
         errors = 0
+        bare_new = 0
         failed = []
 
         # Build existing dup set (last-10-digits) scoped to this company — O(n) once.
@@ -1402,7 +1475,8 @@ class BulkImportLeadsView(APIView):
         }
         existing_keys.discard('')
 
-        to_create = []
+        to_create = []   # Lead objects
+        meta      = []   # parallel per-row dict carrying lead_date + SV/closure raw data
         for i, row in enumerate(rows):
             name  = str(row.get('name', '')).strip()
             phone = str(row.get('phone', '')).strip()
@@ -1414,30 +1488,129 @@ class BulkImportLeadsView(APIView):
             clean = ''.join(c for c in phone if c.isdigit())[-10:]
             is_dup = bool(clean) and clean in existing_keys
 
+            rproj = proj_by_name.get(str(row.get('project', '')).strip().lower()) or project_id or None
+            rsrc  = src_by_name.get(str(row.get('source', '')).strip().lower()) or source_id or None
+            tc_id  = _uid(row.get('telecaller_id'))
+            stm_id = _uid(row.get('stm_id'))
+
+            tc_status  = str(row.get('telecaller_status', '')).strip().lower()
+            tc_status  = tc_status if tc_status in TC_ST else ''
+            stm_status = str(row.get('stm_status', '')).strip().lower()
+            stm_status = stm_status if stm_status in STM_ST else ''
+
+            lead_dt = _imp_dt(row.get('lead_date'))
+
+            # SV / closure presence
+            sv_sched = _imp_dt(row.get('sv_scheduled_date'))
+            sv_vis   = _imp_dt(row.get('sv_visited_date'))
+            sv_stat  = str(row.get('sv_status', '')).strip().lower()
+            sv_stat  = sv_stat if sv_stat in SV_ST else ''
+            has_sv   = bool(sv_sched or sv_vis or sv_stat or str(row.get('sv_remarks', '')).strip())
+            cl_date  = _imp_date(row.get('closure_date'))
+
+            # Overall lead status: explicit wins; otherwise derive from the furthest stage reached.
+            overall = str(row.get('overall_status', '')).strip().lower()
+            if overall not in LEAD_ST:
+                if cl_date:
+                    overall = 'closed'
+                elif has_sv:
+                    overall = 'sv_done' if sv_stat == 'completed' else 'sv_scheduled'
+                elif stm_id:
+                    overall = 'warm_transferred'
+                elif tc_id:
+                    overall = 'assigned'
+                else:
+                    overall = 'new'
+
             to_create.append(Lead(
                 company=company,
                 name=name,
                 phone=phone,
                 alt_phone=str(row.get('alt_phone', '')).strip(),
                 email=str(row.get('email', '')).strip(),
-                project_id=project_id or None,
-                source_id=source_id or None,
+                project_id=rproj,
+                source_id=rsrc,
                 meta_campaign_name=str(row.get('campaign', '')).strip(),
+                meta_adset_name=str(row.get('adset', '')).strip(),
                 meta_ad_name=str(row.get('creative', '')).strip(),
+                requirement=str(row.get('requirement', '')).strip(),
+                preferred_location=str(row.get('preferred_location', '')).strip(),
+                budget_min=_imp_int(row.get('budget_min')),
+                budget_max=_imp_int(row.get('budget_max')),
+                status=overall,
+                telecaller_id=tc_id,
+                telecaller_status=tc_status,
+                telecaller_remarks=str(row.get('telecaller_remarks', '')).strip(),
+                telecaller_assigned_at=(lead_dt or timezone.now()) if tc_id else None,
+                stm_id=stm_id,
+                stm_status=stm_status,
+                stm_remarks=str(row.get('stm_remarks', '')).strip(),
+                stm_assigned_at=(lead_dt or timezone.now()) if stm_id else None,
                 is_duplicate=is_dup,
             ))
+            meta.append({
+                'lead_dt': lead_dt,
+                'has_sv': has_sv, 'sv_sched': sv_sched, 'sv_vis': sv_vis, 'sv_stat': sv_stat or 'scheduled',
+                'sv_ref': _uid(row.get('sv_referred_by_id')), 'sv_remarks': str(row.get('sv_remarks', '')).strip(),
+                'cl_date': cl_date, 'cl_status': (str(row.get('closure_status', '')).strip().lower() if str(row.get('closure_status', '')).strip().lower() in CL_ST else 'booked'),
+                'unit_no': str(row.get('unit_no', '')).strip(), 'unit_type': str(row.get('unit_type', '')).strip(),
+                'booking_amount': _imp_dec(row.get('booking_amount')), 'total_amount': _imp_dec(row.get('total_amount')),
+                'cl_remarks': str(row.get('closure_remarks', '')).strip(),
+            })
+
             if is_dup:
                 duplicates += 1
             else:
                 imported += 1
                 if clean:
                     existing_keys.add(clean)  # catch in-batch duplicates too
+            if not tc_id and overall == 'new':
+                bare_new += 1
 
-        Lead.objects.bulk_create(to_create, ignore_conflicts=True)
-        # Auto-assign the freshly imported bucket to available telecallers (window-gated).
-        if imported:
+        with transaction.atomic():
+            created = Lead.objects.bulk_create(to_create)
+
+            # Honour historical lead_date by overriding the auto_now_add created_at.
+            dated = []
+            for lead, m in zip(created, meta):
+                if m['lead_dt']:
+                    lead.created_at = m['lead_dt']
+                    dated.append(lead)
+            if dated:
+                Lead.objects.bulk_update(dated, ['created_at'])
+
+            # Materialise Site Visits + Closures linked to each freshly created lead.
+            svs, closures = [], []
+            for lead, m in zip(created, meta):
+                if m['has_sv']:
+                    svs.append(SiteVisit(
+                        lead=lead, project_id=lead.project_id,
+                        scheduled_at=m['sv_sched'], visited_at=m['sv_vis'], status=m['sv_stat'],
+                        stm_id=lead.stm_id, referred_by_telecaller_id=(m['sv_ref'] or lead.telecaller_id),
+                        remarks=m['sv_remarks'],
+                    ))
+                if m['cl_date']:
+                    closures.append(Closure(
+                        lead=lead, project_id=lead.project_id, stm_id=lead.stm_id,
+                        referred_by_telecaller_id=lead.telecaller_id, status=m['cl_status'],
+                        closure_date=m['cl_date'], unit_no=m['unit_no'], unit_type=m['unit_type'],
+                        booking_amount=m['booking_amount'], total_amount=m['total_amount'],
+                        remarks=m['cl_remarks'],
+                    ))
+            if svs:
+                SiteVisit.objects.bulk_create(svs)
+            if closures:
+                Closure.objects.bulk_create(closures)
+
+        # Auto-assign only the genuinely bare/new bucket (rows that carried an STM/TC
+        # or a later stage are already placed and must not be redistributed).
+        if bare_new:
             _run_distribution(company, 'telecaller')
-        return Response({'imported': imported, 'duplicates': duplicates, 'errors': errors, 'failed': failed})
+        return Response({
+            'imported': imported, 'duplicates': duplicates, 'errors': errors, 'failed': failed,
+            'site_visits': len([m for m in meta if m['has_sv']]),
+            'closures': len([m for m in meta if m['cl_date']]),
+        })
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
