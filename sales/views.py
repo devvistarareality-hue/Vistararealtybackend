@@ -1587,15 +1587,17 @@ class BulkImportLeadsView(APIView):
                         lead=lead, project_id=lead.project_id,
                         scheduled_at=m['sv_sched'], visited_at=m['sv_vis'], status=m['sv_stat'],
                         stm_id=lead.stm_id, referred_by_telecaller_id=(m['sv_ref'] or lead.telecaller_id),
-                        remarks=m['sv_remarks'],
+                        remarks=('[Imported] ' + m['sv_remarks']).strip(),
                     ))
                 if m['cl_date']:
+                    # Historical closure (no Booking/LOI) — tagged so it's distinguishable
+                    # from closures produced by the booking form.
                     closures.append(Closure(
                         lead=lead, project_id=lead.project_id, stm_id=lead.stm_id,
                         referred_by_telecaller_id=lead.telecaller_id, status=m['cl_status'],
                         closure_date=m['cl_date'], unit_no=m['unit_no'], unit_type=m['unit_type'],
                         booking_amount=m['booking_amount'], total_amount=m['total_amount'],
-                        remarks=m['cl_remarks'],
+                        remarks=('[Imported] ' + m['cl_remarks']).strip(),
                     ))
             if svs:
                 SiteVisit.objects.bulk_create(svs)
