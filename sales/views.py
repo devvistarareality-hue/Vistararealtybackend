@@ -1379,7 +1379,11 @@ def _imp_dt(val):
         return None
     dt = parse_datetime(s)
     if dt:
-        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        dt = timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        # Midnight (incl. Excel date cells) → noon so the calendar date is timezone-stable.
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            dt = dt.replace(hour=12)
+        return dt
     d = parse_date(s)
     if d:
         # Anchor date-only values at noon so the calendar date is stable across timezones.
@@ -1421,6 +1425,71 @@ def _imp_dec(val):
         return None
 
 
+# Canonical row keys the importer understands (the full-pipeline columns).
+IMPORT_COLUMNS = [
+    'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
+    'requirement', 'budget_min', 'budget_max', 'preferred_location', 'lead_date', 'overall_status',
+    'telecaller_id', 'telecaller_status', 'telecaller_remarks',
+    'stm_id', 'stm_status', 'stm_remarks',
+    'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_id', 'sv_remarks',
+    'closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks',
+]
+# Header → canonical-key aliases (the per-row loop reads 'creative', not 'ad_name').
+_IMP_ALIASES = {
+    'name': {'name', 'full_name', 'fullname', 'customer_name', 'lead_name', 'first_name'},
+    'phone': {'phone', 'phone_number', 'phonenumber', 'mobile', 'mobile_number', 'contact', 'cell'},
+    'alt_phone': {'alt_phone', 'alternate_phone', 'phone_2', 'secondary_phone', 'other_phone'},
+    'email': {'email', 'e_mail', 'email_address'},
+    'campaign': {'campaign', 'campaign_name', 'meta_campaign', 'utm_campaign', 'ad_campaign'},
+    'adset': {'adset', 'adset_name', 'ad_set', 'ad_group_name', 'adgroup'},
+    'creative': {'creative', 'ad_name', 'creative_name', 'ad_creative', 'advertisement_name'},
+    'lead_date': {'lead_date', 'date', 'created', 'created_at', 'submission_date', 'timestamp'},
+}
+_IMP_CANON = set(IMPORT_COLUMNS) | {'creative'}
+
+
+def _imp_canon_key(header):
+    import re as _re
+    k = _re.sub(r'[\s\-]+', '_', str(header or '').strip().lower())
+    for field, aliases in _IMP_ALIASES.items():
+        if k in aliases:
+            return field
+    return k if k in _IMP_CANON else None
+
+
+def _imp_parse_file(f):
+    """Parse an uploaded .xlsx/.csv into a list of row dicts keyed by canonical column names."""
+    import io
+    fname = (getattr(f, 'name', '') or '').lower()
+    headers, raw_rows = [], []
+    if fname.endswith('.csv') or fname.endswith('.txt'):
+        import csv
+        data = f.read()
+        text = data.decode('utf-8-sig', errors='ignore') if isinstance(data, bytes) else data
+        reader = csv.DictReader(io.StringIO(text))
+        headers = reader.fieldnames or []
+        raw_rows = [dict(r) for r in reader]
+    else:
+        import openpyxl
+        wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+        ws = wb['Leads'] if 'Leads' in wb.sheetnames else wb[wb.sheetnames[0]]
+        it = ws.iter_rows(values_only=True)
+        headers = [('' if h is None else str(h).strip()) for h in (next(it, []) or [])]
+        for r in it:
+            raw_rows.append({headers[i]: r[i] for i in range(min(len(headers), len(r)))})
+    colmap = {h: _imp_canon_key(h) for h in headers}
+    rows = []
+    for rr in raw_rows:
+        out = {}
+        for h, v in rr.items():
+            c = colmap.get(h)
+            if c and v is not None and str(v).strip() != '':
+                out[c] = v
+        if out.get('name') or out.get('phone'):
+            rows.append(out)
+    return rows
+
+
 class BulkImportLeadsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1434,6 +1503,14 @@ class BulkImportLeadsView(APIView):
         project_id = request.data.get('project_id')   # default project for every row
         source_id  = request.data.get('source_id')    # default source for every row
         company    = request.user.company
+
+        # App/web may upload the spreadsheet itself (multipart) instead of pre-parsed
+        # JSON rows — parse it server-side into the same canonical row dicts.
+        if not rows and request.FILES.get('file'):
+            try:
+                rows = _imp_parse_file(request.FILES['file'])
+            except Exception as e:
+                return Response({'detail': 'Could not read the file: %s' % e}, status=status.HTTP_400_BAD_REQUEST)
 
         if not rows:
             return Response({'detail': 'No leads provided.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1613,6 +1690,124 @@ class BulkImportLeadsView(APIView):
             'site_visits': len([m for m in meta if m['has_sv']]),
             'closures': len([m for m in meta if m['cl_date']]),
         })
+
+
+class LeadImportTemplateView(APIView):
+    """Generates the Full-Pipeline import template (.xlsx) server-side with dropdowns,
+    a styled table, coloured required/closure headers and a Reference sheet — so the
+    mobile app (which can't build a rich xlsx on-device) downloads the same template
+    the web generates."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+
+        import openpyxl
+        from io import BytesIO
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        from openpyxl.worksheet.datavalidation import DataValidation
+        from openpyxl.styles import PatternFill, Font
+        from openpyxl.utils import get_column_letter
+
+        company = request.user.company
+        projects = list(scope_to_company(Project.objects.all(), request.user).values_list('name', flat=True))
+        sources  = list(scope_to_company(LeadSource.objects.all(), request.user).values_list('name', flat=True))
+        uq = User.objects.filter(is_active=True).exclude(role='Admin')
+        if company:
+            uq = uq.filter(company=company)
+        users = list(uq.values('id', 'name', 'designation', 'role', 'phone').order_by('name'))
+
+        cols = [
+            'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
+            'requirement', 'budget_min', 'budget_max', 'preferred_location', 'lead_date', 'overall_status',
+            'telecaller_id', 'telecaller_status', 'telecaller_remarks', 'stm_id', 'stm_status', 'stm_remarks',
+            'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_id', 'sv_remarks',
+            'closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks',
+        ]
+        STATUS = {
+            'overall_status': 'new,assigned,contacted,not_reachable,warm_transferred,hot,warm,cold,not_interested,sv_scheduled,sv_done,closed,lost',
+            'telecaller_status': 'warm,cold,not_interested,not_reachable,callback',
+            'stm_status': 'hot,warm,cold,not_interested,sv_scheduled,sv_done,closed',
+            'sv_status': 'scheduled,completed,cancelled,no_show',
+            'closure_status': 'booked,cancelled,refunded',
+        }
+        def _role(u):
+            return (u['designation'] or u['role'] or '').lower()
+        tc_id  = next((u['id'] for u in users if 'tele' in _role(u)), (users[0]['id'] if users else ''))
+        stm_id = next((u['id'] for u in users if any(k in _role(u) for k in ('stm', 'sales', 'manager'))),
+                      (users[1]['id'] if len(users) > 1 else (users[0]['id'] if users else '')))
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Leads'
+        ws.append(cols)
+        ex1 = {'name': 'Rahul Sharma', 'phone': '9876543210', 'email': 'rahul@example.com', 'source': (sources[0] if sources else 'meta'), 'campaign': 'Meta - Luxury Homes', 'ad_name': 'Video 2BHK', 'lead_date': '01-05-2025', 'overall_status': 'new', 'telecaller_id': tc_id, 'telecaller_status': 'callback', 'telecaller_remarks': 'Call back evening'}
+        ex2 = {'name': 'Priya Mehta', 'phone': '9988776655', 'email': 'priya@example.com', 'project': (projects[0] if projects else 'Kalrav'), 'source': (sources[0] if sources else 'walk-in'), 'lead_date': '02-04-2025', 'overall_status': 'closed', 'telecaller_id': tc_id, 'telecaller_status': 'warm', 'stm_id': stm_id, 'stm_status': 'closed', 'sv_scheduled_date': '05-04-2025', 'sv_visited_date': '06-04-2025', 'sv_status': 'completed', 'sv_remarks': 'Liked plot A-12', 'closure_date': '08-04-2025', 'closure_status': 'booked', 'unit_no': 'A-12', 'unit_type': '2BHK', 'booking_amount': 200000, 'total_amount': 5000000, 'closure_remarks': 'Token received'}
+        for ex in (ex1, ex2):
+            ws.append([ex.get(c, '') for c in cols])
+
+        last_col = get_column_letter(len(cols))
+        table = Table(displayName='LeadsImport', ref='A1:%s3' % last_col)
+        table.tableStyleInfo = TableStyleInfo(name='TableStyleMedium2', showRowStripes=True)
+        ws.add_table(table)
+        ws.freeze_panes = 'A2'
+        for i, c in enumerate(cols, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = min(26, max(12, len(c) + 3))
+
+        def col_of(name):
+            return get_column_letter(cols.index(name) + 1)
+        red, purple, white = PatternFill('solid', fgColor='C62828'), PatternFill('solid', fgColor='7C3AED'), Font(bold=True, color='FFFFFF')
+        for f in ('name', 'phone'):
+            ws['%s1' % col_of(f)].fill = red
+            ws['%s1' % col_of(f)].font = white
+        for f in ('closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks'):
+            ws['%s1' % col_of(f)].fill = purple
+            ws['%s1' % col_of(f)].font = white
+
+        lists = wb.create_sheet('Lists')
+        lists.sheet_state = 'hidden'
+        for i, n in enumerate(projects, start=1):
+            lists['A%d' % i] = n
+        for i, n in enumerate(sources, start=1):
+            lists['B%d' % i] = n
+
+        MAXROW = 1000
+        def add_dv(name, formula):
+            dv = DataValidation(type='list', formula1=formula, allow_blank=True, showErrorMessage=True, errorStyle='warning')
+            ws.add_data_validation(dv)
+            dv.add('%s2:%s%d' % (col_of(name), col_of(name), MAXROW))
+        for field, vals in STATUS.items():
+            add_dv(field, '"%s"' % vals)
+        if projects:
+            add_dv('project', 'Lists!$A$1:$A$%d' % len(projects))
+        if sources:
+            add_dv('source', 'Lists!$B$1:$B$%d' % len(sources))
+
+        ref = wb.create_sheet('Reference — IDs & values')
+        ref.append(['— TEAM — put this id in telecaller_id / stm_id / sv_referred_by_id —'])
+        ref.append(['id', 'name', 'role / designation', 'phone'])
+        ref['A2'].font = Font(bold=True)
+        for u in users:
+            ref.append([u['id'], u['name'], (u['designation'] or u['role'] or ''), u['phone'] or ''])
+        ref.append([])
+        ref.append(['— ALLOWED VALUES (the Leads sheet has dropdowns for these) —'])
+        for k, v in STATUS.items():
+            ref.append([k, v.replace(',', ', ')])
+        ref.append([])
+        ref.append(['— NOTES —'])
+        ref.append(['Header colours: RED = required (name, phone). PURPLE = closure columns.'])
+        ref.append(['Dates: dd-mm-yyyy. project/source are matched by name. Leave a cell blank to skip.'])
+        ref.append(['Fill any sv_* column to create a Site Visit; fill closure_date to create a Closure.'])
+        ref.column_dimensions['A'].width = 24
+        ref.column_dimensions['B'].width = 62
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        resp = HttpResponse(buf.read(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = 'attachment; filename="vistara_pipeline_import_template.xlsx"'
+        return resp
 
 
 # ── Reports ───────────────────────────────────────────────────────────────────
