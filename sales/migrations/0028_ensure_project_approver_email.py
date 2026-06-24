@@ -1,24 +1,27 @@
 from django.db import migrations
 
 
-class Migration(migrations.Migration):
+def ensure_approver_email(apps, schema_editor):
     """
-    Migration 0024 added Project.approver_email to Django STATE only
-    (SeparateDatabaseAndState with empty database_operations), because the
-    column already existed on the original database. On a *fresh* database the
-    column is therefore never created, which breaks loaddata / inserts.
+    0024 added Project.approver_email to Django STATE only (the column already
+    existed on the original DB), so a *fresh* database never gets the column.
+    This idempotently adds it on any backend (Postgres, SQLite, …) by checking
+    the live columns first — vendor-agnostic, unlike `ADD COLUMN IF NOT EXISTS`.
+    """
+    conn = schema_editor.connection
+    with conn.cursor() as cursor:
+        cols = [d.name for d in conn.introspection.get_table_description(cursor, 'sales_project')]
+    if 'approver_email' not in cols:
+        Project = apps.get_model('sales', 'Project')
+        schema_editor.add_field(Project, Project._meta.get_field('approver_email'))
 
-    This idempotently ensures the column exists. No state change — the state
-    already has the field from 0024.
-    """
+
+class Migration(migrations.Migration):
 
     dependencies = [
         ('sales', '0027_alter_booking_loi_document'),
     ]
 
     operations = [
-        migrations.RunSQL(
-            sql="ALTER TABLE sales_project ADD COLUMN IF NOT EXISTS approver_email varchar(254) NOT NULL DEFAULT '';",
-            reverse_sql=migrations.RunSQL.noop,
-        ),
+        migrations.RunPython(ensure_approver_email, migrations.RunPython.noop),
     ]
