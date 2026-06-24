@@ -1646,6 +1646,8 @@ class BookingListCreateView(APIView):
         qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
         if not _sees_all_company(request.user):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
+        if request.query_params.get('mine'):           # "My Bookings" — only this user's
+            qs = qs.filter(stm=request.user)
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
@@ -1778,7 +1780,11 @@ class BookingActionView(APIView):
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
-            b.save(update_fields=['status', 'approval_status'])
+            # Remove the rejected signed LOI PDF from Supabase storage.
+            if b.loi_document:
+                try: b.loi_document.delete(save=False)
+                except Exception: pass
+            b.save(update_fields=['status', 'approval_status', 'loi_document'])
             if not is_rev:
                 if b.plot_id:
                     Plot.objects.filter(id=b.plot_id).update(status='available')
@@ -1787,6 +1793,34 @@ class BookingActionView(APIView):
         else:
             return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
+
+
+class ClosureCancelView(APIView):
+    """Cancel a closure: deletes the closure, frees the plot(s), removes the
+    signed LOI PDFs from Supabase, and marks the related booking(s) cancelled."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        closure = scope_to_company(
+            Closure.objects.filter(pk=pk), request.user, 'lead__company').first()
+        if not closure:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Admin/manager, or the STM who owns the closure, may cancel.
+        if not (is_admin_or_manager(request.user) or closure.stm_id == request.user.id):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        for b in Booking.objects.filter(closure=closure):
+            if b.loi_document:
+                try: b.loi_document.delete(save=False)
+                except Exception: pass
+            if b.plot_id:
+                Plot.objects.filter(id=b.plot_id).update(status='available')
+            b.status = 'rejected'
+            b.approval_status = 'CANCELLED'
+            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+        if closure.lead_id:
+            Lead.objects.filter(id=closure.lead_id).update(stm_status='')
+        closure.delete()
+        return Response({'detail': 'Closure cancelled.'})
 
 
 # ──────────────────────────────────────────────
