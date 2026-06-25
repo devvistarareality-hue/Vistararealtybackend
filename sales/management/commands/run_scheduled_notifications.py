@@ -14,6 +14,7 @@ Usage:  python manage.py run_scheduled_notifications [--escalate-hours 24] [--dr
 from datetime import timedelta, time as dtime
 
 from django.core.management.base import BaseCommand
+from django.db.models import Q
 from django.utils import timezone
 
 from sales.models import FollowUp, SiteVisit, UserAvailability
@@ -45,9 +46,15 @@ class Command(BaseCommand):
                             help='Hours past due before escalating to the manager (default 24).')
         parser.add_argument('--dry-run', action='store_true',
                             help='Log what would be sent without notifying or stamping markers.')
+        parser.add_argument('--backfill', action='store_true',
+                            help='One-time: stamp every currently-overdue follow-up/SV as already '
+                                 'handled (both markers) WITHOUT notifying, so the first real cron '
+                                 'run only fires for items that go overdue afterwards.')
 
     def handle(self, *args, **opts):
         now = timezone.now()
+        if opts['backfill']:
+            return self._backfill(now)
         dry = opts['dry_run']
         cutoff = now - timedelta(hours=opts['escalate_hours'])
 
@@ -63,6 +70,21 @@ class Command(BaseCommand):
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
             f'site-visit: {c["sv_reminder"]} nudged / {c["sv_escalate"]} escalated · '
             f'availability: {c["availability"]} reminded'
+        ))
+
+    # ── One-time backfill (suppress the existing backlog) ─────────────────
+    def _backfill(self, now):
+        fu = FollowUp.objects.filter(
+            status='pending', scheduled_at__lt=now,
+        ).filter(Q(reminder_sent_at__isnull=True) | Q(escalated_at__isnull=True))
+        fu_n = fu.update(reminder_sent_at=now, escalated_at=now)
+        sv = SiteVisit.objects.filter(
+            status='scheduled', scheduled_at__isnull=False, scheduled_at__lt=now,
+        ).filter(Q(reminder_sent_at__isnull=True) | Q(escalated_at__isnull=True))
+        sv_n = sv.update(reminder_sent_at=now, escalated_at=now)
+        self.stdout.write(self.style.SUCCESS(
+            f'Backfill complete — stamped {fu_n} overdue follow-up(s) and {sv_n} overdue '
+            'site-visit(s) as already handled. No notifications were sent.'
         ))
 
     # ── Follow-ups ────────────────────────────────────────────────────────
