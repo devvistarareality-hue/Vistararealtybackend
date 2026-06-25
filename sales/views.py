@@ -1908,12 +1908,14 @@ class ReportsView(APIView):
             )
 
         def get_summary():
-            agg = closure_qs.aggregate(total=Sum('booking_amount'), cnt=Count('id'))
+            # booking_amount is encrypted at rest → can't SQL-Sum it; sum in Python.
+            cnt = closure_qs.count()
+            total = sum((c.booking_amount or 0) for c in closure_qs.only('id', 'booking_amount'))
             return {
                 'total_sv':       sv_qs.count(),
                 'completed_sv':   sv_qs.filter(status='completed').count(),
-                'total_closures': agg['cnt'] or 0,
-                'total_revenue':  float(agg['total'] or 0),
+                'total_closures': cnt,
+                'total_revenue':  float(total or 0),
                 'meta_leads':     leads_qs.exclude(meta_campaign_name='').count(),
             }
 

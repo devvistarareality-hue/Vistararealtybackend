@@ -1,4 +1,5 @@
 import os
+from decimal import Decimal, InvalidOperation
 from django.db import models
 
 
@@ -52,3 +53,65 @@ class EncryptedTextField(models.TextField):
         except (InvalidToken, Exception):
             pass
         return f.encrypt(value.encode()).decode()
+
+
+def _to_decimal(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+class EncryptedDecimalField(models.DecimalField):
+    """Confidential money value: behaves like a DecimalField (you read/write a
+    Decimal, DRF/admin serialize it normally) but the DB column stores Fernet
+    ciphertext instead of the amount. No key set -> plaintext passthrough.
+    Reads tolerate ciphertext OR legacy plaintext (safe, resumable migration).
+    Stored as text, so NOT usable in SQL Sum/filter/order — aggregate in Python.
+    """
+
+    def get_internal_type(self):
+        return 'CharField'
+
+    def db_type(self, connection):
+        return 'varchar(255)'
+
+    def from_db_value(self, value, expression, connection):
+        if value in (None, ''):
+            return None
+        f = get_fernet()
+        if f is not None:
+            from cryptography.fernet import InvalidToken
+            try:
+                return Decimal(f.decrypt(value.encode()).decode())
+            except (InvalidToken, Exception):
+                pass  # legacy plaintext (pre-encryption)
+        return _to_decimal(value)
+
+    def to_python(self, value):
+        if value is None or isinstance(value, Decimal):
+            return value
+        f = get_fernet()
+        if f is not None and isinstance(value, str):
+            from cryptography.fernet import InvalidToken
+            try:
+                return Decimal(f.decrypt(value.encode()).decode())
+            except (InvalidToken, Exception):
+                pass
+        return _to_decimal(value)
+
+    def get_prep_value(self, value):
+        d = _to_decimal(value)
+        if d is None:
+            return None
+        s = str(d)
+        f = get_fernet()
+        return f.encrypt(s.encode()).decode() if f is not None else s
+
+    def get_db_prep_save(self, value, connection):
+        # Bypass DecimalField numeric adaptation — store ciphertext text.
+        return self.get_prep_value(value)

@@ -1,7 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
-from .fields import EncryptedTextField
+from .fields import EncryptedTextField, EncryptedDecimalField
 
 
 LEAD_STATUS = [
@@ -307,33 +307,33 @@ class Booking(models.Model):
     bunglow_type = models.CharField(max_length=50, blank=True)
 
     # Rates
-    land_rate          = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    dev_rate           = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    const_rate         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    sale_deed_rate     = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    dev_agreement_rate = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    maint_rate         = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    land_rate          = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    dev_rate           = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    const_rate         = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    sale_deed_rate     = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    dev_agreement_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    maint_rate         = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     maint_months       = models.IntegerField(default=0)
 
     # Amounts
-    plot_basic       = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    plot_dev         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    const_amt        = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    sale_deed        = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    dev_agreement    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    land_sale_deed   = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    const_agreement  = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    stamp_duty       = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    reg_fees         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    gst              = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    maintenance      = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    maint_deposit    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    maint_advance    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    legal_charges    = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    premium_location = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    total_extra      = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    discount         = models.DecimalField(max_digits=16, decimal_places=2, default=0)
-    final_amount     = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    plot_basic       = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    plot_dev         = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    const_amt        = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    sale_deed        = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    dev_agreement    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    land_sale_deed   = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    const_agreement  = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    stamp_duty       = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    reg_fees         = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    gst              = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    maintenance      = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    maint_deposit    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    maint_advance    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    legal_charges    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    premium_location = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    total_extra      = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    discount         = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    final_amount     = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
 
     # Toggles
     apply_reg_fee    = models.CharField(max_length=5, default='Yes')
@@ -343,7 +343,7 @@ class Booking(models.Model):
     # Schedule / extras
     installments   = models.JSONField(default=list, blank=True)
     extra_work_desc = models.CharField(max_length=300, blank=True)
-    extra_work_amount = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    extra_work_amount = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     extra_work_inst = models.JSONField(default=list, blank=True)
     extra_terms    = models.JSONField(default=list, blank=True)
 
@@ -380,8 +380,8 @@ class Closure(models.Model):
     closure_date = models.DateField()
     unit_no = models.CharField(max_length=50, blank=True)
     unit_type = models.CharField(max_length=50, blank=True)
-    booking_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
-    total_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    booking_amount = EncryptedDecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    total_amount = EncryptedDecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     remarks = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
