@@ -2210,6 +2210,31 @@ class BookingActionView(APIView):
         return Response(BookingSerializer(b).data)
 
 
+class BookingLOIUrlView(APIView):
+    """Returns a short-lived signed URL for a booking's confidential LOI PDF.
+    Authorised viewers only (admin/manager or the booking's STM). The bucket is
+    private, so this signed URL is the *only* way to open the document."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        b = scope_to_company(Booking.objects.all(), request.user).filter(pk=pk).first()
+        if not b or not b.loi_document:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not (is_admin_or_manager(request.user) or b.stm_id == request.user.id):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        from sales.supabase_storage import create_signed_url
+        url = create_signed_url(b.loi_document.name, expires_in=120)
+        if not url:
+            # Local dev (FileSystem storage) fallback.
+            try:
+                url = request.build_absolute_uri(b.loi_document.url)
+            except Exception:
+                url = None
+        if not url:
+            return Response({'detail': 'LOI unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'url': url})
+
+
 class ClosureCancelView(APIView):
     """Cancel a closure: deletes the closure, frees the plot(s), removes the
     signed LOI PDFs from Supabase, and marks the related booking(s) cancelled."""

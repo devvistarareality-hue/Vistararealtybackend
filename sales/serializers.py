@@ -45,6 +45,12 @@ class BookingSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     plot_number  = serializers.CharField(source='plot.number', read_only=True)
     stm_name     = serializers.CharField(source='stm.name', read_only=True)
+    # Never expose the public storage URL — only a truthy path so the UI can show
+    # the button. The file itself is fetched via a short-lived signed-URL endpoint.
+    loi_document = serializers.SerializerMethodField()
+
+    def get_loi_document(self, obj):
+        return obj.loi_document.name if obj.loi_document else ''
 
     class Meta:
         model = Booking

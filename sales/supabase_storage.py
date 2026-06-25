@@ -56,3 +56,28 @@ class SupabaseStorage(Storage):
 
     def size(self, name):
         return 0
+
+
+def create_signed_url(name, expires_in=120):
+    """Short-lived signed URL for a private-bucket object. Returned only to
+    authenticated, authorised users — so confidential LOIs aren't publicly reachable.
+    Returns None if Supabase isn't configured (local dev uses FileSystem instead)."""
+    base   = os.getenv('SUPABASE_URL', '').rstrip('/')
+    key    = os.getenv('SUPABASE_SERVICE_KEY', '')
+    bucket = os.getenv('SUPABASE_BUCKET', 'loi')
+    if not (base and key and name):
+        return None
+    try:
+        r = requests.post(
+            f'{base}/storage/v1/object/sign/{bucket}/{quote(name)}',
+            json={'expiresIn': int(expires_in)},
+            headers={'Authorization': f'Bearer {key}', 'apikey': key, 'Content-Type': 'application/json'},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            signed = r.json().get('signedURL') or r.json().get('signedUrl')
+            if signed:
+                return f'{base}/storage/v1{signed}'
+    except Exception:
+        pass
+    return None
