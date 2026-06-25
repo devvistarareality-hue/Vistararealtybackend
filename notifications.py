@@ -57,6 +57,11 @@ def send_push_to_user(user_code, title, message, data=None):
         'channel_for_external_user_ids': 'push',
         'headings': {'en': title},
         'contents': {'en': message},
+        # Branded status-bar icon (installed as ic_stat_onesignal_default) tinted in
+        # Vistara brand blue; large icon is the full-colour app logo.
+        'android_accent_color': 'FF3D5AFE',
+        'small_icon': 'ic_stat_onesignal_default',
+        'large_icon': 'ic_onesignal_large_icon_default',
     }
     if data:
         payload['data'] = data
@@ -81,6 +86,9 @@ def send_push_to_all(title, message, data=None):
         'included_segments': ['All'],
         'headings': {'en': title},
         'contents': {'en': message},
+        'android_accent_color': 'FF3D5AFE',
+        'small_icon': 'ic_stat_onesignal_default',
+        'large_icon': 'ic_onesignal_large_icon_default',
     }
     if data:
         payload['data'] = data

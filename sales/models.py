@@ -243,6 +243,9 @@ class FollowUp(models.Model):
     status = models.CharField(max_length=20, choices=FOLLOWUP_STATUS, default='pending')
     remarks = models.TextField(blank=True)
     outcome = models.TextField(blank=True)
+    # Phase-2 scheduled reminders: set once each so the cron never double-notifies.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)   # assignee nudged (overdue)
+    escalated_at = models.DateTimeField(null=True, blank=True)       # manager escalated
     created_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_follow_ups'
     )
@@ -272,6 +275,9 @@ class SiteVisit(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='referred_site_visits'
     )
     remarks = models.TextField(blank=True)
+    # Phase-2 scheduled reminders: set once each so the cron never double-notifies.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)   # STM/TC nudged (overdue)
+    escalated_at = models.DateTimeField(null=True, blank=True)       # manager escalated
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
