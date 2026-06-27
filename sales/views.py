@@ -333,11 +333,19 @@ class LeadListView(APIView):
         )
         existing = dup_qs.first()
 
-        # CP Executives & STMs self-source leads — assign the new lead to the
-        # creator so it lands in their own pipeline (CPs aren't in Meta distribution).
+        # Self-sourced (manually added) leads are assigned to their creator so they
+        # land in that person's pipeline, and are marked actioned (status defaults to
+        # 'warm' if none given) so they appear in the "Called" bucket, not "To Call" —
+        # the creator already has the contact, there's nothing to call fresh.
         extra = {}
         if is_cp(request.user) or is_stm(request.user):
-            extra = {'stm': request.user}
+            extra['stm'] = request.user
+            if not ser.validated_data.get('stm_status'):
+                extra['stm_status'] = 'warm'
+        elif is_telecaller(request.user):
+            extra['telecaller'] = request.user
+            if not ser.validated_data.get('telecaller_status'):
+                extra['telecaller_status'] = 'warm'
 
         lead = ser.save(
             company=company,
