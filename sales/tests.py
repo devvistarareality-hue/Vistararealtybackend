@@ -6,6 +6,8 @@ Django staff/superuser), who can see across all companies.
 
 If any of these tests fail, tenant isolation has regressed — do not ship.
 """
+from unittest import mock
+
 from rest_framework.test import APITestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -236,3 +238,118 @@ class DistributionRoutingTests(APITestCase):
         nb = Lead.objects.filter(telecaller=b).count()
         self.assertEqual(na + nb, 6)
         self.assertEqual((na, nb), (4, 2))  # weight 2:1 over 6 leads
+
+
+class DistributionWindowTests(APITestCase):
+    """Dry-run of Meta-lead auto-assignment around the sign-in window.
+
+    Auto-distribution fires on an EVENT (a new lead, or a user marking available =
+    "login") and only assigns while the window is OPEN (signin ≤ now < signout).
+    Availability persists for the day, so leads queued while the window is closed
+    flush to whoever is available on the first in-window event. Fairness uses a
+    weighted round-robin keyed on today's per-user assignment count, so a late
+    joiner catches up.
+    """
+
+    def _setup(self, code='AAA'):
+        co = Company.objects.create(code=code, name=code)
+        p = Project.objects.create(company=co, name='P')
+        return co, p
+
+    def _tc(self, co, p, code):
+        from sales.models import UserProjectAssignment
+        u = User.objects.create(email=f'{code}@x.com', company=co, role='Telecaller',
+                                user_code=code, designation='TELECALLER')
+        UserProjectAssignment.objects.create(user=u, project=p)
+        return u
+
+    def _login(self, u):                       # marking available == logging in
+        from sales.models import UserAvailability
+        from django.utils import timezone
+        UserAvailability.objects.update_or_create(
+            user=u, date=timezone.localdate(),
+            defaults={'is_available': True, 'checked_in_at': timezone.now()})
+
+    def _lead(self, co, p, n):
+        return Lead.objects.create(company=co, name=f'L{n}', phone=f'+91{n:010d}',
+                                   project=p, status='new')
+
+    # 1) BEFORE sign-in: even if both log in and leads arrive, nothing is assigned.
+    def test_before_signin_holds_everything(self):
+        from sales.views import _run_distribution
+        co, p = self._setup()
+        t1, t2 = self._tc(co, p, 'T1'), self._tc(co, p, 'T2')
+        self._login(t1); self._login(t2)
+        leads = [self._lead(co, p, i) for i in range(3)]
+        with mock.patch('sales.views._window_state', return_value='before_signin'):
+            res = _run_distribution(co, 'telecaller')
+        self.assertEqual(res['distributed'], 0)
+        for l in leads:
+            l.refresh_from_db()
+            self.assertIsNone(l.telecaller_id)
+
+    # 2) OPEN, both logged in → leads split fairly (2/2 of 4).
+    def test_open_both_available_split_fairly(self):
+        from sales.views import _run_distribution
+        co, p = self._setup()
+        t1, t2 = self._tc(co, p, 'T1'), self._tc(co, p, 'T2')
+        self._login(t1); self._login(t2)
+        for i in range(4):
+            self._lead(co, p, i)
+        _run_distribution(co, 'telecaller')    # no DistributionSettings → window OPEN
+        self.assertEqual(Lead.objects.filter(telecaller=t1).count(), 2)
+        self.assertEqual(Lead.objects.filter(telecaller=t2).count(), 2)
+
+    # 3) STAGGERED: T1 logs in first and takes the queue; T2 joins later and the
+    #    fairness counter routes the next leads to T2 to catch up.
+    def test_staggered_login_catches_up(self):
+        from sales.views import _run_distribution
+        co, p = self._setup()
+        t1, t2 = self._tc(co, p, 'T1'), self._tc(co, p, 'T2')
+        self._login(t1)
+        for i in range(2):
+            self._lead(co, p, i)
+        _run_distribution(co, 'telecaller')                 # only T1 available
+        self.assertEqual(Lead.objects.filter(telecaller=t1).count(), 2)
+        self.assertEqual(Lead.objects.filter(telecaller=t2).count(), 0)
+        self._login(t2)
+        for i in range(2, 4):
+            self._lead(co, p, i)
+        _run_distribution(co, 'telecaller')                 # both available now
+        self.assertEqual(Lead.objects.filter(telecaller=t1).count(), 2)   # unchanged
+        self.assertEqual(Lead.objects.filter(telecaller=t2).count(), 2)   # caught up
+
+    # 4) AFTER sign-out: nothing is assigned (auto path).
+    def test_after_signout_holds_everything(self):
+        from sales.views import _run_distribution
+        co, p = self._setup()
+        t1 = self._tc(co, p, 'T1'); self._login(t1)
+        l = self._lead(co, p, 0)
+        with mock.patch('sales.views._window_state', return_value='after_signout'):
+            res = _run_distribution(co, 'telecaller')
+        self.assertEqual(res['distributed'], 0)
+        l.refresh_from_db()
+        self.assertIsNone(l.telecaller_id)
+
+    # 5) STM path behaves identically (warm_transferred bucket → STM split).
+    def test_stm_open_split_fairly(self):
+        from sales.views import _run_distribution
+        from sales.models import UserProjectAssignment, UserAvailability
+        from django.utils import timezone
+        co, p = self._setup('BBB')
+
+        def stm(code):
+            u = User.objects.create(email=f'{code}@b.com', company=co, role='Sales',
+                                    user_code=code, designation='STM')
+            UserProjectAssignment.objects.create(user=u, project=p)
+            UserAvailability.objects.create(user=u, date=timezone.localdate(),
+                                            is_available=True, checked_in_at=timezone.now())
+            return u
+
+        s1, s2 = stm('S1'), stm('S2')
+        for i in range(4):
+            Lead.objects.create(company=co, name=f'W{i}', phone=f'+9133{i:08d}',
+                                project=p, status='warm_transferred')
+        _run_distribution(co, 'stm')
+        self.assertEqual(Lead.objects.filter(stm=s1).count(), 2)
+        self.assertEqual(Lead.objects.filter(stm=s2).count(), 2)
