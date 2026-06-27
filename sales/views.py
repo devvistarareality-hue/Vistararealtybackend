@@ -1321,20 +1321,22 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
         ).values_list('user_id', 'project_id'):
             proj_map.setdefault(uid, set()).add(pid)
 
-        def _eligible(uid, lead):
-            assigned = proj_map.get(uid)
-            if not assigned or lead.project_id is None:
-                return False
-            return lead.project_id in assigned
-
         member_ids   = [m.id for m in members]
         id_to_member = {m.id: m for m in members}
         user_leads   = {m.id: [] for m in members}
         now = timezone.now()
         skipped = 0
 
+        # Pre-bucket eligible members by project so each lead is matched in O(1)
+        # instead of scanning every member (O(L×M) → O(L+M)). Members are added in
+        # member_ids order, so the weighted-min tie-break stays identical to before.
+        proj_to_uids = {}
+        for uid in member_ids:
+            for pid in proj_map.get(uid, ()):
+                proj_to_uids.setdefault(pid, []).append(uid)
+
         for lead in leads:
-            eligible = [uid for uid in member_ids if _eligible(uid, lead)]
+            eligible = proj_to_uids.get(lead.project_id) if lead.project_id is not None else None
             if not eligible:
                 skipped += 1
                 continue
