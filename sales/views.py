@@ -309,7 +309,14 @@ class LeadListView(APIView):
     def post(self, request):
         # Any authenticated Sales user (incl. telecallers) may add a lead.
         # Consistent with PATCH (lead update), which has no admin/manager gate.
-        ser = LeadCreateSerializer(data=request.data)
+        # Only admins/managers may assign a telecaller/STM on create; strip those
+        # fields for callers (they self-source) so they can't assign to others.
+        data = {k: v for k, v in request.data.items()}
+        can_assign = can_assign_leads(request.user)
+        if not can_assign:
+            data.pop('telecaller', None)
+            data.pop('stm', None)
+        ser = LeadCreateSerializer(data=data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -338,14 +345,23 @@ class LeadListView(APIView):
         # 'warm' if none given) so they appear in the "Called" bucket, not "To Call" —
         # the creator already has the contact, there's nothing to call fresh.
         extra = {}
-        if is_cp(request.user) or is_stm(request.user):
-            extra['stm'] = request.user
-            if not ser.validated_data.get('stm_status'):
-                extra['stm_status'] = 'warm'
-        elif is_telecaller(request.user):
-            extra['telecaller'] = request.user
-            if not ser.validated_data.get('telecaller_status'):
-                extra['telecaller_status'] = 'warm'
+        if not can_assign:
+            # Callers self-source: own the lead + mark actioned → their "Called" bucket.
+            if is_cp(request.user) or is_stm(request.user):
+                extra['stm'] = request.user
+                if not ser.validated_data.get('stm_status'):
+                    extra['stm_status'] = 'warm'
+            elif is_telecaller(request.user):
+                extra['telecaller'] = request.user
+                if not ser.validated_data.get('telecaller_status'):
+                    extra['telecaller_status'] = 'warm'
+        else:
+            # Admin/manager assigned via the form → stamp assignment time. Status is
+            # left empty so the lead lands in the assignee's "To Call" bucket.
+            if ser.validated_data.get('telecaller'):
+                extra['telecaller_assigned_at'] = timezone.now()
+            if ser.validated_data.get('stm'):
+                extra['stm_assigned_at'] = timezone.now()
 
         lead = ser.save(
             company=company,
@@ -358,9 +374,18 @@ class LeadListView(APIView):
             existing.save(update_fields=['duplicate_count'])
 
         _record_lead_created(lead, by=request.user)
-        # CP/STM-sourced leads are already owned; only run telecaller distribution
-        # for unowned (e.g. admin-added) leads.
-        if not extra:
+        # Notify the assignee when an admin/manager hand-picks them on create.
+        if can_assign:
+            from notifications import notify
+            if lead.telecaller_id:
+                notify(lead.telecaller, 'new_lead', 'New Lead Assigned',
+                       f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
+            if lead.stm_id:
+                notify(lead.stm, 'new_lead', 'New Lead Assigned',
+                       f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
+        # Auto-distribute to a telecaller only when the lead is still unassigned
+        # (admin didn't pick one and it isn't self-sourced).
+        if not lead.telecaller_id and not lead.stm_id:
             _run_distribution(company, 'telecaller')
         lead.refresh_from_db()
 
