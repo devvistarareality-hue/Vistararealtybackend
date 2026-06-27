@@ -354,7 +354,10 @@ class LeadListView(APIView):
             elif is_telecaller(request.user):
                 extra['telecaller'] = request.user
                 if not ser.validated_data.get('telecaller_status'):
-                    extra['telecaller_status'] = 'warm'
+                    # 'callback' (not 'warm') so a blank status lands in the telecaller's
+                    # "Called" bucket WITHOUT auto-transferring — 'warm' is a deliberate
+                    # transfer-to-STM action handled below.
+                    extra['telecaller_status'] = 'callback'
         else:
             # Admin/manager assigned via the form → stamp assignment time. Status is
             # left empty so the lead lands in the assignee's "To Call" bucket.
@@ -383,9 +386,21 @@ class LeadListView(APIView):
             if lead.stm_id:
                 notify(lead.stm, 'new_lead', 'New Lead Assigned',
                        f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
+        # Telecaller marked the new lead "warm" → warm-transfer into the STM pipeline
+        # (mirrors the PATCH behaviour): overall status = warm_transferred, then
+        # auto-assign an STM. Applies whether warm came from a caller or an admin form.
+        if lead.telecaller_status == 'warm' and lead.status != 'warm_transferred':
+            lead.status = 'warm_transferred'
+            lead.save(update_fields=['status'])
+            LeadStatusHistory.objects.create(
+                lead=lead, changed_by=request.user,
+                field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
+            )
+        if lead.status == 'warm_transferred' and lead.stm_id is None:
+            _run_distribution(lead.company, 'stm')
         # Auto-distribute to a telecaller only when the lead is still unassigned
-        # (admin didn't pick one and it isn't self-sourced).
-        if not lead.telecaller_id and not lead.stm_id:
+        # (admin didn't pick one and it isn't self-sourced / warm-transferred).
+        elif not lead.telecaller_id and not lead.stm_id:
             _run_distribution(company, 'telecaller')
         lead.refresh_from_db()
 
