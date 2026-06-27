@@ -104,6 +104,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             'project', 'source',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status',
+            'city', 'address', 'purpose', 'budget_bucket',
         ]
 
     def validate_phone(self, value):
