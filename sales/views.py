@@ -903,6 +903,13 @@ class TelecallerListView(APIView):
             users = base_qs.filter(designation__icontains=crm_role).order_by('name')
             if not users.exists():
                 users = sales_qs
+        elif crm_role == 'cp':
+            # CP executives (channel partners) — for CP managers assigning leads.
+            users = base_qs.filter(
+                Q(designation__icontains='cp executive') | Q(designation__icontains='channel partner')
+            ).order_by('name')
+            if not users.exists():
+                users = sales_qs
         else:
             users = sales_qs
 
