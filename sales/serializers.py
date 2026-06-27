@@ -118,6 +118,7 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
             'telecaller', 'telecaller_status', 'telecaller_remarks', 'telecaller_assigned_at',
             'stm', 'stm_status', 'stm_remarks', 'stm_assigned_at',
             'budget_min', 'budget_max', 'requirement', 'preferred_location',
+            'city', 'address', 'purpose', 'budget_bucket',
         ]
 
 
