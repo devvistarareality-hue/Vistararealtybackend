@@ -146,6 +146,23 @@ class Plot(models.Model):
         return f"{self.project.name} – Plot {self.number}"
 
 
+LEAD_PURPOSE_CHOICES = [
+    ('investment', 'Investment'),
+    ('end_use', 'End Use'),
+    ('other', 'Other'),
+]
+
+BUDGET_BUCKETS = [
+    ('lt_10l', 'Less than ₹10 Lakh'),
+    ('10_50l', '₹10 – 50 Lakh'),
+    ('50l_1cr', '₹50 Lakh – ₹1 Cr'),
+    ('1_2cr', '₹1 – 2 Cr'),
+    ('2_3cr', '₹2 – 3 Cr'),
+    ('3_5cr', '₹3 – 5 Cr'),
+    ('gt_5cr', 'Above ₹5 Cr'),
+]
+
+
 class Lead(models.Model):
     company = models.ForeignKey(
         'companies.Company', on_delete=models.CASCADE,
@@ -187,6 +204,12 @@ class Lead(models.Model):
     budget_max = models.BigIntegerField(null=True, blank=True)
     requirement = models.TextField(blank=True)
     preferred_location = models.CharField(max_length=200, blank=True)
+
+    # Structured requirement (Location / Purpose / Budget bucket)
+    city = models.CharField(max_length=120, blank=True)
+    address = models.TextField(blank=True)
+    purpose = models.JSONField(default=list, blank=True)   # multi-select: investment/end_use/other
+    budget_bucket = models.CharField(max_length=20, choices=BUDGET_BUCKETS, blank=True)
 
     # Duplicate tracking
     is_duplicate = models.BooleanField(default=False)
