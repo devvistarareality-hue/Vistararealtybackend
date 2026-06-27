@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [master, Prince_main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Force the SQLite fallback (settings.py uses SQLite when DATABASE_URL is empty)
+      # so tests never touch a real database. SENTRY_DSN/REDIS_URL/FIELD_ENCRYPTION_KEY
+      # are intentionally unset — the code no-ops/pass-throughs without them.
+      DATABASE_URL: ""
+      SECRET_KEY: ci-test-secret-key-not-used-in-prod
+      DEBUG: "False"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run tests
+        run: python manage.py test --verbosity=2

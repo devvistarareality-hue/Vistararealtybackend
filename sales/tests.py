@@ -33,6 +33,12 @@ class TenantIsolationTests(APITestCase):
         cls.staff = User.objects.create(email='staff@x.com', company=cls.A, role='Admin', is_staff=True, user_code='ST')
         cls.vrl_admin = User.objects.create(email='vrl@x.com', company=cls.VRL, role='Admin', user_code='VA')
 
+        # A plain "Manager" role only sees all-company data when they're top-of-tree
+        # (reports to nobody AND has active reports) — see _sees_all_company. Make tc_a
+        # report to mgr_a so mgr_a is a real company-wide manager in these tests.
+        cls.tc_a.reporting_manager = cls.mgr_a
+        cls.tc_a.save(update_fields=['reporting_manager'])
+
         # Projects + leads per company
         cls.proj_a = Project.objects.create(company=cls.A, name='Tower A')
         cls.proj_b = Project.objects.create(company=cls.B, name='Tower B')
@@ -142,7 +148,7 @@ class TenantIsolationTests(APITestCase):
 
 class DistributionIsolationTests(APITestCase):
     def test_distribution_only_assigns_own_company_leads(self):
-        from sales.models import UserAvailability
+        from sales.models import UserAvailability, UserProjectAssignment
         from django.utils import timezone
 
         A = Company.objects.create(code='AAA', name='Alpha')
@@ -150,11 +156,17 @@ class DistributionIsolationTests(APITestCase):
         mgr_a = User.objects.create(email='m@a.com', company=A, role='Manager', user_code='MA')
         tc_a  = User.objects.create(email='t@a.com', company=A, role='Telecaller',
                                     user_code='TA', designation='TELECALLER')
+        # Distribution is STRICT on project: the lead needs a project and the member an
+        # assignment to it, else it's skipped (can't be routed to anyone).
+        projA = Project.objects.create(company=A, name='PA')
+        UserProjectAssignment.objects.create(user=tc_a, project=projA)
         # Unassigned 'new' leads in BOTH companies
-        Lead.objects.create(company=A, name='A1', phone='+919000000001', status='new')
+        Lead.objects.create(company=A, name='A1', phone='+919000000001', status='new', project=projA)
         Lead.objects.create(company=B, name='B1', phone='+919000000002', status='new')
-        # tc_a signs in today
-        UserAvailability.objects.create(user=tc_a, date=timezone.localdate(), is_available=True)
+        # tc_a signs in today (checked_in_at is required — distribution only counts
+        # availability within the 12h window).
+        UserAvailability.objects.create(user=tc_a, date=timezone.localdate(),
+                                        is_available=True, checked_in_at=timezone.now())
 
         auth(self.client, mgr_a)
         res = self.client.post('/api/sales/distribute/', {'type': 'telecaller'}, format='json')
@@ -166,3 +178,61 @@ class DistributionIsolationTests(APITestCase):
         self.assertEqual(a_lead.telecaller_id, tc_a.id)
         self.assertIsNone(b_lead.telecaller_id)
         self.assertEqual(b_lead.status, 'new')
+
+
+class DistributionRoutingTests(APITestCase):
+    """Locks in _run_distribution project-scoping + weighted fairness — the path the
+    O(L×M)→O(L+M) pre-bucketing optimization rewrote. No DistributionSettings, so the
+    window is 'open'."""
+
+    @staticmethod
+    def _avail(user):
+        from sales.models import UserAvailability
+        from django.utils import timezone
+        UserAvailability.objects.create(user=user, date=timezone.localdate(),
+                                        is_available=True, checked_in_at=timezone.now())
+
+    def test_leads_route_only_to_members_assigned_that_project(self):
+        from sales.models import UserProjectAssignment
+        from sales.views import _run_distribution
+        co = Company.objects.create(code='AAA', name='Alpha')
+        p1 = Project.objects.create(company=co, name='P1')
+        p2 = Project.objects.create(company=co, name='P2')
+        t1 = User.objects.create(email='t1@a.com', company=co, role='Telecaller', user_code='T1', designation='TELECALLER')
+        t2 = User.objects.create(email='t2@a.com', company=co, role='Telecaller', user_code='T2', designation='TELECALLER')
+        UserProjectAssignment.objects.create(user=t1, project=p1)
+        UserProjectAssignment.objects.create(user=t2, project=p2)
+        self._avail(t1); self._avail(t2)
+        l1 = Lead.objects.create(company=co, name='L1', phone='+910000000001', project=p1, status='new')
+        l2 = Lead.objects.create(company=co, name='L2', phone='+910000000002', project=p1, status='new')
+        l3 = Lead.objects.create(company=co, name='L3', phone='+910000000003', project=p2, status='new')
+        l0 = Lead.objects.create(company=co, name='L0', phone='+910000000004', project=None, status='new')
+
+        _run_distribution(co, 'telecaller')
+        for l in (l1, l2, l3, l0):
+            l.refresh_from_db()
+        self.assertEqual(l1.telecaller_id, t1.id)   # P1 → t1
+        self.assertEqual(l2.telecaller_id, t1.id)
+        self.assertEqual(l3.telecaller_id, t2.id)   # P2 → t2
+        self.assertIsNone(l0.telecaller_id)         # no project → skipped, never mis-routed
+
+    def test_weighted_fairness_within_a_project(self):
+        from sales.models import UserProjectAssignment, UserDistributionWeight
+        from sales.views import _run_distribution
+        co = Company.objects.create(code='BBB', name='Beta')
+        p = Project.objects.create(company=co, name='P')
+        a = User.objects.create(email='a@b.com', company=co, role='Telecaller', user_code='A', designation='TELECALLER')
+        b = User.objects.create(email='b@b.com', company=co, role='Telecaller', user_code='B', designation='TELECALLER')
+        UserProjectAssignment.objects.create(user=a, project=p)
+        UserProjectAssignment.objects.create(user=b, project=p)
+        UserDistributionWeight.objects.create(user=a, weight=2)
+        UserDistributionWeight.objects.create(user=b, weight=1)
+        self._avail(a); self._avail(b)
+        for i in range(6):
+            Lead.objects.create(company=co, name=f'L{i}', phone=f'+9120000000{i:02d}', project=p, status='new')
+
+        _run_distribution(co, 'telecaller')
+        na = Lead.objects.filter(telecaller=a).count()
+        nb = Lead.objects.filter(telecaller=b).count()
+        self.assertEqual(na + nb, 6)
+        self.assertEqual((na, nb), (4, 2))  # weight 2:1 over 6 leads
