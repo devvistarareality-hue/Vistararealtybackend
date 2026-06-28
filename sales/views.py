@@ -122,11 +122,46 @@ AVAILABILITY_TTL_HOURS = 12
 
 
 
-def _availability_active(avail):
-    """True only if the user is marked available AND checked in within the last 12 hours."""
+def _role_signout(company, designation):
+    """Configured sign-out time for a TC/STM role, or None (no settings / other role)."""
+    s = DistributionSettings.objects.filter(company=company).first()
+    if not s:
+        return None
+    d = (designation or '').lower()
+    if 'telecaller' in d or 'tele caller' in d:
+        return s.tc_signout_time
+    if 'stm' in d or 'sales team' in d or 'sales executive' in d:
+        return s.stm_signout_time
+    return None
+
+
+def _availability_expires_at(user):
+    """ISO timestamp when the user's availability auto-expires today = the role's
+    sign-out time. None if no sign-out is configured (caller falls back to the TTL)."""
+    signout = _role_signout(getattr(user, 'company', None), getattr(user, 'designation', ''))
+    if signout is None:
+        return None
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    tz = ZoneInfo('Asia/Kolkata')
+    return _dt.combine(timezone.now().astimezone(tz).date(), signout, tzinfo=tz).isoformat()
+
+
+def _availability_active(avail, user=None):
+    """True if marked available *today* and it's still before the role's configured
+    sign-out time — availability auto-expires at sign-out. Falls back to a 12h TTL
+    when the company has no distribution sign-out configured."""
     if not avail or not avail.is_available or not avail.checked_in_at:
         return False
-    return (timezone.now() - avail.checked_in_at) < timedelta(hours=AVAILABILITY_TTL_HOURS)
+    from zoneinfo import ZoneInfo
+    now_ist = timezone.now().astimezone(ZoneInfo('Asia/Kolkata'))
+    if avail.date != now_ist.date():          # a stale prior-day record is expired
+        return False
+    u = user or avail.user
+    signout = _role_signout(u.company, u.designation)
+    if signout is None:                        # no sign-out configured → legacy 12h TTL
+        return (timezone.now() - avail.checked_in_at) < timedelta(hours=AVAILABILITY_TTL_HOURS)
+    return now_ist.time() < signout            # auto-expires at sign-out
 
 
 def scope_leads_to_role(qs, user, lead_prefix=''):
@@ -1095,7 +1130,7 @@ class AvailabilityView(APIView):
         )
         avail_map = {}
         checkin_map = {}
-        for a in UserAvailability.objects.filter(user__company=request.user.company, date=today):
+        for a in UserAvailability.objects.filter(user__company=request.user.company, date=today).select_related('user', 'user__company'):
             active = _availability_active(a)
             avail_map[a.user_id] = active
             if active and a.checked_in_at:
@@ -1153,10 +1188,13 @@ class MyAvailabilityView(APIView):
         from datetime import date as date_cls
         today = str(date_cls.today())
         avail = UserAvailability.objects.filter(user=request.user, date=today).first()
-        active = _availability_active(avail)
+        active = _availability_active(avail, request.user)
         expires_at = None
-        if active and avail and avail.checked_in_at:
-            expires_at = (avail.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat()
+        if active:
+            # Auto-expires at the role sign-out time; fall back to the TTL if unset.
+            expires_at = _availability_expires_at(request.user)
+            if expires_at is None and avail and avail.checked_in_at:
+                expires_at = (avail.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat()
         return Response({
             'is_available':  active,
             'checked_in_at': avail.checked_in_at.isoformat() if (avail and avail.checked_in_at) else None,
@@ -1175,11 +1213,15 @@ class MyAvailabilityView(APIView):
             user=request.user, date=today,
             defaults={'is_available': is_available, 'checked_in_at': timezone.now() if is_available else None},
         )
-        active = _availability_active(obj)
+        active = _availability_active(obj, request.user)
         # Marking available flushes the unassigned bucket to this user's role (window-gated).
         if active:
             _run_distribution(request.user.company, _dist_type_for(request.user))
-        expires_at = (obj.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat() if (active and obj.checked_in_at) else None
+        expires_at = None
+        if active:
+            expires_at = _availability_expires_at(request.user)
+            if expires_at is None and obj.checked_in_at:
+                expires_at = (obj.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat()
         return Response({'is_available': active, 'expires_at': expires_at, 'ttl_hours': AVAILABILITY_TTL_HOURS})
 
 
@@ -1261,15 +1303,15 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
 
     today = str(date_cls.today())
 
-    # Only users marked available today and still within the 12h availability window.
-    cutoff = timezone.now() - timedelta(hours=AVAILABILITY_TTL_HOURS)
+    # Users marked available today. Availability auto-expires at the role's sign-out
+    # time, which the window gate above already enforces (distribution never runs
+    # after sign-out), so a same-day check-in stays valid through the whole window.
     avail_ids = set(
         UserAvailability.objects.filter(
             user__company=company,
             user__designation__iexact=desig,
             date=today,
             is_available=True,
-            checked_in_at__gte=cutoff,
         ).values_list('user_id', flat=True)
     )
     if not avail_ids:

@@ -353,3 +353,33 @@ class DistributionWindowTests(APITestCase):
         _run_distribution(co, 'stm')
         self.assertEqual(Lead.objects.filter(stm=s1).count(), 2)
         self.assertEqual(Lead.objects.filter(stm=s2).count(), 2)
+
+
+class AvailabilityExpiryTests(APITestCase):
+    """mark-available auto-expires at the role's configured sign-out time
+    (was a fixed 12h TTL)."""
+
+    def _avail(self, co, signout_time, code):
+        from sales.models import DistributionSettings, UserAvailability
+        from django.utils import timezone
+        DistributionSettings.objects.update_or_create(
+            company=co, defaults={'tc_signout_time': signout_time})
+        u = User.objects.create(email=f'{code}@x.com', company=co, role='Telecaller',
+                                user_code=code, designation='TELECALLER')
+        a = UserAvailability.objects.create(user=u, date=timezone.localdate(),
+                                            is_available=True, checked_in_at=timezone.now())
+        return u, a
+
+    def test_active_before_signout(self):
+        from sales.views import _availability_active
+        from datetime import time
+        co = Company.objects.create(code='AAA', name='A')
+        u, a = self._avail(co, time(23, 59), 'EARLY')
+        self.assertTrue(_availability_active(a, u))
+
+    def test_expired_after_signout(self):
+        from sales.views import _availability_active
+        from datetime import time
+        co = Company.objects.create(code='BBB', name='B')
+        u, a = self._avail(co, time(0, 0), 'LATE')   # sign-out 00:00 → past all day
+        self.assertFalse(_availability_active(a, u))
