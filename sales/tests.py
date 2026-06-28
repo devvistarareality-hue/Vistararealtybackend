@@ -383,3 +383,113 @@ class AvailabilityExpiryTests(APITestCase):
         co = Company.objects.create(code='BBB', name='B')
         u, a = self._avail(co, time(0, 0), 'LATE')   # sign-out 00:00 → past all day
         self.assertFalse(_availability_active(a, u))
+
+
+class WebhookVerifyTests(APITestCase):
+    """Meta webhook GET handshake: returns the challenge only for a known token."""
+
+    def test_challenge_returned_on_token_match(self):
+        from sales.models import MetaWebhookConfig
+        co = Company.objects.create(code='AAA', name='A')
+        MetaWebhookConfig.objects.create(company=co, verify_token='secret123')
+        res = self.client.get('/api/sales/webhooks/meta/', {
+            'hub.mode': 'subscribe', 'hub.verify_token': 'secret123', 'hub.challenge': 'PING'})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.content.decode(), 'PING')
+
+    def test_bad_token_rejected(self):
+        from sales.models import MetaWebhookConfig
+        co = Company.objects.create(code='BBB', name='B')
+        MetaWebhookConfig.objects.create(company=co, verify_token='secret123')
+        res = self.client.get('/api/sales/webhooks/meta/', {
+            'hub.mode': 'subscribe', 'hub.verify_token': 'nope', 'hub.challenge': 'PING'})
+        self.assertEqual(res.status_code, 403)
+
+
+class WarmTransferOnCreateTests(APITestCase):
+    """A telecaller adding a lead with TC status = warm warm-transfers it to the STM
+    pipeline on create (not just on edit)."""
+
+    def test_warm_lead_transfers_and_assigns_stm(self):
+        from sales.models import UserProjectAssignment, UserAvailability
+        from django.utils import timezone
+        co = Company.objects.create(code='AAA', name='A')
+        p = Project.objects.create(company=co, name='P')
+        tc  = User.objects.create(email='tc@a.com', company=co, role='Telecaller', user_code='TC', designation='TELECALLER')
+        stm = User.objects.create(email='stm@a.com', company=co, role='Sales',     user_code='SM', designation='STM')
+        UserProjectAssignment.objects.create(user=tc, project=p)
+        UserProjectAssignment.objects.create(user=stm, project=p)
+        UserAvailability.objects.create(user=stm, date=timezone.localdate(),
+                                        is_available=True, checked_in_at=timezone.now())
+
+        auth(self.client, tc)
+        res = self.client.post('/api/sales/leads/', {
+            'name': 'Warm Lead', 'phone': '+919000000009', 'project': p.id, 'telecaller_status': 'warm',
+        }, format='json')
+        self.assertEqual(res.status_code, 201)
+        lead = Lead.objects.get(id=res.json()['id'])
+        self.assertEqual(lead.telecaller_id, tc.id)          # self-sourced by the telecaller
+        self.assertEqual(lead.status, 'warm_transferred')    # warm → transferred
+        self.assertEqual(lead.stm_id, stm.id)                # auto-assigned to the available STM
+
+
+class LOIAccessTests(APITestCase):
+    """LOI signed-URL endpoint: only the booking's STM or an admin/manager may open it."""
+
+    def test_only_owner_stm_or_admin_can_fetch_url(self):
+        from sales.models import Booking
+        coA = Company.objects.create(code='AAA', name='A')
+        coB = Company.objects.create(code='BBB', name='B')
+        stm       = User.objects.create(email='s@a.com',  company=coA, role='Sales', user_code='S1', designation='STM')
+        other_stm = User.objects.create(email='s2@a.com', company=coA, role='Sales', user_code='S2', designation='STM')
+        admin     = User.objects.create(email='ad@a.com', company=coA, role='Admin', user_code='AD')
+        outsider  = User.objects.create(email='o@b.com',  company=coB, role='Admin', user_code='OB')
+        b = Booking.objects.create(company=coA, stm=stm, status='sold',
+                                   client_name='C', area='A1', loi_document='proj/plot/loi.pdf')
+        url = f'/api/sales/bookings/{b.id}/loi-url/'
+
+        auth(self.client, stm);       self.assertEqual(self.client.get(url).status_code, 200)   # owner
+        auth(self.client, admin);     self.assertEqual(self.client.get(url).status_code, 200)   # admin
+        auth(self.client, other_stm); self.assertEqual(self.client.get(url).status_code, 403)   # same co, not owner
+        auth(self.client, outsider);  self.assertEqual(self.client.get(url).status_code, 404)   # other company
+
+
+class BookingApprovalTests(APITestCase):
+    """Booking approve → closure + plot sold; reject → plot freed."""
+
+    def test_approve_creates_closure_and_sells_plot(self):
+        from datetime import date
+        from sales.models import Booking, Closure
+        co = Company.objects.create(code='AAA', name='A')
+        p  = Project.objects.create(company=co, name='P')
+        pl = Plot.objects.create(project=p, number='7', status='hold')
+        stm   = User.objects.create(email='s@a.com',  company=co, role='Sales', user_code='S1', designation='STM')
+        admin = User.objects.create(email='ad@a.com', company=co, role='Admin', user_code='AD')
+        lead = Lead.objects.create(company=co, name='L', phone='+919000000010', project=p, stm=stm)
+        b = Booking.objects.create(company=co, project=p, plot=pl, lead=lead, stm=stm, status='pending',
+                                   client_name='C', final_amount=1000000, plot_basic=900000, booking_date=date.today())
+
+        auth(self.client, admin)
+        res = self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        b.refresh_from_db(); pl.refresh_from_db(); lead.refresh_from_db()
+        self.assertEqual(b.status, 'sold')
+        self.assertEqual(pl.status, 'sold')
+        self.assertEqual(lead.stm_status, 'closed')
+        self.assertTrue(Closure.objects.filter(lead=lead, stm=stm, status='booked').exists())
+
+    def test_reject_frees_plot(self):
+        from sales.models import Booking
+        co = Company.objects.create(code='BBB', name='B')
+        p  = Project.objects.create(company=co, name='P')
+        pl = Plot.objects.create(project=p, number='8', status='hold')
+        stm   = User.objects.create(email='s@b.com',  company=co, role='Sales', user_code='S1', designation='STM')
+        admin = User.objects.create(email='ad@b.com', company=co, role='Admin', user_code='AD')
+        b = Booking.objects.create(company=co, project=p, plot=pl, stm=stm, status='pending', client_name='C')
+
+        auth(self.client, admin)
+        res = self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'reject'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        b.refresh_from_db(); pl.refresh_from_db()
+        self.assertEqual(b.status, 'rejected')
+        self.assertEqual(pl.status, 'available')
