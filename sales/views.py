@@ -2877,3 +2877,72 @@ class PlotRenameTypeView(APIView):
             return Response({'detail': 'Project not found.'}, status=404)
         updated = Plot.objects.filter(project_id=project_id, cluster_type=old_name).update(cluster_type=new_name)
         return Response({'updated': updated})
+
+
+class SalesDataResetView(APIView):
+    """Admin-only, company-scoped: wipe TRIAL transactional data (leads + their
+    history/follow-ups/site-visits/closures, bookings, distribution log,
+    availability, notifications) and reset all plots to 'available'. KEEPS setup:
+    company, users, projects, plot definitions, lead sources, team/distribution
+    config. POST requires confirm='DELETE'. GET returns current counts."""
+    permission_classes = [IsAuthenticated]
+
+    def _is_admin(self, user):
+        return bool(getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin' or is_platform_admin(user))
+
+    def _counts(self, co):
+        from accounts.models import Notification
+        return {
+            'leads':            Lead.objects.filter(company=co).count(),
+            'follow_ups':       FollowUp.objects.filter(lead__company=co).count(),
+            'site_visits':      SiteVisit.objects.filter(lead__company=co).count(),
+            'bookings':         Booking.objects.filter(company=co).count(),
+            'closures':         Closure.objects.filter(lead__company=co).count(),
+            'lead_history':     LeadStatusHistory.objects.filter(lead__company=co).count(),
+            'distribution_log': DistributionLog.objects.filter(company=co).count(),
+            'availability':     UserAvailability.objects.filter(user__company=co).count(),
+            'notifications':    Notification.objects.filter(recipient__company=co).count(),
+            'plots_to_reset':   Plot.objects.filter(project__company=co).exclude(status='available').count(),
+        }
+
+    def get(self, request):
+        if not self._is_admin(request.user):
+            return Response({'detail': 'Admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        return Response(self._counts(_resolve_company(request)))
+
+    def post(self, request):
+        if not self._is_admin(request.user):
+            return Response({'detail': 'Admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        if (request.data.get('confirm') or '') != 'DELETE':
+            return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        co = _resolve_company(request)
+        before = self._counts(co)
+        with_attendance = bool(request.data.get('with_attendance'))
+        with_loi        = bool(request.data.get('with_loi_files'))
+
+        # Optionally purge confidential LOI PDFs from Supabase before deleting bookings.
+        if with_loi:
+            for b in Booking.objects.filter(company=co).exclude(loi_document=''):
+                try: b.loi_document.delete(save=False)
+                except Exception: pass
+
+        from django.db import transaction
+        from accounts.models import Notification
+        with transaction.atomic():
+            Booking.objects.filter(company=co).delete()
+            Closure.objects.filter(lead__company=co).delete()
+            SiteVisit.objects.filter(lead__company=co).delete()
+            FollowUp.objects.filter(lead__company=co).delete()
+            LeadStatusHistory.objects.filter(lead__company=co).delete()
+            DistributionLog.objects.filter(company=co).delete()
+            UserAvailability.objects.filter(user__company=co).delete()
+            Notification.objects.filter(recipient__company=co).delete()
+            Lead.objects.filter(company=co).delete()
+            Plot.objects.filter(project__company=co).update(status='available')
+            if with_attendance:
+                from attendance.models import AttendanceRecord, LeaveApplication, LeaveTransaction, LeaveBalance
+                AttendanceRecord.objects.filter(user__company=co).delete()
+                LeaveApplication.objects.filter(user__company=co).delete()
+                LeaveTransaction.objects.filter(user__company=co).delete()
+                LeaveBalance.objects.filter(user__company=co).delete()
+        return Response({'detail': 'Trial data cleared.', 'deleted': before})

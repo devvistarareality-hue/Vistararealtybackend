@@ -530,3 +530,52 @@ class MultiPlotBookingTests(APITestCase):
         self.assertEqual(pl1.status, 'sold')
         self.assertEqual(pl2.status, 'sold')          # both sold
         self.assertTrue(Closure.objects.filter(lead=lead, unit_no='10, 11').exists())
+
+
+class DataResetTests(APITestCase):
+    """Admin-only trial-data reset must wipe the caller's company data, reset its
+    plots, and NEVER touch another company's data."""
+
+    def _seed(self, code):
+        from datetime import date
+        from sales.models import Booking, Closure, SiteVisit
+        co = Company.objects.create(code=code, name=code)
+        proj = Project.objects.create(company=co, name=code + ' P')
+        plot = Plot.objects.create(project=proj, number='1', status='sold')
+        admin = User.objects.create(email=f'a{code}@x.com', company=co, role='Admin', user_code='A' + code)
+        lead = Lead.objects.create(company=co, name='L', phone='+9190000' + code.zfill(5)[:5], project=proj, stm=admin)
+        SiteVisit.objects.create(lead=lead, stm=admin)
+        Booking.objects.create(company=co, plot=plot, lead=lead, stm=admin, client_name='L', booking_date=date.today())
+        Closure.objects.create(lead=lead, project=proj, stm=admin, status='booked', closure_date=date.today(), unit_no='1')
+        return co, admin, proj, plot, lead
+
+    def test_reset_scoped_to_company(self):
+        from sales.models import Booking, Closure, SiteVisit
+        a_co, a_admin, a_proj, a_plot, a_lead = self._seed('11')
+        b_co, b_admin, b_proj, b_plot, b_lead = self._seed('22')
+
+        auth(self.client, a_admin)
+        # missing confirm -> 400
+        self.assertEqual(self.client.post('/api/sales/admin/reset-trial-data/', {}, format='json').status_code, 400)
+        # do it
+        res = self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE'}, format='json')
+        self.assertEqual(res.status_code, 200)
+
+        # company A wiped + plot reset
+        self.assertFalse(Lead.objects.filter(company=a_co).exists())
+        self.assertFalse(Booking.objects.filter(company=a_co).exists())
+        self.assertFalse(Closure.objects.filter(lead__company=a_co).exists())
+        self.assertFalse(SiteVisit.objects.filter(lead__company=a_co).exists())
+        a_plot.refresh_from_db(); self.assertEqual(a_plot.status, 'available')
+
+        # company B fully intact
+        self.assertTrue(Lead.objects.filter(company=b_co).exists())
+        self.assertTrue(Booking.objects.filter(company=b_co).exists())
+        b_plot.refresh_from_db(); self.assertEqual(b_plot.status, 'sold')
+
+    def test_non_admin_forbidden(self):
+        a_co, a_admin, *_ = self._seed('33')
+        stm = User.objects.create(email='stm@x.com', company=a_co, role='Sales', user_code='S33', designation='STM')
+        auth(self.client, stm)
+        self.assertEqual(self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE'}, format='json').status_code, 403)
+        self.assertTrue(Lead.objects.filter(company=a_co).exists())
