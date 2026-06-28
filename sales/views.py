@@ -2336,6 +2336,46 @@ class BookingLOIUrlView(APIView):
         return Response({'url': url})
 
 
+class MediaUploadView(APIView):
+    """Authenticated media upload to the public erp-media bucket via the service-role
+    key. Lets the frontend stop using the anon key for writes (so anon INSERT can be
+    revoked in Supabase). Returns {url, path}."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import time, random, string
+        from sales.supabase_storage import upload_public
+        f = request.FILES.get('file')
+        if not f:
+            return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
+        if f.size and f.size > 25 * 1024 * 1024:
+            return Response({'detail': 'File too large (max 25 MB).'}, status=status.HTTP_400_BAD_REQUEST)
+        folder = (request.data.get('folder') or 'erp/media').strip('/')
+        ext = (f.name.rsplit('.', 1)[-1].lower() if '.' in (f.name or '') else 'bin')[:10]
+        rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        path = f'{folder}/{int(time.time() * 1000)}_{rand}.{ext}'
+        try:
+            url = upload_public(f.read(), path, f.content_type or 'application/octet-stream')
+        except Exception as e:
+            return Response({'detail': str(e)[:200]}, status=status.HTTP_502_BAD_GATEWAY)
+        if not url:
+            return Response({'detail': 'Storage not configured.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response({'url': url, 'path': path})
+
+
+class MediaDeleteView(APIView):
+    """Delete a media object from erp-media via the service-role key (anon can't)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from sales.supabase_storage import delete_object
+        path = request.data.get('path')
+        if not path:
+            return Response({'detail': 'path required.'}, status=status.HTTP_400_BAD_REQUEST)
+        delete_object(path)
+        return Response({'ok': True})
+
+
 class ClosureCancelView(APIView):
     """Cancel a closure: deletes the closure, frees the plot(s), removes the
     signed LOI PDFs from Supabase, and marks the related booking(s) cancelled."""

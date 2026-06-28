@@ -58,6 +58,39 @@ class SupabaseStorage(Storage):
         return 0
 
 
+def upload_public(data, name, content_type='application/octet-stream', bucket='erp-media'):
+    """Upload bytes to a public bucket using the service-role key (RLS-bypass), so the
+    frontend never needs the anon key for writes. Returns the public URL, or None if
+    Supabase isn't configured. Raises on a failed upload."""
+    base = os.getenv('SUPABASE_URL', '').rstrip('/')
+    key  = os.getenv('SUPABASE_SERVICE_KEY', '')
+    if not (base and key and name):
+        return None
+    r = requests.post(
+        f'{base}/storage/v1/object/{bucket}/{quote(name)}',
+        data=data,
+        headers={'Authorization': f'Bearer {key}', 'apikey': key,
+                 'Content-Type': content_type, 'x-upsert': 'true'},
+        timeout=60,
+    )
+    if r.status_code not in (200, 201):
+        raise Exception(f'Supabase upload failed ({r.status_code}): {r.text[:200]}')
+    return f'{base}/storage/v1/object/public/{bucket}/{quote(name)}'
+
+
+def delete_object(name, bucket='erp-media'):
+    """Delete an object via the service-role key. Best-effort; never raises."""
+    base = os.getenv('SUPABASE_URL', '').rstrip('/')
+    key  = os.getenv('SUPABASE_SERVICE_KEY', '')
+    if not (base and key and name):
+        return
+    try:
+        requests.delete(f'{base}/storage/v1/object/{bucket}/{quote(name)}',
+                        headers={'Authorization': f'Bearer {key}', 'apikey': key}, timeout=15)
+    except Exception:
+        pass
+
+
 def create_signed_url(name, expires_in=120):
     """Short-lived signed URL for a private-bucket object. Returned only to
     authenticated, authorised users — so confidential LOIs aren't publicly reachable.
