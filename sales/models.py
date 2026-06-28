@@ -316,6 +316,10 @@ class Booking(models.Model):
     company   = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='bookings', null=True, blank=True)
     project   = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     plot      = models.ForeignKey(Plot, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    # Multi-plot booking: `plot` stays the primary (first) plot for backward compat;
+    # plot_ids holds ALL selected plot ids and plot_numbers is the comma display.
+    plot_ids     = models.JSONField(default=list, blank=True)
+    plot_numbers = models.CharField(max_length=200, blank=True)
     lead      = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     closure   = models.ForeignKey('Closure', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
     stm       = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')

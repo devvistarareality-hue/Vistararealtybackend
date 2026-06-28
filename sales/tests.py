@@ -493,3 +493,40 @@ class BookingApprovalTests(APITestCase):
         b.refresh_from_db(); pl.refresh_from_db()
         self.assertEqual(b.status, 'rejected')
         self.assertEqual(pl.status, 'available')
+
+
+class MultiPlotBookingTests(APITestCase):
+    """A booking can span multiple plots: all are reserved on create, all sold on
+    approve, and plot_numbers is the comma display."""
+
+    def test_multi_plot_reserve_and_sell(self):
+        from datetime import date
+        from sales.models import Booking, Closure
+        co = Company.objects.create(code='MUL', name='M')
+        p  = Project.objects.create(company=co, name='P')
+        pl1 = Plot.objects.create(project=p, number='10', status='available')
+        pl2 = Plot.objects.create(project=p, number='11', status='available')
+        stm   = User.objects.create(email='s@m.com', company=co, role='Sales', user_code='S1', designation='STM')
+        admin = User.objects.create(email='a@m.com', company=co, role='Admin', user_code='AD')
+        lead = Lead.objects.create(company=co, name='L', phone='+919000000050', project=p, stm=stm)
+
+        auth(self.client, stm)
+        res = self.client.post('/api/sales/bookings/', {
+            'project': p.id, 'plot': pl1.id, 'plot_ids': [pl1.id, pl2.id], 'lead': lead.id,
+            'client_name': 'L', 'area': '2400', 'final_amount': 5000000, 'plot_basic': 4500000,
+            'booking_date': str(date.today()),
+        }, format='json')
+        self.assertEqual(res.status_code, 201)
+        b = Booking.objects.get(id=res.json()['id'])
+        self.assertEqual(b.plot_ids, [pl1.id, pl2.id])
+        self.assertEqual(b.plot_numbers, '10, 11')
+        pl1.refresh_from_db(); pl2.refresh_from_db()
+        self.assertEqual(pl1.status, 'hold')
+        self.assertEqual(pl2.status, 'hold')          # both reserved
+
+        auth(self.client, admin)
+        self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'approve'}, format='json')
+        pl1.refresh_from_db(); pl2.refresh_from_db()
+        self.assertEqual(pl1.status, 'sold')
+        self.assertEqual(pl2.status, 'sold')          # both sold
+        self.assertTrue(Closure.objects.filter(lead=lead, unit_no='10, 11').exists())

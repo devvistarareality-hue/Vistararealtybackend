@@ -2180,6 +2180,25 @@ class BookingListCreateView(APIView):
             extra = dict(revision_no=0, approval_status='PENDING')
         booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='pending', **extra)
 
+        # Multi-plot: resolve ALL selected plots. `plot` stays the primary (first);
+        # plot_ids holds every selected id and plot_numbers is the comma display.
+        pids = data.get('plot_ids')
+        if isinstance(pids, list) and pids:
+            pids = [int(x) for x in pids if str(x).isdigit()]
+        elif prior and prior.plot_ids:
+            pids = list(prior.plot_ids)
+        elif booking.plot_id:
+            pids = [booking.plot_id]
+        else:
+            pids = []
+        if pids:
+            num_map = dict(Plot.objects.filter(id__in=pids).values_list('id', 'number'))
+            booking.plot_ids = pids
+            booking.plot_numbers = ', '.join(num_map[p] for p in pids if p in num_map)
+            if not booking.plot_id:
+                booking.plot_id = pids[0]
+            booking.save(update_fields=['plot_ids', 'plot_numbers', 'plot'])
+
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
         lf = data.get('loi_file')
@@ -2193,11 +2212,11 @@ class BookingListCreateView(APIView):
                 pass
 
         if not prior:
-            # New booking: reserve the plot only. The Closure is mirrored into
+            # New booking: reserve ALL selected plots. The Closure is mirrored into
             # My Conversions on APPROVAL (see BookingActionView) — so a booking that
             # is still pending approval does NOT appear as a booked closure.
-            if booking.plot_id:
-                Plot.objects.filter(id=booking.plot_id).update(status='hold')
+            if pids:
+                Plot.objects.filter(id__in=pids).update(status='hold')
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
@@ -2222,7 +2241,7 @@ def _notify_booking_approvers(company, booking, submitter):
         recipients = [u for u in recipients if u and u.id != sub_id]
         if not recipients:
             return
-        unit = booking.plot.number if booking.plot_id else booking.area
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
         title = 'Booking approval needed%s' % rev
         msg = '%s · %s Unit %s · ₹%s — by %s' % (
@@ -2254,8 +2273,9 @@ class BookingActionView(APIView):
         is_rev = b.revision_no and b.revision_no > 0
 
         if action == 'approve':
-            if b.plot_id:
-                Plot.objects.filter(id=b.plot_id).update(status='sold')
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            if _pids:
+                Plot.objects.filter(id__in=_pids).update(status='sold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
             if b.closure_id:
@@ -2270,7 +2290,7 @@ class BookingActionView(APIView):
                 closure = Closure.objects.create(
                     lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
                     status='booked', closure_date=b.booking_date or timezone.now().date(),
-                    unit_no=(b.plot.number if b.plot_id else b.area),
+                    unit_no=(b.plot_numbers or (b.plot.number if b.plot_id else b.area)),
                     unit_type=b.villa_type or b.bunglow_type or '',
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
@@ -2278,7 +2298,7 @@ class BookingActionView(APIView):
                 b.save(update_fields=['status', 'approval_status', 'closure'])
             # Notify the STM (approved) and — on a fresh closure — their manager chain.
             from notifications import notify, notify_many, reporting_chain
-            _unit = (b.plot.number if b.plot_id else b.area)
+            _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
             _rev = (' (R%d)' % b.revision_no) if is_rev else ''
             if b.stm:
                 notify(b.stm, 'booking_approved', 'Booking Approved%s' % _rev,
@@ -2296,12 +2316,13 @@ class BookingActionView(APIView):
                 except Exception: pass
             b.save(update_fields=['status', 'approval_status', 'loi_document'])
             if not is_rev:
-                if b.plot_id:
-                    Plot.objects.filter(id=b.plot_id).update(status='available')
+                _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+                if _pids:
+                    Plot.objects.filter(id__in=_pids).update(status='available')
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
             from notifications import notify
-            _unit = (b.plot.number if b.plot_id else b.area)
+            _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
             _rev = (' (R%d)' % b.revision_no) if is_rev else ''
             if b.stm:
                 notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
@@ -2393,8 +2414,9 @@ class ClosureCancelView(APIView):
             if b.loi_document:
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
-            if b.plot_id:
-                Plot.objects.filter(id=b.plot_id).update(status='available')
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            if _pids:
+                Plot.objects.filter(id__in=_pids).update(status='available')
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
             b.save(update_fields=['status', 'approval_status', 'loi_document'])
