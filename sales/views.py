@@ -2768,8 +2768,11 @@ def _backfill_form_mapping(company, form_id, project, page_access_token=None):
                                 phones.add(digits)
                 url = d.get('paging', {}).get('next'); pages += 1
             for digits in phones:
+                # endswith (not a (^|\D)…$ boundary regex): a +91-prefixed number like
+                # +919510188522 has its 10-digit core preceded by the '1' of +91, so a
+                # \D boundary never matches. Last-10 endswith matches the same number.
                 n += Lead.objects.filter(
-                    company=company, project__isnull=True, phone__regex=r'(^|\D)' + digits + r'$'
+                    company=company, project__isnull=True, phone__endswith=digits
                 ).update(project=project, meta_form_id=fid)
         except Exception:
             logger.exception('Meta backfill failed for form_id=%s', fid)
