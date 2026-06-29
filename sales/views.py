@@ -2007,9 +2007,11 @@ class ReportsView(APIView):
             )
 
         def get_summary():
-            # booking_amount is encrypted at rest → can't SQL-Sum it; sum in Python.
+            # Amounts are encrypted at rest → can't SQL-Sum; sum in Python. Revenue is
+            # the FULL closure value (total_amount = final amount), falling back to
+            # booking_amount (plot basic) for older closures with no total.
             cnt = closure_qs.count()
-            total = sum((c.booking_amount or 0) for c in closure_qs.only('id', 'booking_amount'))
+            total = sum((c.total_amount or c.booking_amount or 0) for c in closure_qs.only('id', 'booking_amount', 'total_amount'))
             return {
                 'total_sv':       sv_qs.count(),
                 'completed_sv':   sv_qs.filter(status='completed').count(),
