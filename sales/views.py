@@ -370,7 +370,7 @@ class LeadListView(APIView):
         clean = ''.join(c for c in phone if c.isdigit())[-10:]
         dup_qs = (
             scope_leads_to_role(scope_to_company(Lead.objects.all(), request.user), request.user)
-            .filter(phone__regex=r'(^|\D)' + clean + r'$')
+            .filter(phone__endswith=clean)
             if clean else Lead.objects.none()
         )
         existing = dup_qs.first()
@@ -2498,7 +2498,7 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
     # Duplicate detection using last 10 digits, scoped to this company
     clean = ''.join(c for c in phone if c.isdigit())[-10:]
     existing = (
-        Lead.objects.filter(company=company, phone__regex=r'(^|\D)' + clean + r'$').first()
+        Lead.objects.filter(company=company, phone__endswith=clean).first()
         if clean else None
     )
     if existing:

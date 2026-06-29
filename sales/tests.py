@@ -603,3 +603,22 @@ class FormMappingBackfillTests(APITestCase):
         self.assertEqual(l1.project_id, proj.id)
         self.assertEqual(l2.project_id, proj.id)
         self.assertIsNone(l3.project_id)   # different form untouched
+
+
+class PhoneDedupTests(APITestCase):
+    """Duplicate detection must catch +91-prefixed numbers (last-10 match)."""
+
+    def test_plus91_duplicate_flagged(self):
+        co = Company.objects.create(code='DUP', name='Dup')
+        admin = User.objects.create(email='a@dup.com', company=co, role='Admin', user_code='AD')
+        first = Lead.objects.create(company=co, name='First', phone='+919510188522')
+
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/leads/',
+                               {'name': 'Second', 'phone': '+919510188522'}, format='json')
+        self.assertEqual(res.status_code, 201)
+        new = Lead.objects.get(id=res.json()['id'])
+        self.assertTrue(new.is_duplicate)
+        self.assertEqual(new.duplicate_of_id, first.id)
+        first.refresh_from_db()
+        self.assertEqual(first.duplicate_count, 1)
