@@ -2515,6 +2515,7 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         meta_campaign_name=campaign_name[:200] if campaign_name else '',
         meta_adset_name=adset_name[:200] if adset_name else '',
         meta_ad_name=ad_name[:200] if ad_name else '',
+        meta_form_id=str(form_id or '')[:100],
         status='new',
         is_duplicate=bool(existing),
         duplicate_of=existing if existing else None,
@@ -2742,6 +2743,39 @@ class MetaWebhookConfigView(APIView):
         return Response({'detail': 'Unknown action'}, status=400)
 
 
+def _backfill_form_mapping(company, form_id, project, page_access_token=None):
+    """Assign `project` to existing UNMAPPED leads that belong to this form, so a
+    mapping added/fixed after leads arrived also fixes those leads. Two passes:
+      1) leads already tagged with this form_id (stored on the lead);
+      2) best-effort — leads with no/blank project that match (by phone) a lead in
+         this form on Meta, covering leads that arrived before form_id was stored
+         or without a form_id in the webhook payload.
+    Returns the number of leads updated."""
+    fid = str(form_id)
+    n = Lead.objects.filter(company=company, project__isnull=True, meta_form_id=fid).update(project=project)
+    if page_access_token:
+        try:
+            import urllib.request, json as _json
+            phones, url, pages = set(), (
+                f'https://graph.facebook.com/v19.0/{fid}/leads?fields=field_data&limit=200&access_token={page_access_token}'), 0
+            while url and pages < 6:
+                d = _json.load(urllib.request.urlopen(url, timeout=25))
+                for r in d.get('data', []):
+                    for f in r.get('field_data', []):
+                        if 'phone' in (f.get('name', '').lower()):
+                            digits = ''.join(c for c in (f.get('values') or [''])[0] if c.isdigit())[-10:]
+                            if len(digits) >= 10:
+                                phones.add(digits)
+                url = d.get('paging', {}).get('next'); pages += 1
+            for digits in phones:
+                n += Lead.objects.filter(
+                    company=company, project__isnull=True, phone__regex=r'(^|\D)' + digits + r'$'
+                ).update(project=project, meta_form_id=fid)
+        except Exception:
+            logger.exception('Meta backfill failed for form_id=%s', fid)
+    return n
+
+
 class MetaFormMappingView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2774,10 +2808,15 @@ class MetaFormMappingView(APIView):
             form_id=form_id,
             defaults={'form_name': form_name, 'project': project, 'company': project.company},
         )
+        # Retroactively map existing unmapped leads from this form.
+        cfg = MetaWebhookConfig.objects.filter(company=company).first()
+        backfilled = _backfill_form_mapping(
+            company, form_id, project, cfg.page_access_token if cfg else None)
         return Response({
             'id': mapping.id, 'form_id': mapping.form_id,
             'form_name': mapping.form_name, 'project_id': mapping.project_id,
             'project_name': mapping.project.name, 'total_leads': mapping.total_leads,
+            'backfilled': backfilled,
         }, status=201 if created else 200)
 
     def delete(self, request):

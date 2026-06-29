@@ -579,3 +579,27 @@ class DataResetTests(APITestCase):
         auth(self.client, stm)
         self.assertEqual(self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE'}, format='json').status_code, 403)
         self.assertTrue(Lead.objects.filter(company=a_co).exists())
+
+
+class FormMappingBackfillTests(APITestCase):
+    """Saving a form→project mapping retroactively maps existing unmapped leads
+    that carry that form_id, and leaves other forms' leads alone."""
+
+    def test_backfill_by_stored_form_id(self):
+        co = Company.objects.create(code='FB', name='FB')
+        proj = Project.objects.create(company=co, name='P1')
+        admin = User.objects.create(email='a@fb.com', company=co, role='Admin', user_code='AFB')
+        src = LeadSource.objects.create(company=co, name='meta')
+        l1 = Lead.objects.create(company=co, name='A', phone='+919000000001', source=src, meta_form_id='F123')
+        l2 = Lead.objects.create(company=co, name='B', phone='+919000000002', source=src, meta_form_id='F123')
+        l3 = Lead.objects.create(company=co, name='C', phone='+919000000003', source=src, meta_form_id='OTHER')
+
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/webhooks/meta/mappings/',
+                               {'form_id': 'F123', 'form_name': 'F', 'project_id': proj.id}, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()['backfilled'], 2)
+        l1.refresh_from_db(); l2.refresh_from_db(); l3.refresh_from_db()
+        self.assertEqual(l1.project_id, proj.id)
+        self.assertEqual(l2.project_id, proj.id)
+        self.assertIsNone(l3.project_id)   # different form untouched

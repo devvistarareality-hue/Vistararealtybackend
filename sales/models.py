@@ -179,6 +179,9 @@ class Lead(models.Model):
     meta_campaign_name = models.CharField(max_length=200, blank=True)
     meta_adset_name    = models.CharField(max_length=200, blank=True)
     meta_ad_name       = models.CharField(max_length=200, blank=True)
+    # The Meta Lead Ads form this lead came from — drives form→project routing and
+    # lets a later mapping retroactively backfill the project.
+    meta_form_id       = models.CharField(max_length=100, blank=True, db_index=True)
 
     # Overall status
     status = models.CharField(max_length=30, choices=LEAD_STATUS, default='new')
