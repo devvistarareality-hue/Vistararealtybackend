@@ -201,7 +201,11 @@ class StatsView(APIView):
         # (user, company) so repeated dashboard loads don't re-hit Postgres.
         # 20s TTL keeps numbers near-live. Shared (consistent) once Redis is on.
         company_id = request.query_params.get('company_id')
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}'
+        date_from  = request.query_params.get('date_from')
+        date_to    = request.query_params.get('date_to')
+
+        # Include date range in cache key so different date windows don't collide
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -221,6 +225,12 @@ class StatsView(APIView):
         else:
             sv_filter = cl_filter = prj_filter = {}
 
+        # Apply optional date range filter
+        if date_from:
+            leads_qs = leads_qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            leads_qs = leads_qs.filter(created_at__date__lte=date_to)
+
         # Single aggregate query instead of 6 separate COUNTs
         agg = leads_qs.aggregate(
             total_leads=Count('id'),
@@ -234,6 +244,12 @@ class StatsView(APIView):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
             cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        if date_from:
+            sv_qs = sv_qs.filter(created_at__date__gte=date_from)
+            cl_qs = cl_qs.filter(closure_date__gte=date_from)
+        if date_to:
+            sv_qs = sv_qs.filter(created_at__date__lte=date_to)
+            cl_qs = cl_qs.filter(closure_date__lte=date_to)
         sv_done, closures, active_projects = (
             sv_qs.filter(**sv_filter).count(),
             cl_qs.filter(**cl_filter).count(),
