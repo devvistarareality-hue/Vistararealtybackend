@@ -9,8 +9,12 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 _SECRET_KEY = os.getenv('SECRET_KEY', '')
+_on_railway = bool(os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_PROJECT_ID'))
 if not _SECRET_KEY:
-    raise ValueError('SECRET_KEY environment variable must be set. Add it to your .env file or Railway variables.')
+    if _on_railway:
+        raise ValueError('SECRET_KEY environment variable must be set in Railway variables.')
+    # Local dev: use a fixed insecure key so the server starts without a .env file.
+    _SECRET_KEY = 'django-insecure-local-dev-only-do-not-use-in-production-vistara2024'
 SECRET_KEY = _SECRET_KEY
 
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
