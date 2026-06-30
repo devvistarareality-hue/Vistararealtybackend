@@ -226,6 +226,7 @@ class StatsView(APIView):
             total_leads=Count('id'),
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
+            called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
@@ -245,6 +246,7 @@ class StatsView(APIView):
             'total_leads':     agg['total_leads'],
             'new_leads':       agg['new_leads'],
             'leads_today':     agg['leads_today'],
+            'called_count':    agg['called_count'],
             'sv_done':         sv_done,
             'closures':        closures,
             'active_projects': active_projects,
