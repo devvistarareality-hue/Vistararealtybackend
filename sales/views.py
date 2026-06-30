@@ -237,6 +237,11 @@ class StatsView(APIView):
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
             called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
+            hot_count=Count('id', filter=Q(telecaller_status='hot')),
+            warm_count=Count('id', filter=Q(telecaller_status='warm')),
+            callback_count=Count('id', filter=Q(telecaller_status='callback')),
+            not_reachable_count=Count('id', filter=Q(telecaller_status='not_reachable')),
+            cold_count=Count('id', filter=Q(telecaller_status='cold')),
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
@@ -259,14 +264,19 @@ class StatsView(APIView):
         # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
         recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
         payload = {
-            'total_leads':     agg['total_leads'],
-            'new_leads':       agg['new_leads'],
-            'leads_today':     agg['leads_today'],
-            'called_count':    agg['called_count'],
-            'sv_done':         sv_done,
-            'closures':        closures,
-            'active_projects': active_projects,
-            'recent_leads':    LeadListSerializer(recent, many=True).data,
+            'total_leads':        agg['total_leads'],
+            'new_leads':          agg['new_leads'],
+            'leads_today':        agg['leads_today'],
+            'called_count':       agg['called_count'],
+            'hot_count':          agg['hot_count'],
+            'warm_count':         agg['warm_count'],
+            'callback_count':     agg['callback_count'],
+            'not_reachable_count':agg['not_reachable_count'],
+            'cold_count':         agg['cold_count'],
+            'sv_done':            sv_done,
+            'closures':           closures,
+            'active_projects':    active_projects,
+            'recent_leads':       LeadListSerializer(recent, many=True).data,
         }
         cache.set(cache_key, payload, timeout=20)
         return Response(payload)
