@@ -1,9 +1,10 @@
+import uuid
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 
 from companies.models import Company
 from .models import User, Designation, Notification
@@ -12,6 +13,7 @@ from .serializers import (
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
     DesignationSerializer,
 )
+from .tokens import SessionRefreshToken
 
 VRL_CODE = 'VRL'
 
@@ -29,7 +31,7 @@ def is_platform_admin(user):
 
 
 def get_tokens_for_user(user):
-    refresh = RefreshToken.for_user(user)
+    refresh = SessionRefreshToken.for_user(user)
     return {
         'refresh': str(refresh),
         'access':  str(refresh.access_token),
@@ -66,6 +68,10 @@ class LoginView(APIView):
 
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Rotate session token — invalidates any active session on other devices
+        user.session_token = uuid.uuid4()
+        user.save(update_fields=['session_token'])
 
         tokens = get_tokens_for_user(user)
         return Response({'tokens': tokens, 'user': UserSerializer(user).data}, status=status.HTTP_200_OK)
@@ -175,6 +181,42 @@ class NotificationReadView(APIView):
             qs = qs.filter(pk=pk)
         n = qs.update(is_read=True)
         return Response({'ok': True, 'marked': n})
+
+
+class SessionTokenRefreshView(APIView):
+    """Custom refresh endpoint that validates session_token before issuing new tokens.
+    If the user has logged in elsewhere since this refresh token was issued, reject it."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        refresh_str = request.data.get('refresh')
+        if not refresh_str:
+            return Response({'detail': 'Refresh token required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            refresh = SessionRefreshToken(refresh_str)
+        except TokenError:
+            return Response(
+                {'detail': 'Invalid or expired refresh token.', 'code': 'token_not_valid'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        token_session = refresh.payload.get('session_token')
+        user_id       = refresh.payload.get('user_id')
+
+        try:
+            user = User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if not token_session or str(token_session) != str(user.session_token):
+            return Response(
+                {'detail': 'Session expired. Please log in again.', 'code': 'session_expired'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        tokens = get_tokens_for_user(user)
+        return Response(tokens, status=status.HTTP_200_OK)
 
 
 class DesignationListCreateView(APIView):
