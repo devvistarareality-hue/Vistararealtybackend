@@ -282,6 +282,69 @@ class StatsView(APIView):
         return Response(payload)
 
 
+class StatsTrendView(APIView):
+    """Daily MQL and SV counts for the last 30 days (or within date_from/date_to)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models.functions import TruncDate
+        from datetime import date
+
+        company_id = request.query_params.get('company_id')
+        date_from  = request.query_params.get('date_from')
+        date_to    = request.query_params.get('date_to')
+
+        today = timezone.localdate()
+        if not date_from:
+            date_from = str(today - timedelta(days=29))
+        if not date_to:
+            date_to = str(today)
+
+        leads_qs = scope_to_company(Lead.objects.all(), request.user)
+        leads_qs = scope_leads_to_role(leads_qs, request.user)
+        if company_id and is_platform_admin(request.user):
+            leads_qs = leads_qs.filter(company_id=company_id)
+
+        # MQL: leads that have been called (telecaller_status set), grouped by created_at date
+        mql_rows = (
+            leads_qs
+            .filter(
+                created_at__date__gte=date_from,
+                created_at__date__lte=date_to,
+                telecaller_status__isnull=False,
+            )
+            .exclude(telecaller_status='')
+            .annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
+        sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
+        if not _sees_all_company(request.user):
+            ids = _visible_user_ids(request.user)
+            sv_qs = sv_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
+        if company_id and is_platform_admin(request.user):
+            sv_qs = sv_qs.filter(lead__company_id=company_id)
+
+        # SV: site visits created per day
+        sv_rows = (
+            sv_qs
+            .filter(created_at__date__gte=date_from, created_at__date__lte=date_to)
+            .annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
+        return Response({
+            'mql': [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
+            'sv':  [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
+            'date_from': date_from,
+            'date_to':   date_to,
+        })
+
+
 class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 

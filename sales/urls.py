@@ -3,6 +3,7 @@ from . import views
 
 urlpatterns = [
     path('stats/',                     views.StatsView.as_view()),
+    path('stats/trend/',               views.StatsTrendView.as_view()),
     path('leads/',                     views.LeadListView.as_view()),
     path('leads/bulk-delete/',         views.BulkDeleteLeadsView.as_view()),
     path('leads/import/',              views.BulkImportLeadsView.as_view()),
