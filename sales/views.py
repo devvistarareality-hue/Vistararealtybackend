@@ -305,16 +305,16 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             leads_qs = leads_qs.filter(company_id=company_id)
 
-        # MQL: leads that have been called (telecaller_status set), grouped by created_at date
+        # MQL: leads that have been called, grouped by updated_at (when telecaller set the status)
         mql_rows = (
             leads_qs
             .filter(
-                created_at__date__gte=date_from,
-                created_at__date__lte=date_to,
+                updated_at__date__gte=date_from,
+                updated_at__date__lte=date_to,
                 telecaller_status__isnull=False,
             )
             .exclude(telecaller_status='')
-            .annotate(day=TruncDate('created_at'))
+            .annotate(day=TruncDate('updated_at'))
             .values('day')
             .annotate(count=Count('id'))
             .order_by('day')
