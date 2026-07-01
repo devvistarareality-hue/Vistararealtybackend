@@ -35,10 +35,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     reporting_manager  = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subordinates'
     )
-    is_active     = models.BooleanField(default=True)
-    is_staff      = models.BooleanField(default=False)
-    date_joined   = models.DateTimeField(auto_now_add=True)
-    session_token = models.UUIDField(default=uuid.uuid4)
+    is_active         = models.BooleanField(default=True)
+    is_staff          = models.BooleanField(default=False)
+    date_joined       = models.DateTimeField(auto_now_add=True)
+    session_token_app = models.UUIDField(default=uuid.uuid4)
+    session_token_web = models.UUIDField(default=uuid.uuid4)
 
     objects = UserManager()
 

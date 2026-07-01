@@ -15,6 +15,7 @@ class LoginSerializer(serializers.Serializer):
     company_code = serializers.CharField(max_length=20)
     user_code    = serializers.CharField(max_length=20)
     password     = serializers.CharField(write_only=True)
+    platform     = serializers.ChoiceField(choices=['app', 'web'], default='app')
 
 
 class UserSerializer(serializers.ModelSerializer):
