@@ -30,8 +30,8 @@ def is_platform_admin(user):
     )
 
 
-def get_tokens_for_user(user):
-    refresh = SessionRefreshToken.for_user(user)
+def get_tokens_for_user(user, platform='app'):
+    refresh = SessionRefreshToken.for_user(user, platform=platform)
     return {
         'refresh': str(refresh),
         'access':  str(refresh.access_token),
@@ -69,11 +69,17 @@ class LoginView(APIView):
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Rotate session token — invalidates any active session on other devices
-        user.session_token = uuid.uuid4()
-        user.save(update_fields=['session_token'])
+        # Rotate only the platform-specific session token so web logins don't
+        # affect app sessions and vice versa.
+        platform = serializer.validated_data.get('platform', 'app')
+        if platform == 'web':
+            user.session_token_web = uuid.uuid4()
+            user.save(update_fields=['session_token_web'])
+        else:
+            user.session_token_app = uuid.uuid4()
+            user.save(update_fields=['session_token_app'])
 
-        tokens = get_tokens_for_user(user)
+        tokens = get_tokens_for_user(user, platform=platform)
         return Response({'tokens': tokens, 'user': UserSerializer(user).data}, status=status.HTTP_200_OK)
 
 
@@ -202,6 +208,7 @@ class SessionTokenRefreshView(APIView):
             )
 
         token_session = refresh.payload.get('session_token')
+        platform      = refresh.payload.get('platform', 'app')
         user_id       = refresh.payload.get('user_id')
 
         try:
@@ -209,13 +216,14 @@ class SessionTokenRefreshView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        if not token_session or str(token_session) != str(user.session_token):
+        current = str(user.session_token_web) if platform == 'web' else str(user.session_token_app)
+        if not token_session or token_session != current:
             return Response(
                 {'detail': 'Session expired. Please log in again.', 'code': 'session_expired'},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        tokens = get_tokens_for_user(user)
+        tokens = get_tokens_for_user(user, platform=platform)
         return Response(tokens, status=status.HTTP_200_OK)
 
 
