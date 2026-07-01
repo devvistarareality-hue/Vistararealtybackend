@@ -1,3 +1,4 @@
+import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from companies.models import Company
@@ -34,9 +35,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     reporting_manager  = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subordinates'
     )
-    is_active    = models.BooleanField(default=True)
-    is_staff     = models.BooleanField(default=False)
-    date_joined  = models.DateTimeField(auto_now_add=True)
+    is_active     = models.BooleanField(default=True)
+    is_staff      = models.BooleanField(default=False)
+    date_joined   = models.DateTimeField(auto_now_add=True)
+    session_token = models.UUIDField(default=uuid.uuid4)
 
     objects = UserManager()
 
