@@ -242,6 +242,11 @@ class StatsView(APIView):
             callback_count=Count('id', filter=Q(telecaller_status='callback')),
             not_reachable_count=Count('id', filter=Q(telecaller_status='not_reachable')),
             cold_count=Count('id', filter=Q(telecaller_status='cold')),
+            # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
+            stm_hot_count=Count('id', filter=Q(stm_status='hot')),
+            stm_warm_count=Count('id', filter=Q(stm_status='warm')),
+            stm_cold_count=Count('id', filter=Q(stm_status='cold')),
+            stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
@@ -273,6 +278,10 @@ class StatsView(APIView):
             'callback_count':     agg['callback_count'],
             'not_reachable_count':agg['not_reachable_count'],
             'cold_count':         agg['cold_count'],
+            'stm_hot_count':          agg['stm_hot_count'],
+            'stm_warm_count':         agg['stm_warm_count'],
+            'stm_cold_count':         agg['stm_cold_count'],
+            'stm_sv_scheduled_count': agg['stm_sv_scheduled_count'],
             'sv_done':            sv_done,
             'closures':           closures,
             'active_projects':    active_projects,
