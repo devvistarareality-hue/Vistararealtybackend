@@ -337,16 +337,19 @@ class StatsTrendView(APIView):
             .order_by('day')
         )
 
-        # Warm/SQL: leads the telecaller marked 'warm' (matches the Warm/SQL stat box),
-        # grouped by when the status was set (updated_at) — same basis as MQL.
+        # Warm/SQL: count by the date the lead actually BECAME warm — the status-history
+        # entry where telecaller_status changed to 'warm' — not when the lead arrived or
+        # was last edited (updated_at). Scoped to the same visible leads.
         warm_rows = (
-            leads_qs
+            LeadStatusHistory.objects
             .filter(
-                updated_at__date__gte=date_from,
-                updated_at__date__lte=date_to,
-                telecaller_status='warm',
+                lead__in=leads_qs,
+                field_changed='telecaller_status',
+                new_value='warm',
+                created_at__date__gte=date_from,
+                created_at__date__lte=date_to,
             )
-            .annotate(day=TruncDate('updated_at'))
+            .annotate(day=TruncDate('created_at'))
             .values('day')
             .annotate(count=Count('id'))
             .order_by('day')
