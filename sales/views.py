@@ -364,10 +364,27 @@ class StatsTrendView(APIView):
             .order_by('day')
         )
 
+        # Closures per day (by closure_date) — for the STM/CP reports charts.
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
+        if not _sees_all_company(request.user):
+            ids = _visible_user_ids(request.user)
+            cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
+        if company_id and is_platform_admin(request.user):
+            cl_qs = cl_qs.filter(lead__company_id=company_id)
+        closure_rows = (
+            cl_qs
+            .filter(closure_date__gte=date_from, closure_date__lte=date_to)
+            .annotate(day=TruncDate('closure_date'))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
         return Response({
-            'mql':  [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
-            'sv':   [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
-            'warm': [{'date': str(r['day']), 'count': r['count']} for r in warm_rows],
+            'mql':      [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
+            'sv':       [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
+            'warm':     [{'date': str(r['day']), 'count': r['count']} for r in warm_rows],
+            'closures': [{'date': str(r['day']), 'count': r['count']} for r in closure_rows],
             'date_from': date_from,
             'date_to':   date_to,
         })
