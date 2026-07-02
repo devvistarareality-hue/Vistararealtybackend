@@ -371,14 +371,21 @@ class StatsTrendView(APIView):
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
         if company_id and is_platform_admin(request.user):
             cl_qs = cl_qs.filter(lead__company_id=company_id)
-        closure_rows = (
-            cl_qs
-            .filter(closure_date__gte=date_from, closure_date__lte=date_to)
-            .annotate(day=TruncDate('closure_date'))
-            .values('day')
-            .annotate(count=Count('id'))
-            .order_by('day')
-        )
+        # booking/total amounts are EncryptedDecimalField (cannot Sum() in the DB),
+        # so aggregate count + amount per day in Python for the closures chart tooltip.
+        closure_map = {}
+        for c in (cl_qs
+                  .filter(closure_date__gte=date_from, closure_date__lte=date_to)
+                  .only('closure_date', 'total_amount', 'booking_amount')):
+            key = str(c.closure_date)
+            amt = c.total_amount or c.booking_amount or 0
+            entry = closure_map.setdefault(key, {'count': 0, 'amount': 0.0})
+            entry['count'] += 1
+            entry['amount'] += float(amt)
+        closures_ser = [
+            {'date': k, 'count': v['count'], 'amount': v['amount']}
+            for k, v in sorted(closure_map.items())
+        ]
 
         # STM pipeline trends — count by the day the lead's stm_status changed to
         # hot/warm/cold (status-history), for the STM/CP dashboard & reports charts.
@@ -401,7 +408,7 @@ class StatsTrendView(APIView):
             'mql':      _ser(mql_rows),
             'sv':       _ser(sv_rows),
             'warm':     _ser(warm_rows),
-            'closures': _ser(closure_rows),
+            'closures': closures_ser,
             'stm_hot':  _ser(stm_hot_rows),
             'stm_warm': _ser(stm_warm_rows),
             'stm_cold': _ser(stm_cold_rows),
