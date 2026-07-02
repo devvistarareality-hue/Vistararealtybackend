@@ -380,11 +380,31 @@ class StatsTrendView(APIView):
             .order_by('day')
         )
 
+        # STM pipeline trends — count by the day the lead's stm_status changed to
+        # hot/warm/cold (status-history), for the STM/CP dashboard & reports charts.
+        def _stm_status_trend(val):
+            return (
+                LeadStatusHistory.objects
+                .filter(lead__in=leads_qs, field_changed='stm_status', new_value=val,
+                        created_at__date__gte=date_from, created_at__date__lte=date_to)
+                .annotate(day=TruncDate('created_at'))
+                .values('day').annotate(count=Count('id')).order_by('day')
+            )
+        stm_hot_rows  = _stm_status_trend('hot')
+        stm_warm_rows = _stm_status_trend('warm')
+        stm_cold_rows = _stm_status_trend('cold')
+
+        def _ser(rows):
+            return [{'date': str(r['day']), 'count': r['count']} for r in rows]
+
         return Response({
-            'mql':      [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
-            'sv':       [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
-            'warm':     [{'date': str(r['day']), 'count': r['count']} for r in warm_rows],
-            'closures': [{'date': str(r['day']), 'count': r['count']} for r in closure_rows],
+            'mql':      _ser(mql_rows),
+            'sv':       _ser(sv_rows),
+            'warm':     _ser(warm_rows),
+            'closures': _ser(closure_rows),
+            'stm_hot':  _ser(stm_hot_rows),
+            'stm_warm': _ser(stm_warm_rows),
+            'stm_cold': _ser(stm_cold_rows),
             'date_from': date_from,
             'date_to':   date_to,
         })
