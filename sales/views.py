@@ -337,9 +337,25 @@ class StatsTrendView(APIView):
             .order_by('day')
         )
 
+        # Warm/SQL: leads the telecaller marked 'warm' (matches the Warm/SQL stat box),
+        # grouped by when the status was set (updated_at) — same basis as MQL.
+        warm_rows = (
+            leads_qs
+            .filter(
+                updated_at__date__gte=date_from,
+                updated_at__date__lte=date_to,
+                telecaller_status='warm',
+            )
+            .annotate(day=TruncDate('updated_at'))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
         return Response({
-            'mql': [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
-            'sv':  [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
+            'mql':  [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
+            'sv':   [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
+            'warm': [{'date': str(r['day']), 'count': r['count']} for r in warm_rows],
             'date_from': date_from,
             'date_to':   date_to,
         })
