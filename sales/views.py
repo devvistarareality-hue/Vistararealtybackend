@@ -242,6 +242,11 @@ class StatsView(APIView):
             callback_count=Count('id', filter=Q(telecaller_status='callback')),
             not_reachable_count=Count('id', filter=Q(telecaller_status='not_reachable')),
             cold_count=Count('id', filter=Q(telecaller_status='cold')),
+            # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
+            stm_hot_count=Count('id', filter=Q(stm_status='hot')),
+            stm_warm_count=Count('id', filter=Q(stm_status='warm')),
+            stm_cold_count=Count('id', filter=Q(stm_status='cold')),
+            stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
@@ -273,6 +278,10 @@ class StatsView(APIView):
             'callback_count':     agg['callback_count'],
             'not_reachable_count':agg['not_reachable_count'],
             'cold_count':         agg['cold_count'],
+            'stm_hot_count':          agg['stm_hot_count'],
+            'stm_warm_count':         agg['stm_warm_count'],
+            'stm_cold_count':         agg['stm_cold_count'],
+            'stm_sv_scheduled_count': agg['stm_sv_scheduled_count'],
             'sv_done':            sv_done,
             'closures':           closures,
             'active_projects':    active_projects,
@@ -337,9 +346,72 @@ class StatsTrendView(APIView):
             .order_by('day')
         )
 
+        # Warm/SQL: count by the date the lead actually BECAME warm — the status-history
+        # entry where telecaller_status changed to 'warm' — not when the lead arrived or
+        # was last edited (updated_at). Scoped to the same visible leads.
+        warm_rows = (
+            LeadStatusHistory.objects
+            .filter(
+                lead__in=leads_qs,
+                field_changed='telecaller_status',
+                new_value='warm',
+                created_at__date__gte=date_from,
+                created_at__date__lte=date_to,
+            )
+            .annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(count=Count('id'))
+            .order_by('day')
+        )
+
+        # Closures per day (by closure_date) — for the STM/CP reports charts.
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
+        if not _sees_all_company(request.user):
+            ids = _visible_user_ids(request.user)
+            cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
+        if company_id and is_platform_admin(request.user):
+            cl_qs = cl_qs.filter(lead__company_id=company_id)
+        # booking/total amounts are EncryptedDecimalField (cannot Sum() in the DB),
+        # so aggregate count + amount per day in Python for the closures chart tooltip.
+        closure_map = {}
+        for c in (cl_qs
+                  .filter(closure_date__gte=date_from, closure_date__lte=date_to)
+                  .only('closure_date', 'total_amount', 'booking_amount')):
+            key = str(c.closure_date)
+            amt = c.total_amount or c.booking_amount or 0
+            entry = closure_map.setdefault(key, {'count': 0, 'amount': 0.0})
+            entry['count'] += 1
+            entry['amount'] += float(amt)
+        closures_ser = [
+            {'date': k, 'count': v['count'], 'amount': v['amount']}
+            for k, v in sorted(closure_map.items())
+        ]
+
+        # STM pipeline trends — count by the day the lead's stm_status changed to
+        # hot/warm/cold (status-history), for the STM/CP dashboard & reports charts.
+        def _stm_status_trend(val):
+            return (
+                LeadStatusHistory.objects
+                .filter(lead__in=leads_qs, field_changed='stm_status', new_value=val,
+                        created_at__date__gte=date_from, created_at__date__lte=date_to)
+                .annotate(day=TruncDate('created_at'))
+                .values('day').annotate(count=Count('id')).order_by('day')
+            )
+        stm_hot_rows  = _stm_status_trend('hot')
+        stm_warm_rows = _stm_status_trend('warm')
+        stm_cold_rows = _stm_status_trend('cold')
+
+        def _ser(rows):
+            return [{'date': str(r['day']), 'count': r['count']} for r in rows]
+
         return Response({
-            'mql': [{'date': str(r['day']), 'count': r['count']} for r in mql_rows],
-            'sv':  [{'date': str(r['day']), 'count': r['count']} for r in sv_rows],
+            'mql':      _ser(mql_rows),
+            'sv':       _ser(sv_rows),
+            'warm':     _ser(warm_rows),
+            'closures': closures_ser,
+            'stm_hot':  _ser(stm_hot_rows),
+            'stm_warm': _ser(stm_warm_rows),
+            'stm_cold': _ser(stm_cold_rows),
             'date_from': date_from,
             'date_to':   date_to,
         })
