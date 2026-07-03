@@ -13,15 +13,18 @@ VRL_CODE = 'VRL'
 
 
 def is_platform_admin(user):
-    """VRL Admin or Django staff = platform-level super admin."""
+    """VRL Admin or Django staff = platform-level super admin — EXCEPT a single-module
+    departmental admin (e.g. Sales Admin), who stays scoped to their own company."""
+    if not (user and user.is_authenticated):
+        return False
+    if user.is_staff:
+        return True
+    if getattr(user, 'role', '') == 'Admin' and len(getattr(user, 'modules', None) or []) == 1:
+        return False
     return bool(
-        user and user.is_authenticated and (
-            user.is_staff or (
-                getattr(user, 'company', None) and
-                getattr(user.company, 'code', '').upper() == VRL_CODE and
-                getattr(user, 'role', '') == 'Admin'
-            )
-        )
+        getattr(user, 'company', None) and
+        getattr(user.company, 'code', '').upper() == VRL_CODE and
+        getattr(user, 'role', '') == 'Admin'
     )
 
 
