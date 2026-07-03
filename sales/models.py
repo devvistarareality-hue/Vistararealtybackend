@@ -99,6 +99,7 @@ class Project(models.Model):
     price_range = models.CharField(max_length=100, blank=True)
     possession = models.CharField(max_length=100, blank=True)
     cover_image_url = models.CharField(max_length=500, blank=True)
+    logo_url = models.CharField(max_length=500, blank=True)  # project logo — shown in the LOI PDF header
     master_plan_url = models.CharField(max_length=500, blank=True)
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
