@@ -225,6 +225,10 @@ class StatsView(APIView):
         else:
             sv_filter = cl_filter = prj_filter = {}
 
+        # Role/company-scoped leads WITHOUT the created_at window — used for the
+        # SQL funnel count (leads that *became* warm within the window).
+        leads_scope = leads_qs
+
         # Apply optional date range filter
         if date_from:
             leads_qs = leads_qs.filter(created_at__date__gte=date_from)
@@ -260,11 +264,29 @@ class StatsView(APIView):
         if date_to:
             sv_qs = sv_qs.filter(created_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
+        cl_scoped = cl_qs.filter(**cl_filter)
         sv_done, closures, active_projects = (
             sv_qs.filter(**sv_filter).count(),
-            cl_qs.filter(**cl_filter).count(),
+            cl_scoped.count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
+
+        # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
+        sql_hist = LeadStatusHistory.objects.filter(
+            lead__in=leads_scope, field_changed='stm_status', new_value='warm')
+        if date_from:
+            sql_hist = sql_hist.filter(created_at__date__gte=date_from)
+        if date_to:
+            sql_hist = sql_hist.filter(created_at__date__lte=date_to)
+        sql_count = sql_hist.values('lead').distinct().count()
+
+        # Avg closure timeline: mean days from lead arrival (created_at) to closure_date.
+        _diffs = [
+            (cdate - created.date()).days
+            for created, cdate in cl_scoped.values_list('lead__created_at', 'closure_date')
+            if created and cdate
+        ]
+        avg_closure_days = round(sum(_diffs) / len(_diffs), 1) if _diffs else None
         # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
         # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
         recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
@@ -284,6 +306,8 @@ class StatsView(APIView):
             'stm_sv_scheduled_count': agg['stm_sv_scheduled_count'],
             'sv_done':            sv_done,
             'closures':           closures,
+            'sql_count':          sql_count,
+            'avg_closure_days':   avg_closure_days,
             'active_projects':    active_projects,
             'recent_leads':       LeadListSerializer(recent, many=True).data,
         }
