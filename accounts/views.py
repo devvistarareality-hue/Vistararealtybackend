@@ -19,14 +19,17 @@ VRL_CODE = 'VRL'
 
 
 def is_platform_admin(user):
+    if not (user and user.is_authenticated):
+        return False
+    if user.is_staff:
+        return True
+    # Departmental (single-module) admin stays company-scoped, not platform-wide.
+    if getattr(user, 'role', '') == 'Admin' and len(getattr(user, 'modules', None) or []) == 1:
+        return False
     return bool(
-        user and user.is_authenticated and (
-            user.is_staff or (
-                getattr(user, 'company', None) and
-                getattr(user.company, 'code', '').upper() == VRL_CODE and
-                getattr(user, 'role', '') == 'Admin'
-            )
-        )
+        getattr(user, 'company', None) and
+        getattr(user.company, 'code', '').upper() == VRL_CODE and
+        getattr(user, 'role', '') == 'Admin'
     )
 
 
