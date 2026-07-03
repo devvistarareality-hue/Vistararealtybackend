@@ -3151,8 +3151,22 @@ class SalesDataResetView(APIView):
         with_attendance = bool(request.data.get('with_attendance'))
         with_loi        = bool(request.data.get('with_loi_files'))
 
+        # Which categories to clear. Defaults to ALL (legacy behaviour) when the
+        # client doesn't send an explicit selection.
+        all_keys = ['bookings', 'closures', 'site_visits', 'follow_ups', 'lead_history',
+                    'distribution_log', 'availability', 'notifications', 'leads', 'plots_to_reset']
+        raw = request.data.get('targets')
+        if isinstance(raw, list) and raw:
+            targets = [k for k in all_keys if k in raw]
+        else:
+            targets = list(all_keys)
+        sel = set(targets)
+        # Deleting leads cascades their children in the DB — reflect that in the summary.
+        cascades = {'closures', 'site_visits', 'follow_ups', 'lead_history'}
+        effective = set(sel) | (cascades if 'leads' in sel else set())
+
         # Optionally purge confidential LOI PDFs from Supabase before deleting bookings.
-        if with_loi:
+        if with_loi and 'bookings' in sel:
             for b in Booking.objects.filter(company=co).exclude(loi_document=''):
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
@@ -3160,20 +3174,21 @@ class SalesDataResetView(APIView):
         from django.db import transaction
         from accounts.models import Notification
         with transaction.atomic():
-            Booking.objects.filter(company=co).delete()
-            Closure.objects.filter(lead__company=co).delete()
-            SiteVisit.objects.filter(lead__company=co).delete()
-            FollowUp.objects.filter(lead__company=co).delete()
-            LeadStatusHistory.objects.filter(lead__company=co).delete()
-            DistributionLog.objects.filter(company=co).delete()
-            UserAvailability.objects.filter(user__company=co).delete()
-            Notification.objects.filter(recipient__company=co).delete()
-            Lead.objects.filter(company=co).delete()
-            Plot.objects.filter(project__company=co).update(status='available')
+            if 'bookings' in sel:         Booking.objects.filter(company=co).delete()
+            if 'closures' in sel:         Closure.objects.filter(lead__company=co).delete()
+            if 'site_visits' in sel:      SiteVisit.objects.filter(lead__company=co).delete()
+            if 'follow_ups' in sel:       FollowUp.objects.filter(lead__company=co).delete()
+            if 'lead_history' in sel:     LeadStatusHistory.objects.filter(lead__company=co).delete()
+            if 'distribution_log' in sel: DistributionLog.objects.filter(company=co).delete()
+            if 'availability' in sel:     UserAvailability.objects.filter(user__company=co).delete()
+            if 'notifications' in sel:    Notification.objects.filter(recipient__company=co).delete()
+            if 'leads' in sel:            Lead.objects.filter(company=co).delete()  # cascades children
+            if 'plots_to_reset' in sel:   Plot.objects.filter(project__company=co).exclude(status='available').update(status='available')
             if with_attendance:
                 from attendance.models import AttendanceRecord, LeaveApplication, LeaveTransaction, LeaveBalance
                 AttendanceRecord.objects.filter(user__company=co).delete()
                 LeaveApplication.objects.filter(user__company=co).delete()
                 LeaveTransaction.objects.filter(user__company=co).delete()
                 LeaveBalance.objects.filter(user__company=co).delete()
-        return Response({'detail': 'Trial data cleared.', 'deleted': before})
+        deleted = {k: v for k, v in before.items() if k in effective}
+        return Response({'detail': 'Trial data cleared.', 'deleted': deleted, 'targets': sorted(effective)})
