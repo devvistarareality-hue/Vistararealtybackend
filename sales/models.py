@@ -377,6 +377,7 @@ class Booking(models.Model):
 
     # Toggles
     apply_reg_fee    = models.CharField(max_length=5, default='Yes')
+    apply_page_fee   = models.CharField(max_length=5, default='Yes')  # ₹1,500 page fee inside reg fee
     apply_stamp_duty = models.CharField(max_length=5, default='Yes')
     apply_gst        = models.CharField(max_length=5, default='Yes')
 
