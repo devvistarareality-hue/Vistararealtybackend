@@ -17,7 +17,7 @@ class ProjectSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'company_id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
-            'cover_image_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
+            'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'formula_set', 'allow_unit_switch', 'booking_approvers',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
