@@ -133,6 +133,7 @@ class Plot(models.Model):
     number = models.CharField(max_length=50)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=AVAILABLE)
     size = models.CharField(max_length=100, blank=True)
+    construction_area = models.CharField(max_length=100, blank=True)  # sq.ft; auto-maps into booking
     cluster_type = models.CharField(max_length=100, blank=True)
     facing = models.CharField(max_length=50, blank=True)
     price = models.CharField(max_length=100, blank=True)

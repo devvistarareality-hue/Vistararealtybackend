@@ -37,7 +37,7 @@ class ProjectSerializer(serializers.ModelSerializer):
 class PlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Plot
-        fields = ['id', 'project', 'number', 'status', 'size', 'cluster_type', 'facing', 'price', 'notes']
+        fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type', 'facing', 'price', 'notes']
         read_only_fields = ['id', 'project']
 
 
