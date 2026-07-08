@@ -178,6 +178,10 @@ _cors_origins = os.getenv('CORS_ALLOWED_ORIGINS', '').strip()
 if _cors_origins:
     CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(',') if o.strip()]
     CORS_ALLOW_CREDENTIALS = True
+    # Always allow local dev origins (any localhost / 127.0.0.1 port) even when a fixed
+    # production origin list is set — so the web app on localhost can talk to a local
+    # backend without being blocked by CORS.
+    CORS_ALLOWED_ORIGIN_REGEXES = [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$']
 else:
     CORS_ALLOW_ALL_ORIGINS = True
 
