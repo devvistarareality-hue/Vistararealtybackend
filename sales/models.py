@@ -352,6 +352,9 @@ class Booking(models.Model):
     dev_agreement_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     # Ankhol sale-deed percentage (editable per booking; defaults to 60%).
     sale_deed_pct      = models.DecimalField(max_digits=5, decimal_places=2, default=60)
+    # Exact Unit Price override (Ankhol): when set (>0), used verbatim as the sale deed
+    # instead of re-deriving from the rounded %, so the entered amount stays exact.
+    sale_deed_amount   = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     maint_rate         = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     maint_months       = models.IntegerField(default=0)
 
