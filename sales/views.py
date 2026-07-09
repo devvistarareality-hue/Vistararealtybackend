@@ -2413,6 +2413,51 @@ class BookingListCreateView(APIView):
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 
+def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):
+    """Notify STM + approver/manager chain when a closure is cancelled.
+    Accepts pre-extracted primitive values so it is safe to call after the closure is deleted."""
+    try:
+        from notifications import notify, reporting_chain
+        canceller_name = getattr(canceller, 'name', '')
+        canceller_id   = getattr(canceller, 'id', None)
+        stm_id         = getattr(stm, 'id', None)
+        project_name   = getattr(project_obj, 'name', '') or ''
+        data           = extra_data or {}
+
+        # 1. Notify the STM (skip if they are the one cancelling).
+        if stm and stm_id != canceller_id:
+            notify(
+                stm, 'booking_cancelled',
+                'Booking Cancelled',
+                f'{client} · {project_name} Unit {unit} has been cancelled.',
+                data,
+            )
+
+        # 2. Notify project approvers → STM's reporting chain → all managers/admins (first non-empty).
+        approver_ids = (getattr(project_obj, 'booking_approvers', None) or [])
+        recipients = list(User.objects.filter(id__in=approver_ids, company=company, is_active=True)) if approver_ids else []
+        if not recipients and stm:
+            recipients = reporting_chain(stm)
+        if not recipients:
+            recipients = list(
+                User.objects.filter(company=company, is_active=True)
+                .filter(Q(role='Manager') | Q(is_staff=True))
+            )
+        seen = set()
+        for u in recipients:
+            if u and u.id not in seen and u.id != canceller_id and u.id != stm_id:
+                seen.add(u.id)
+                notify(
+                    u, 'booking_cancelled',
+                    'Booking Cancelled',
+                    f'{client} · {project_name} Unit {unit} · ₹{amount} — cancelled by {canceller_name}',
+                    data,
+                )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('_notify_closure_cancellation failed')
+
+
 def _notify_booking_approvers(company, booking, submitter):
     try:
         from notifications import notify, reporting_chain
@@ -2593,12 +2638,27 @@ class ClosureCancelView(APIView):
 
     def post(self, request, pk):
         closure = scope_to_company(
-            Closure.objects.filter(pk=pk), request.user, 'lead__company').first()
+            Closure.objects.filter(pk=pk).select_related('stm', 'project', 'lead'),
+            request.user, 'lead__company').first()
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         # Admin/manager, or the STM who owns the closure, may cancel.
         if not (is_admin_or_manager(request.user) or closure.stm_id == request.user.id):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+
+        # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
+        notif_stm      = closure.stm
+        notif_project  = closure.project
+        notif_unit     = (closure.unit_type + ' ' + (closure.unit_no or '')).strip() or '—'
+        notif_client   = getattr(closure.lead, 'name', None) or '—'
+        notif_amount   = int(closure.total_amount or 0)
+        notif_extra    = {'closure_id': closure.pk}
+
+        linked_booking = Booking.objects.filter(closure=closure).only('id').first()
+        if linked_booking:
+            notif_extra['booking_id'] = linked_booking.pk
+
         for b in Booking.objects.filter(closure=closure):
             if b.loi_document:
                 try: b.loi_document.delete(save=False)
@@ -2612,6 +2672,12 @@ class ClosureCancelView(APIView):
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
         closure.delete()
+
+        _notify_closure_cancellation(
+            notif_stm, notif_project, company,
+            notif_unit, notif_client, notif_amount,
+            request.user, extra_data=notif_extra,
+        )
         return Response({'detail': 'Closure cancelled.'})
 
 
