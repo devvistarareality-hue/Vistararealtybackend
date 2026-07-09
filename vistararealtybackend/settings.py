@@ -223,3 +223,4 @@ if _sentry_dsn:
         )
     except Exception:
         pass
+
