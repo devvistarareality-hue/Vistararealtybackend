@@ -77,9 +77,14 @@ def send_push_to_user(user_code, title, message, data=None):
     )
 
 
+TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN  = os.environ.get('TWILIO_AUTH_TOKEN', '')
+TWILIO_FROM_NUMBER = os.environ.get('TWILIO_FROM_NUMBER', '')
+
+
 def send_sms_otp(phone, code):
-    """Send a 6-digit OTP via OneSignal SMS (requires Twilio/Vonage connected in OneSignal dashboard)."""
-    if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
+    """Send a 6-digit OTP via Twilio SMS."""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_FROM_NUMBER:
         return False
     ph = (phone or '').strip().replace(' ', '').replace('-', '')
     if not ph:
@@ -87,23 +92,14 @@ def send_sms_otp(phone, code):
     if not ph.startswith('+'):
         ph = '+91' + ph.lstrip('0')
     try:
-        r = requests.post(
-            'https://onesignal.com/api/v1/notifications',
-            json={
-                'app_id': ONESIGNAL_APP_ID,
-                'name': 'OTP',
-                'include_phone_numbers': [ph],
-                'sms_from': 'Vistara',
-                'contents': {'en': f'{code} is your Vistara ERP login OTP. Valid for 5 minutes. Do not share.'},
-            },
-            headers={
-                'Authorization': f'Key {ONESIGNAL_API_KEY}',
-                'Content-Type': 'application/json',
-            },
-            timeout=10,
+        from twilio.rest import Client
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(
+            body=f'{code} is your Vistara ERP login OTP. Valid for 5 minutes. Do not share.',
+            from_=TWILIO_FROM_NUMBER,
+            to=ph,
         )
-        data = r.json()
-        return bool(data.get('id'))
+        return True
     except Exception:
         return False
 
