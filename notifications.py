@@ -77,12 +77,12 @@ def send_push_to_user(user_code, title, message, data=None):
     )
 
 
-FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '')
+TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 
 
 def send_sms_otp(phone, code):
-    """Send a 6-digit OTP via Fast2SMS (India). Falls back silently on error."""
-    if not FAST2SMS_API_KEY:
+    """Send a 6-digit OTP via 2Factor.in (India). Falls back silently on error."""
+    if not TWOFACTOR_API_KEY:
         return False
     ph = (phone or '').strip().replace(' ', '').replace('-', '').replace('+91', '').lstrip('0')
     if not ph or len(ph) < 10:
@@ -90,18 +90,11 @@ def send_sms_otp(phone, code):
     ph = ph[-10:]  # last 10 digits
     try:
         r = requests.get(
-            'https://www.fast2sms.com/dev/bulkV2',
-            params={
-                'authorization': FAST2SMS_API_KEY,
-                'route': 'otp',
-                'variables_values': code,
-                'flash': 0,
-                'numbers': ph,
-            },
+            f'https://2factor.in/API/V1/{TWOFACTOR_API_KEY}/SMS/{ph}/{code}/AUTOGEN',
             timeout=10,
         )
         data = r.json()
-        return data.get('return') is True
+        return data.get('Status') == 'Success'
     except Exception:
         return False
 
