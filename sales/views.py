@@ -2413,6 +2413,51 @@ class BookingListCreateView(APIView):
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 
+def _notify_booking_cancellation(company, booking, canceller):
+    """Notify the STM and the same approvers/manager chain who were notified at booking time."""
+    try:
+        from notifications import notify, reporting_chain
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        client = booking.client_name or '—'
+        project_name = booking.project.name if booking.project_id else ''
+        amount = int(booking.final_amount or 0)
+        canceller_name = getattr(canceller, 'name', '')
+
+        # 1. Notify the STM who owns the booking.
+        if booking.stm_id and booking.stm_id != getattr(canceller, 'id', None):
+            notify(
+                booking.stm, 'booking_cancelled',
+                'Booking Cancelled',
+                f'{client} · {project_name} Unit {unit} has been cancelled.',
+                {'booking_id': booking.id},
+            )
+
+        # 2. Notify the same approver set as during booking submission.
+        ids = (booking.project.booking_approvers if booking.project_id else None) or []
+        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
+        if not recipients and booking.stm_id:
+            recipients = reporting_chain(booking.stm)
+        if not recipients:
+            recipients = list(
+                User.objects.filter(company=company, is_active=True)
+                .filter(Q(role='Manager') | Q(is_staff=True))
+            )
+        canceller_id = getattr(canceller, 'id', None)
+        stm_id = booking.stm_id
+        seen = set()
+        for u in recipients:
+            if u and u.id not in seen and u.id != canceller_id and u.id != stm_id:
+                seen.add(u.id)
+                notify(
+                    u, 'booking_cancelled',
+                    'Booking Cancelled',
+                    f'{client} · {project_name} Unit {unit} · ₹{amount} — cancelled by {canceller_name}',
+                    {'booking_id': booking.id},
+                )
+    except Exception:
+        pass
+
+
 def _notify_booking_approvers(company, booking, submitter):
     try:
         from notifications import notify, reporting_chain
@@ -2599,7 +2644,12 @@ class ClosureCancelView(APIView):
         # Admin/manager, or the STM who owns the closure, may cancel.
         if not (is_admin_or_manager(request.user) or closure.stm_id == request.user.id):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
-        for b in Booking.objects.filter(closure=closure):
+        company = _resolve_company(request)
+        bookings_to_notify = list(
+            Booking.objects.filter(closure=closure)
+            .select_related('stm', 'project', 'plot')
+        )
+        for b in bookings_to_notify:
             if b.loi_document:
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
@@ -2612,6 +2662,8 @@ class ClosureCancelView(APIView):
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
         closure.delete()
+        for b in bookings_to_notify:
+            _notify_booking_cancellation(company, b, request.user)
         return Response({'detail': 'Closure cancelled.'})
 
 
