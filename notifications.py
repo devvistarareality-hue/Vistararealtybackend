@@ -77,32 +77,31 @@ def send_push_to_user(user_code, title, message, data=None):
     )
 
 
+FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '')
+
+
 def send_sms_otp(phone, code):
-    """Send a 6-digit OTP via OneSignal SMS channel (Twilio/Vonage backend)."""
-    if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
+    """Send a 6-digit OTP via Fast2SMS (India). Falls back silently on error."""
+    if not FAST2SMS_API_KEY:
         return False
-    ph = (phone or '').strip().replace(' ', '').replace('-', '')
-    if not ph:
+    ph = (phone or '').strip().replace(' ', '').replace('-', '').replace('+91', '').lstrip('0')
+    if not ph or len(ph) < 10:
         return False
-    if not ph.startswith('+'):
-        ph = '+91' + ph.lstrip('0')
+    ph = ph[-10:]  # last 10 digits
     try:
-        r = requests.post(
-            'https://onesignal.com/api/v1/notifications',
-            json={
-                'app_id': ONESIGNAL_APP_ID,
-                'name': 'OTP',
-                'include_phone_numbers': [ph],
-                'sms_from': 'VISTRA',
-                'contents': {'en': f'Your Vistara ERP OTP is {code}. Valid for 5 minutes. Do not share.'},
-            },
-            headers={
-                'Authorization': f'Key {ONESIGNAL_API_KEY}',
-                'Content-Type': 'application/json',
+        r = requests.get(
+            'https://www.fast2sms.com/dev/bulkV2',
+            params={
+                'authorization': FAST2SMS_API_KEY,
+                'route': 'otp',
+                'variables_values': code,
+                'flash': 0,
+                'numbers': ph,
             },
             timeout=10,
         )
-        return r.status_code in (200, 201)
+        data = r.json()
+        return data.get('return') is True
     except Exception:
         return False
 
