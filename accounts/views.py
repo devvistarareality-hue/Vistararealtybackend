@@ -8,6 +8,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.exceptions import TokenError
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from companies.models import Company
 from .models import User, Designation, Notification, OtpCode
@@ -301,7 +302,7 @@ class VerifyOtpView(APIView):
             otp = OtpCode.objects.select_related(
                 'user', 'user__company', 'user__reporting_manager'
             ).get(token=token, is_used=False)
-        except OtpCode.DoesNotExist:
+        except (OtpCode.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'detail': 'Invalid or expired OTP session.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         if timezone.now() - otp.created_at > datetime.timedelta(minutes=5):
@@ -336,7 +337,7 @@ class ResendOtpView(APIView):
         token = request.data.get('otp_token', '').strip()
         try:
             otp = OtpCode.objects.select_related('user').get(token=token, is_used=False)
-        except OtpCode.DoesNotExist:
+        except (OtpCode.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'detail': 'Invalid session. Please log in again.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if timezone.now() - otp.created_at > datetime.timedelta(minutes=5):
