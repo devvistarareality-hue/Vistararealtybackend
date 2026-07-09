@@ -1,13 +1,17 @@
 import uuid
+import random
+import datetime
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.exceptions import TokenError
+from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from companies.models import Company
-from .models import User, Designation, Notification
+from .models import User, Designation, Notification, OtpCode
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -71,6 +75,23 @@ class LoginView(APIView):
 
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # If the user has a phone number, require OTP verification before issuing tokens.
+        phone = (user.phone or '').strip()
+        if phone:
+            OtpCode.objects.filter(user=user, is_used=False).delete()
+            code = f'{random.randint(0, 999999):06d}'
+            otp = OtpCode.objects.create(user=user, code=code)
+            from notifications import send_sms_otp
+            send_sms_otp(phone, code)
+            masked = 'x' * max(0, len(phone) - 4) + phone[-4:]
+            platform = serializer.validated_data.get('platform', 'app')
+            return Response({
+                'otp_required': True,
+                'otp_token': str(otp.token),
+                'phone': masked,
+                'platform': platform,
+            }, status=status.HTTP_200_OK)
 
         # Rotate only the platform-specific session token so web logins don't
         # affect app sessions and vice versa.
@@ -265,5 +286,70 @@ class DesignationDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         desig.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VerifyOtpView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
+
+    def post(self, request):
+        token    = request.data.get('otp_token', '').strip()
+        code     = request.data.get('code', '').strip()
+        platform = request.data.get('platform', 'app')
+
+        try:
+            otp = OtpCode.objects.select_related(
+                'user', 'user__company', 'user__reporting_manager'
+            ).get(token=token, is_used=False)
+        except (OtpCode.DoesNotExist, ValueError, DjangoValidationError):
+            return Response({'detail': 'Invalid or expired OTP session.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if timezone.now() - otp.created_at > datetime.timedelta(minutes=5):
+            otp.delete()
+            return Response({'detail': 'OTP has expired. Please log in again.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if otp.code != code:
+            return Response({'detail': 'Incorrect OTP. Please try again.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        otp.is_used = True
+        otp.save(update_fields=['is_used'])
+
+        user = otp.user
+        if not user.is_active:
+            return Response({'detail': 'Account is inactive.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if platform == 'web':
+            user.session_token_web = uuid.uuid4()
+            user.save(update_fields=['session_token_web'])
+        else:
+            user.session_token_app = uuid.uuid4()
+            user.save(update_fields=['session_token_app'])
+
+        tokens = get_tokens_for_user(user, platform=platform)
+        return Response({'tokens': tokens, 'user': UserSerializer(user).data}, status=status.HTTP_200_OK)
+
+
+class ResendOtpView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        token = request.data.get('otp_token', '').strip()
+        try:
+            otp = OtpCode.objects.select_related('user').get(token=token, is_used=False)
+        except (OtpCode.DoesNotExist, ValueError, DjangoValidationError):
+            return Response({'detail': 'Invalid session. Please log in again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if timezone.now() - otp.created_at > datetime.timedelta(minutes=5):
+            otp.delete()
+            return Response({'detail': 'Session expired. Please log in again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = otp.user
+        otp.delete()
+        code = f'{random.randint(0, 999999):06d}'
+        new_otp = OtpCode.objects.create(user=user, code=code)
+        from notifications import send_sms_otp
+        send_sms_otp((user.phone or '').strip(), code)
+        return Response({'otp_token': str(new_otp.token)}, status=status.HTTP_200_OK)
 
 

@@ -5,10 +5,13 @@ from .views import (
     DesignationListCreateView, DesignationDetailView,
     NotificationTestView, NotificationListView, NotificationReadView,
     SessionTokenRefreshView,
+    VerifyOtpView, ResendOtpView,
 )
 
 urlpatterns = [
     path('login/',                    LoginView.as_view(),                name='login'),
+    path('otp/verify/',               VerifyOtpView.as_view(),            name='otp-verify'),
+    path('otp/resend/',               ResendOtpView.as_view(),            name='otp-resend'),
     path('token/refresh/',            SessionTokenRefreshView.as_view(),  name='token-refresh'),
     path('me/',                       MeView.as_view(),                   name='me'),
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),

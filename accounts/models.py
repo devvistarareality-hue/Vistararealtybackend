@@ -75,6 +75,17 @@ class Notification(models.Model):
         return f'{self.type} → {self.recipient_id}: {self.title}'
 
 
+class OtpCode(models.Model):
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otp_codes')
+    token      = models.UUIDField(default=uuid.uuid4, unique=True)
+    code       = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_used    = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
 class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)

@@ -77,6 +77,36 @@ def send_push_to_user(user_code, title, message, data=None):
     )
 
 
+def send_sms_otp(phone, code):
+    """Send a 6-digit OTP via OneSignal SMS channel (Twilio/Vonage backend)."""
+    if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
+        return False
+    ph = (phone or '').strip().replace(' ', '').replace('-', '')
+    if not ph:
+        return False
+    if not ph.startswith('+'):
+        ph = '+91' + ph.lstrip('0')
+    try:
+        r = requests.post(
+            'https://onesignal.com/api/v1/notifications',
+            json={
+                'app_id': ONESIGNAL_APP_ID,
+                'name': 'OTP',
+                'include_phone_numbers': [ph],
+                'sms_from': 'VISTRA',
+                'contents': {'en': f'Your Vistara ERP OTP is {code}. Valid for 5 minutes. Do not share.'},
+            },
+            headers={
+                'Authorization': f'Key {ONESIGNAL_API_KEY}',
+                'Content-Type': 'application/json',
+            },
+            timeout=10,
+        )
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+
 def send_push_to_all(title, message, data=None):
     if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
         return
