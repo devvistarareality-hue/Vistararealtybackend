@@ -106,6 +106,8 @@ def send_sms_otp(phone, code):
 
 def send_email_otp(email, code):
     """Send a 6-digit OTP via email using Django's configured email backend."""
+    import logging
+    logger = logging.getLogger(__name__)
     if not email:
         return False
     try:
@@ -121,8 +123,10 @@ def send_email_otp(email, code):
             recipient_list=[email],
             fail_silently=False,
         )
+        logger.info('OTP email sent to %s', email)
         return True
     except Exception:
+        logger.exception('Failed to send OTP email to %s', email)
         return False
 
 
