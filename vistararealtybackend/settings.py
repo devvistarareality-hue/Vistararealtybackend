@@ -207,6 +207,15 @@ else:
         }
     }
 
+# ── Email (OTP + notifications) ──────────────────────────────────────
+EMAIL_BACKEND      = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST         = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT         = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS      = os.getenv('EMAIL_USE_TLS', 'True') == 'True'
+EMAIL_HOST_USER    = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER) or 'noreply@vistararealty.in'
+
 # ── Error monitoring (Sentry) ─────────────────────────────────────────
 # No-op unless SENTRY_DSN is set; guarded so a missing package never breaks boot.
 _sentry_dsn = os.getenv('SENTRY_DSN', '').strip()
