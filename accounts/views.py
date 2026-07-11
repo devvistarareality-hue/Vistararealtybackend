@@ -22,6 +22,14 @@ from .tokens import SessionRefreshToken
 VRL_CODE = 'VRL'
 
 
+def _mask_email(email):
+    if not email or '@' not in email:
+        return None
+    local, domain = email.rsplit('@', 1)
+    masked = local[:2] + '***' if len(local) > 2 else local[0] + '***'
+    return f'{masked}@{domain}'
+
+
 def is_platform_admin(user):
     if not (user and user.is_authenticated):
         return False
@@ -76,20 +84,24 @@ class LoginView(APIView):
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # If the user has a phone number, require OTP verification before issuing tokens.
+        # If the user has a phone or email, require OTP verification before issuing tokens.
         phone = (user.phone or '').strip()
-        if phone:
+        email = (user.email or '').strip()
+        if phone or email:
             OtpCode.objects.filter(user=user, is_used=False).delete()
             code = f'{random.randint(0, 999999):06d}'
             otp = OtpCode.objects.create(user=user, code=code)
-            from notifications import send_sms_otp
-            send_sms_otp(phone, code)
-            masked = 'x' * max(0, len(phone) - 4) + phone[-4:]
+            from notifications import send_sms_otp, send_email_otp
+            if phone:
+                send_sms_otp(phone, code)
+            if email:
+                send_email_otp(email, code)
             platform = serializer.validated_data.get('platform', 'app')
             return Response({
                 'otp_required': True,
                 'otp_token': str(otp.token),
-                'phone': masked,
+                'phone': ('x' * max(0, len(phone) - 4) + phone[-4:]) if phone else None,
+                'email': _mask_email(email),
                 'platform': platform,
             }, status=status.HTTP_200_OK)
 
@@ -348,8 +360,11 @@ class ResendOtpView(APIView):
         otp.delete()
         code = f'{random.randint(0, 999999):06d}'
         new_otp = OtpCode.objects.create(user=user, code=code)
-        from notifications import send_sms_otp
-        send_sms_otp((user.phone or '').strip(), code)
+        from notifications import send_sms_otp, send_email_otp
+        if (user.phone or '').strip():
+            send_sms_otp(user.phone.strip(), code)
+        if (user.email or '').strip():
+            send_email_otp(user.email.strip(), code)
         return Response({'otp_token': str(new_otp.token)}, status=status.HTTP_200_OK)
 
 

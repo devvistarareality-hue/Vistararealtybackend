@@ -104,6 +104,28 @@ def send_sms_otp(phone, code):
         return False
 
 
+def send_email_otp(email, code):
+    """Send a 6-digit OTP via email using Django's configured email backend."""
+    if not email:
+        return False
+    try:
+        from django.core.mail import send_mail
+        from django.conf import settings as django_settings
+        send_mail(
+            subject='Your Vistara ERP Login OTP',
+            message=(
+                f'Your Vistara ERP login OTP is: {code}\n\n'
+                f'This OTP is valid for 5 minutes. Do not share it with anyone.'
+            ),
+            from_email=django_settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def send_push_to_all(title, message, data=None):
     if not ONESIGNAL_APP_ID or not ONESIGNAL_API_KEY:
         return
