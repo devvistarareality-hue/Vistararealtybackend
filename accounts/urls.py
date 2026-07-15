@@ -1,6 +1,6 @@
 from django.urls import path
 from .views import (
-    LoginView, MeView,
+    LoginView, MeView, ChangePasswordView,
     UserListCreateView, UserDetailView,
     DesignationListCreateView, DesignationDetailView,
     NotificationTestView, NotificationListView, NotificationReadView,
@@ -14,6 +14,7 @@ urlpatterns = [
     path('otp/resend/',               ResendOtpView.as_view(),            name='otp-resend'),
     path('token/refresh/',            SessionTokenRefreshView.as_view(),  name='token-refresh'),
     path('me/',                       MeView.as_view(),                   name='me'),
+    path('change-password/',          ChangePasswordView.as_view(),       name='change-password'),
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),
     path('users/<int:pk>/',           UserDetailView.as_view(),            name='user-detail'),
     path('designations/',             DesignationListCreateView.as_view(), name='designation-list'),
