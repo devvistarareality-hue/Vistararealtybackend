@@ -104,6 +104,9 @@ class Project(models.Model):
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
+    # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
+    # Used to prefill the EOI form so areas are never hardcoded.
+    eoi_unit_types = models.JSONField(default=list, blank=True)
     approver_email = models.EmailField(max_length=254, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
