@@ -123,6 +123,26 @@ class MeView(APIView):
         return Response(UserSerializer(user).data)
 
 
+class ChangePasswordView(APIView):
+    """Let a signed-in user change their own password (verify current → set new).
+    Existing sessions stay valid — the user is not logged out."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        current = request.data.get('current_password') or ''
+        new     = request.data.get('new_password') or ''
+        user    = request.user
+        if not user.check_password(current):
+            return Response({'detail': 'Current password is incorrect.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(new) < 6:
+            return Response({'detail': 'New password must be at least 6 characters.'}, status=status.HTTP_400_BAD_REQUEST)
+        if new == current:
+            return Response({'detail': 'New password must be different from the current one.'}, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(new)
+        user.save(update_fields=['password'])
+        return Response({'detail': 'Password changed successfully.'})
+
+
 class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
