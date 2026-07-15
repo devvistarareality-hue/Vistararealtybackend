@@ -77,33 +77,6 @@ def send_push_to_user(user_code, title, message, data=None):
     )
 
 
-TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID', '')
-TWILIO_AUTH_TOKEN  = os.environ.get('TWILIO_AUTH_TOKEN', '')
-TWILIO_FROM_NUMBER = os.environ.get('TWILIO_FROM_NUMBER', '')
-
-
-def send_sms_otp(phone, code):
-    """Send a 6-digit OTP via Twilio SMS."""
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_FROM_NUMBER:
-        return False
-    ph = (phone or '').strip().replace(' ', '').replace('-', '')
-    if not ph:
-        return False
-    if not ph.startswith('+'):
-        ph = '+91' + ph.lstrip('0')
-    try:
-        from twilio.rest import Client
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(
-            body=f'{code} is your Vistara ERP login OTP. Valid for 5 minutes. Do not share.',
-            from_=TWILIO_FROM_NUMBER,
-            to=ph,
-        )
-        return True
-    except Exception:
-        return False
-
-
 def send_email_otp(email, code):
     """Send a 6-digit OTP via email using Django's configured email backend."""
     import logging
