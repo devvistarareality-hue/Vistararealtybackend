@@ -2680,9 +2680,10 @@ class ClosureCancelView(APIView):
             request.user, 'lead__company').first()
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        # Admin/manager, or the STM who owns the closure, may cancel.
-        if not (is_admin_or_manager(request.user) or closure.stm_id == request.user.id):
-            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        # Only an approver (admin/manager) may cancel a booking — same authority that
+        # approves/rejects it. The owning STM can no longer self-cancel.
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
 
         # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
