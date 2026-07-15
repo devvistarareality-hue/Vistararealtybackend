@@ -288,7 +288,9 @@ class DesignationListCreateView(APIView):
 
     def get(self, request):
         if is_platform_admin(request.user):
-            desigs = Designation.objects.all()
+            # Honour ?company_id so the admin sees only the selected company's designations.
+            cid = request.query_params.get('company_id')
+            desigs = Designation.objects.filter(company_id=cid) if cid else Designation.objects.all()
         else:
             desigs = Designation.objects.filter(company=request.user.company)
         return Response(DesignationSerializer(desigs.select_related('company'), many=True).data)
