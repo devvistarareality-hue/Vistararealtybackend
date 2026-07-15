@@ -84,23 +84,19 @@ class LoginView(APIView):
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # If the user has a phone or email, require OTP verification before issuing tokens.
-        phone = (user.phone or '').strip()
+        # If the user has an email, require OTP verification (delivered by email) before
+        # issuing tokens. SMS/Twilio OTP has been removed.
         email = (user.email or '').strip()
-        if phone or email:
+        if email:
             OtpCode.objects.filter(user=user, is_used=False).delete()
             code = f'{random.randint(0, 999999):06d}'
             otp = OtpCode.objects.create(user=user, code=code)
-            from notifications import send_sms_otp, send_email_otp
-            if phone:
-                send_sms_otp(phone, code)
-            if email:
-                send_email_otp(email, code)
+            from notifications import send_email_otp
+            send_email_otp(email, code)
             platform = serializer.validated_data.get('platform', 'app')
             return Response({
                 'otp_required': True,
                 'otp_token': str(otp.token),
-                'phone': ('x' * max(0, len(phone) - 4) + phone[-4:]) if phone else None,
                 'email': _mask_email(email),
                 'platform': platform,
             }, status=status.HTTP_200_OK)
@@ -360,9 +356,7 @@ class ResendOtpView(APIView):
         otp.delete()
         code = f'{random.randint(0, 999999):06d}'
         new_otp = OtpCode.objects.create(user=user, code=code)
-        from notifications import send_sms_otp, send_email_otp
-        if (user.phone or '').strip():
-            send_sms_otp(user.phone.strip(), code)
+        from notifications import send_email_otp
         if (user.email or '').strip():
             send_email_otp(user.email.strip(), code)
         return Response({'otp_token': str(new_otp.token)}, status=status.HTTP_200_OK)
