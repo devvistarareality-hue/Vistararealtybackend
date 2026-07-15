@@ -139,7 +139,11 @@ class ChangePasswordView(APIView):
         if new == current:
             return Response({'detail': 'New password must be different from the current one.'}, status=status.HTTP_400_BAD_REQUEST)
         user.set_password(new)
-        user.save(update_fields=['password'])
+        # Rotate BOTH platform session tokens so every existing login (web + app,
+        # including this one) is invalidated — the user must sign in again with the new password.
+        user.session_token_web = uuid.uuid4()
+        user.session_token_app = uuid.uuid4()
+        user.save(update_fields=['password', 'session_token_web', 'session_token_app'])
         return Response({'detail': 'Password changed successfully.'})
 
 
