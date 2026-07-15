@@ -2451,6 +2451,28 @@ class BookingNextEOIView(APIView):
         return Response({'eoi_no': _next_eoi_no(company, pid)})
 
 
+def _can_view_all_bookings(user):
+    """Whole-company booking visibility: company-wide viewers (admin/staff/dept head)
+    plus the Accounts & Finance department (read-only review of LOIs/EOIs)."""
+    if _sees_all_company(user):
+        return True
+    mods = [str(m).lower() for m in (getattr(user, 'modules', None) or [])]
+    return any('account' in m or 'finance' in m for m in mods)
+
+
+class BookingAllView(APIView):
+    """Read-only: ALL company bookings (LOI + EOI) for authorised viewers — used by the
+    Accounts & Finance module to review booking / LOI / EOI details. No create or edit."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _can_view_all_bookings(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm').order_by('-created_at')
+        return Response(BookingSerializer(qs[:1000], many=True).data)
+
+
 def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):
     """Notify STM + approver/manager chain when a closure is cancelled.
     Accepts pre-extracted primitive values so it is safe to call after the closure is deleted."""
