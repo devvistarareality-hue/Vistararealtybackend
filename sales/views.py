@@ -3233,6 +3233,7 @@ class SalesDataResetView(APIView):
             'follow_ups':       FollowUp.objects.filter(lead__company=co).count(),
             'site_visits':      SiteVisit.objects.filter(lead__company=co).count(),
             'bookings':         Booking.objects.filter(company=co).count(),
+            'cancelled_bookings': Booking.objects.filter(company=co, approval_status='CANCELLED').count(),
             'closures':         Closure.objects.filter(lead__company=co).count(),
             'lead_history':     LeadStatusHistory.objects.filter(lead__company=co).count(),
             'distribution_log': DistributionLog.objects.filter(company=co).count(),
@@ -3258,7 +3259,7 @@ class SalesDataResetView(APIView):
 
         # Which categories to clear. Defaults to ALL (legacy behaviour) when the
         # client doesn't send an explicit selection.
-        all_keys = ['bookings', 'closures', 'site_visits', 'follow_ups', 'lead_history',
+        all_keys = ['bookings', 'cancelled_bookings', 'closures', 'site_visits', 'follow_ups', 'lead_history',
                     'distribution_log', 'availability', 'notifications', 'leads', 'plots_to_reset']
         raw = request.data.get('targets')
         if isinstance(raw, list) and raw:
@@ -3280,6 +3281,9 @@ class SalesDataResetView(APIView):
         from accounts.models import Notification
         with transaction.atomic():
             if 'bookings' in sel:         Booking.objects.filter(company=co).delete()
+            # Purge only the cancelled booking records (the CANCELLED log entries).
+            if 'cancelled_bookings' in sel and 'bookings' not in sel:
+                Booking.objects.filter(company=co, approval_status='CANCELLED').delete()
             if 'closures' in sel:         Closure.objects.filter(lead__company=co).delete()
             if 'site_visits' in sel:      SiteVisit.objects.filter(lead__company=co).delete()
             if 'follow_ups' in sel:       FollowUp.objects.filter(lead__company=co).delete()
