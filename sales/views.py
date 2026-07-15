@@ -2308,10 +2308,28 @@ def _loi_path(b):
     import re
     san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
     proj = san(b.project.name if b.project_id else 'Project')
-    plot = san(b.plot.number if b.plot_id else b.area)
+    # EOI bookings have no plot — fall back to the EOI code held in plot_numbers.
+    plot = san(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
     client = san(b.client_name)
     rev = b.revision_no or 0
     return f'{proj}/Plot {plot} - {client}/R{rev}_LOI_Plot{plot}_{client}.pdf'
+
+
+def _next_eoi_no(company, project_id, prefer=''):
+    """Next per-project EOI code (EOI-1, EOI-2, …). Honours a client-supplied code if
+    it's still free, otherwise assigns the next available so numbers never collide."""
+    existing = set(
+        Booking.objects.filter(company=company, project_id=project_id,
+                               plot_numbers__istartswith='EOI')
+        .values_list('plot_numbers', flat=True)
+    )
+    prefer = (prefer or '').strip()
+    if prefer and prefer not in existing:
+        return prefer
+    n = len(existing) + 1
+    while f'EOI-{n}' in existing:
+        n += 1
+    return f'EOI-{n}'
 
 
 class BookingListCreateView(APIView):
@@ -2388,6 +2406,14 @@ class BookingListCreateView(APIView):
                 booking.plot_id = pids[0]
             booking.save(update_fields=['plot_ids', 'plot_numbers', 'plot'])
 
+        # EOI (Expression of Interest) — a booking on a project that has no plots yet
+        # (raised before govt approvals). No plot is reserved; the sequential per-project
+        # EOI code (EOI-1, EOI-2, …) is stored in plot_numbers so the LOI renders as an EOI.
+        if not prior and data.get('eoi'):
+            eoi_no = _next_eoi_no(company, booking.project_id, prefer=(data.get('eoi_no') or ''))
+            booking.plot_numbers = eoi_no
+            booking.save(update_fields=['plot_numbers'])
+
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
         lf = data.get('loi_file')
@@ -2411,6 +2437,18 @@ class BookingListCreateView(APIView):
         _notify_booking_approvers(company, booking, request.user)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+
+
+class BookingNextEOIView(APIView):
+    """Preview the next per-project EOI code so the form + LOI can show it before submit."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _resolve_company(request)
+        pid = request.query_params.get('project')
+        if not pid:
+            return Response({'detail': 'project is required'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'eoi_no': _next_eoi_no(company, pid)})
 
 
 def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):
