@@ -1023,6 +1023,10 @@ class SiteVisitListView(APIView):
         if not _sees_all_company(request.user):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        # Platform admin viewing a specific company (?company_id) — honour the filter.
+        cid = request.query_params.get('company_id')
+        if cid and is_platform_admin(request.user):
+            qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
@@ -1090,6 +1094,10 @@ class ClosureListView(APIView):
         if not _sees_all_company(request.user):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        # Platform admin viewing a specific company (?company_id) — honour the filter.
+        cid = request.query_params.get('company_id')
+        if cid and is_platform_admin(request.user):
+            qs = qs.filter(lead__company_id=cid)
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
