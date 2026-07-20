@@ -42,7 +42,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user_code', 'name', 'email', 'phone',
             'role', 'department', 'designation', 'avatar_url',
-            'modules', 'manager_modules',
+            'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver',
         ]
@@ -74,7 +74,7 @@ class UserListSerializer(serializers.ModelSerializer):
         model  = User
         fields = [
             'id', 'user_code', 'name', 'email', 'phone', 'role', 'designation',
-            'modules', 'manager_modules', 'module_count', 'is_manager', 'is_active',
+            'modules', 'manager_modules', 'admin_modules', 'module_count', 'is_manager', 'is_active',
             'company_code', 'company_name', 'reporting_manager',
         ]
 
@@ -87,7 +87,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
 
     def create(self, validated_data):
         from companies.models import Company as CompanyModel
@@ -143,7 +143,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'is_active', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'is_active', 'reporting_manager_id']
 
     def validate_email(self, value):
         if User.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
