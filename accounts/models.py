@@ -32,6 +32,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     avatar_url      = models.URLField(blank=True)
     modules            = models.JSONField(default=list, blank=True)
     manager_modules    = models.JSONField(default=list, blank=True)
+    admin_modules      = models.JSONField(default=list, blank=True)
     reporting_manager  = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subordinates'
     )
