@@ -2435,7 +2435,16 @@ class BookingListCreateView(APIView):
                 booking.loi_document.save(_loi_path(booking),
                                           ContentFile(base64.b64decode(lf['data'])), save=True)
             except Exception:
-                pass
+                # The file may already be in storage (e.g. the storage POST succeeded but the
+                # model save failed, or the request timed out). Persist the deterministic path
+                # so the signed LOI isn't orphaned/invisible, and surface the error in logs.
+                import logging
+                logging.getLogger(__name__).exception('LOI document save failed for booking %s', booking.id)
+                try:
+                    booking.loi_document.name = _loi_path(booking)
+                    booking.save(update_fields=['loi_document'])
+                except Exception:
+                    logging.getLogger(__name__).exception('LOI document path relink failed for booking %s', booking.id)
 
         if not prior:
             # New booking: reserve ALL selected plots. The Closure is mirrored into
