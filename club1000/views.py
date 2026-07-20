@@ -216,12 +216,19 @@ class InvestorListCreateView(APIView):
         if isinstance(doc, dict) and doc.get('data'):
             import base64
             from django.core.files.base import ContentFile
+            ext = (doc.get('name') or '').rsplit('.', 1)[-1][:10] or 'bin'
+            doc_path = f'investor_{investor.id}_doc.{ext}'
             try:
-                ext = (doc.get('name') or '').rsplit('.', 1)[-1][:10] or 'bin'
-                investor.document.save(f'investor_{investor.id}_doc.{ext}',
-                                        ContentFile(base64.b64decode(doc['data'])), save=True)
+                investor.document.save(doc_path, ContentFile(base64.b64decode(doc['data'])), save=True)
             except Exception:
-                pass
+                # Don't silently orphan the document: log and relink the deterministic path.
+                import logging
+                logging.getLogger(__name__).exception('Investor document save failed for %s', investor.id)
+                try:
+                    investor.document.name = f'club1000/{doc_path}'
+                    investor.save(update_fields=['document'])
+                except Exception:
+                    logging.getLogger(__name__).exception('Investor document relink failed for %s', investor.id)
         payout_schedule = request.data.get('payout_schedule')
         generate_payout_schedule(investor, custom_entries=payout_schedule if isinstance(payout_schedule, list) else None)
         # Referral reward: 0.5% of this investor's amount_invested, owed to
