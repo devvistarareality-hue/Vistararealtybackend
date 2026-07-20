@@ -2417,9 +2417,12 @@ class BookingListCreateView(APIView):
         # EOI (Expression of Interest) — a booking on a project that has no plots yet
         # (raised before govt approvals). No plot is reserved; the sequential per-project
         # EOI code (EOI-1, EOI-2, …) is stored in plot_numbers so the LOI renders as an EOI.
-        if not prior and data.get('eoi'):
-            eoi_no = _next_eoi_no(company, booking.project_id, prefer=(data.get('eoi_no') or ''))
-            booking.plot_numbers = eoi_no
+        if data.get('eoi'):
+            if prior:
+                # Revising an EOI keeps the same EOI code (EOI-20 stays EOI-20).
+                booking.plot_numbers = prior.plot_numbers
+            else:
+                booking.plot_numbers = _next_eoi_no(company, booking.project_id, prefer=(data.get('eoi_no') or ''))
             booking.save(update_fields=['plot_numbers'])
 
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
