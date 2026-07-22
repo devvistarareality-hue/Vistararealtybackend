@@ -71,10 +71,24 @@ def is_cp(user):
 # themselves or by anyone reporting to them, transitively. This scales to any
 # designation/role without code changes — you only maintain reporting_manager.
 
-def _sees_all_company(user):
+def _sees_all_company(user, request=None):
     """Users who see ALL company data: platform admins, staff, the Admin role, and
-    top-of-tree department heads (report to no one but manage others, e.g. a CMO)."""
+    top-of-tree department heads (report to no one but manage others, e.g. a CMO).
+
+    A Sales Admin-Modules user (a Manager granted 'Sales' in Admin Modules) is
+    deliberately NOT included unconditionally — on the regular screens (Leads,
+    Follow-Ups, My Team, …) they see only their own team's data, exactly like any
+    other Manager. They only get full company visibility when `request` is passed
+    AND it explicitly carries `?admin_view=1` — sent only by the web/app's mirrored
+    "Admin" section pages (see isSalesModuleAdmin in sales/layout.js). Deliberately
+    a distinct param name from the pre-existing `scope` (used by MyTeamView for its
+    own unrelated 'all' org-chart toggle) to avoid colliding with it. This keeps
+    real admins (Chinmay, Prince, platform staff) completely unaffected — they
+    already return True unconditionally below, with or without the request/param."""
     if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
+        return True
+    if (request is not None and request.query_params.get('admin_view') == '1'
+            and 'Sales' in (getattr(user, 'admin_modules', None) or [])):
         return True
     # Top of the tree: reports to nobody, but has active reports under them.
     if user.reporting_manager_id is None and User.objects.filter(
@@ -100,6 +114,15 @@ def _visible_user_ids(user):
         ids.update(children)
         frontier = children
     return ids
+
+
+def _approver_project_ids(user, company):
+    """Ids of projects where `user` is a configured booking approver — they should
+    see every booking for that project regardless of the STM's reporting chain."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'booking_approvers')
+        if user.id in (p.booking_approvers or [])
+    ]
 
 
 def can_assign_leads(user):
@@ -164,12 +187,14 @@ def _availability_active(avail, user=None):
     return now_ist.time() < signout            # auto-expires at sign-out
 
 
-def scope_leads_to_role(qs, user, lead_prefix=''):
+def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
     STM or telecaller) by themselves or by anyone reporting to them, transitively.
     Admins / staff / top-of-tree heads see all company data. `lead_prefix` lets callers
-    scope related models (e.g. 'lead__' for SiteVisit / Closure)."""
-    if _sees_all_company(user):
+    scope related models (e.g. 'lead__' for SiteVisit / Closure). Pass `request` through
+    so a Sales Admin-Modules user gets full data when their Admin section explicitly
+    asks for it via `?scope=company` (see _sees_all_company)."""
+    if _sees_all_company(user, request):
         return qs
     ids = _visible_user_ids(user)
     return qs.filter(
@@ -214,7 +239,7 @@ class StatsView(APIView):
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
 
         # Telecallers / STMs only see stats for leads assigned to them.
-        leads_qs = scope_leads_to_role(leads_qs, request.user)
+        leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
 
         # Platform admin: filter by a specific company (used by admin company picker)
         if company_id and is_platform_admin(request.user):
@@ -254,7 +279,7 @@ class StatsView(APIView):
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
             cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -334,7 +359,7 @@ class StatsTrendView(APIView):
             date_to = str(today)
 
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
-        leads_qs = scope_leads_to_role(leads_qs, request.user)
+        leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
         if company_id and is_platform_admin(request.user):
             leads_qs = leads_qs.filter(company_id=company_id)
 
@@ -354,7 +379,7 @@ class StatsTrendView(APIView):
         )
 
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
         if company_id and is_platform_admin(request.user):
@@ -390,7 +415,7 @@ class StatsTrendView(APIView):
 
         # Closures per day (by closure_date) — for the STM/CP reports charts.
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
         if company_id and is_platform_admin(request.user):
@@ -455,7 +480,7 @@ class LeadListView(APIView):
         )
 
         # Telecallers / STMs only see leads assigned to them.
-        qs = scope_leads_to_role(qs, request.user)
+        qs = scope_leads_to_role(qs, request.user, request=request)
 
         # Filters
         search = request.query_params.get('search', '').strip()
@@ -639,7 +664,7 @@ class LeadDetailView(APIView):
                 request.user,
             )
             # Telecallers / STMs can only open leads assigned to them.
-            qs = scope_leads_to_role(qs, request.user)
+            qs = scope_leads_to_role(qs, request.user, request=request)
             return qs.get(pk=pk)
         except Lead.DoesNotExist:
             return None
@@ -972,7 +997,7 @@ class FollowUpListView(APIView):
             FollowUp.objects.select_related('lead', 'assigned_to'),
             request.user, 'lead__company',
         )
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(lead__company_id=request.query_params['company_id'])
@@ -1020,7 +1045,7 @@ class SiteVisitListView(APIView):
             SiteVisit.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         # Platform admin viewing a specific company (?company_id) — honour the filter.
@@ -1091,7 +1116,7 @@ class ClosureListView(APIView):
             Closure.objects.select_related('lead', 'project', 'stm'),
             request.user, 'lead__company',
         )
-        if not _sees_all_company(request.user):
+        if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         # Platform admin viewing a specific company (?company_id) — honour the filter.
@@ -2152,7 +2177,7 @@ class ReportsView(APIView):
 
         # Hierarchy scope: managers (anyone with reports below them) get a team report
         # over their subtree; leaf users get a personal report. Admins/top heads see all.
-        if _sees_all_company(user):
+        if _sees_all_company(user, request):
             team_view = True
         else:
             _ids = _visible_user_ids(user)
@@ -2244,8 +2269,9 @@ class MyTeamView(APIView):
         company = _resolve_company(request)
         module = (request.query_params.get('module') or '').strip()  # department/module org chart
         scope  = request.query_params.get('scope')                   # 'all' → full company org
+        admin_view = request.query_params.get('admin_view') == '1'
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
-        is_admin = is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
+        is_admin = _sees_all_company(user, request)
 
         def _full_company():
             # Everyone in a reporting relationship + all Managers (leadership shows
@@ -2267,7 +2293,7 @@ class MyTeamView(APIView):
             members = [u for u in all_users
                        if module in (u.modules or []) or module in (u.manager_modules or [])]
             ids = {u.id for u in members}
-        elif is_admin and (scope == 'all' or not ids):
+        elif is_admin and (scope == 'all' or admin_view or not ids):
             # Full company org (User Management / admin default).
             members = _full_company()
             ids = {u.id for u in members}
@@ -2346,8 +2372,12 @@ class BookingListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
-        if not _sees_all_company(request.user):
-            qs = qs.filter(stm__in=_visible_user_ids(request.user))
+        if not _sees_all_company(request.user, request):
+            approver_project_ids = _approver_project_ids(request.user, company)
+            if approver_project_ids:
+                qs = qs.filter(Q(stm__in=_visible_user_ids(request.user)) | Q(project_id__in=approver_project_ids))
+            else:
+                qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
             qs = qs.filter(stm=request.user)
         if request.query_params.get('closure'):
@@ -3274,7 +3304,10 @@ class SalesDataResetView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _is_admin(self, user):
-        return bool(getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin' or is_platform_admin(user))
+        return bool(
+            getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin' or is_platform_admin(user)
+            or 'Sales' in (getattr(user, 'admin_modules', None) or [])
+        )
 
     def _counts(self, co):
         from accounts.models import Notification
