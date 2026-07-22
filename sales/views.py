@@ -2988,6 +2988,13 @@ class MetaWebhookConfigView(APIView):
         projects = list(
             scope_to_company(Project.objects.filter(is_active=True), request.user).values('id', 'name')
         )
+        # Lead count per Meta form (mapped or not) so the UI can flag forms that are
+        # bringing in leads but aren't yet routed to a project.
+        form_lead_counts = {
+            row['meta_form_id']: row['c']
+            for row in scope_to_company(Lead.objects.exclude(meta_form_id=''), request.user)
+                        .values('meta_form_id').annotate(c=Count('id'))
+        }
         return Response({
             'verify_token':         config.verify_token,
             'page_access_token':    config.page_access_token,
@@ -2997,6 +3004,7 @@ class MetaWebhookConfigView(APIView):
             'last_lead_at':         config.last_lead_at,
             'subscribed_pages':     config.subscribed_pages or [],
             'pages_data':           config.pages_data or [],
+            'form_lead_counts':     form_lead_counts,
             'projects':             projects,
         })
 
