@@ -193,13 +193,19 @@ def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     Admins / staff / top-of-tree heads see all company data. `lead_prefix` lets callers
     scope related models (e.g. 'lead__' for SiteVisit / Closure). Pass `request` through
     so a Sales Admin-Modules user gets full data when their Admin section explicitly
-    asks for it via `?scope=company` (see _sees_all_company)."""
+    asks for it via `?scope=company` (see _sees_all_company).
+
+    A Sales department manager (Sales in manager_modules — the same flag Club 1000
+    uses for its manager-level access) additionally sees the whole unassigned pool
+    (no stm, no telecaller) alongside their own team's owned leads — they need that
+    visibility to review and distribute leads, not just to see what's already theirs."""
     if _sees_all_company(user, request):
         return qs
     ids = _visible_user_ids(user)
-    return qs.filter(
-        Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
-    )
+    own_filter = Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
+    if 'Sales' in (getattr(user, 'manager_modules', None) or []):
+        own_filter |= Q(**{f'{lead_prefix}stm__isnull': True}) & Q(**{f'{lead_prefix}telecaller__isnull': True})
+    return qs.filter(own_filter)
 
 
 def _lead_in_scope(request, lead_id):
@@ -229,8 +235,11 @@ class StatsView(APIView):
         date_from  = request.query_params.get('date_from')
         date_to    = request.query_params.get('date_to')
 
-        # Include date range in cache key so different date windows don't collide
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}'
+        # Include date range AND admin_view in cache key — otherwise a Sales Admin-
+        # Modules user's team-scoped dashboard and their Admin-section (full company)
+        # dashboard would collide on the same key and serve each other's stale data.
+        admin_view = request.query_params.get('admin_view') == '1'
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
