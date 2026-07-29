@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from dateutil.relativedelta import relativedelta
 from django.db import models
@@ -73,8 +74,16 @@ class Lead(models.Model):
     reference_name = models.CharField(max_length=150, blank=True)
     reference_phone = models.CharField(max_length=20, blank=True)
     source = models.CharField(max_length=20, choices=LEAD_SOURCE_CHOICES, default='other')
+    # The date this lead was actually received — editable at add-time (defaults to
+    # today) so a lead entered late can be backdated. Distinct from `created_at`,
+    # which is the immutable system insert timestamp.
+    lead_date = models.DateField(default=date.today, null=True, blank=True)
     scheme_interest = models.ForeignKey('Scheme', on_delete=models.SET_NULL, null=True, blank=True, related_name='interested_leads')
     amount_interested = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    # Prefilled from the chosen scheme's default on the client, but editable per-lead
+    # (negotiated during the sales conversation) — carried forward as the Investor's
+    # own total_return_pct default if this lead is later converted.
+    total_return_pct = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_leads')
     status = models.CharField(max_length=20, choices=LEAD_STATUS, default='new')
     remarks = models.TextField(blank=True)

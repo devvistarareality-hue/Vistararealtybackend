@@ -11,8 +11,8 @@ class LeadListSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'id', 'company_id', 'name', 'phone', 'alt_phone', 'email',
-            'reference_name', 'reference_phone', 'source',
-            'scheme_interest', 'scheme_interest_name', 'amount_interested',
+            'reference_name', 'reference_phone', 'source', 'lead_date',
+            'scheme_interest', 'scheme_interest_name', 'amount_interested', 'total_return_pct',
             'assigned_to', 'assigned_to_name', 'status', 'remarks', 'next_follow_up_date',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]
@@ -26,9 +26,9 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'id', 'name', 'phone', 'alt_phone', 'email', 'reference_name', 'reference_phone',
-            'source', 'scheme_interest', 'amount_interested', 'assigned_to', 'status', 'remarks',
+            'source', 'lead_date', 'scheme_interest', 'amount_interested', 'total_return_pct', 'assigned_to', 'status', 'remarks',
         ]
-        extra_kwargs = {'assigned_to': {'required': False}, 'status': {'required': False}}
+        extra_kwargs = {'assigned_to': {'required': False}, 'status': {'required': False}, 'total_return_pct': {'required': False}, 'lead_date': {'required': False}}
 
 
 class FollowUpSerializer(serializers.ModelSerializer):
