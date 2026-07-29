@@ -1,5 +1,51 @@
 from rest_framework import serializers
-from .models import Scheme, Investor, Payout, ReferralReward, INTEREST_PAYOUT_CHOICES
+from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, INTEREST_PAYOUT_CHOICES
+
+
+class LeadListSerializer(serializers.ModelSerializer):
+    assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default=None)
+    scheme_interest_name = serializers.CharField(source='scheme_interest.name', read_only=True, default=None)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = Lead
+        fields = [
+            'id', 'company_id', 'name', 'phone', 'alt_phone', 'email',
+            'reference_name', 'reference_phone', 'source',
+            'scheme_interest', 'scheme_interest_name', 'amount_interested',
+            'assigned_to', 'assigned_to_name', 'status', 'remarks', 'next_follow_up_date',
+            'created_by', 'created_by_name', 'created_at', 'updated_at',
+        ]
+        # next_follow_up_date is maintained by the FollowUp views and the status-change
+        # logic in LeadDetailView.patch — never set directly through this serializer.
+        read_only_fields = ['id', 'company_id', 'created_by', 'next_follow_up_date', 'created_at', 'updated_at']
+
+
+class LeadCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Lead
+        fields = [
+            'id', 'name', 'phone', 'alt_phone', 'email', 'reference_name', 'reference_phone',
+            'source', 'scheme_interest', 'amount_interested', 'assigned_to', 'status', 'remarks',
+        ]
+        extra_kwargs = {'assigned_to': {'required': False}, 'status': {'required': False}}
+
+
+class FollowUpSerializer(serializers.ModelSerializer):
+    lead_name = serializers.CharField(source='lead.name', read_only=True)
+    assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default=None)
+
+    class Meta:
+        model = FollowUp
+        fields = [
+            'id', 'lead', 'lead_name', 'assigned_to', 'assigned_to_name',
+            'scheduled_at', 'completed_at', 'status', 'remarks', 'outcome',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'created_by', 'created_at', 'updated_at']
+        # assigned_to defaults to the requesting user when omitted (see
+        # FollowUpListCreateView.post) — must not be required at the serializer level.
+        extra_kwargs = {'assigned_to': {'required': False}}
 
 
 class SchemeSerializer(serializers.ModelSerializer):
@@ -10,7 +56,7 @@ class SchemeSerializer(serializers.ModelSerializer):
             'loyalty_benefit_pct', 'total_return_pct', 'min_ticket_size',
             'interest_payout_options', 'principal_payout', 'premature_redemption_allowed',
             'premature_redemption_lock_months', 'premature_redemption_rate_pct_per_month',
-            'is_active', 'created_at', 'updated_at',
+            'investor_approvers', 'is_active', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'company_id', 'created_at', 'updated_at']
         extra_kwargs = {'total_return_pct': {'required': False}}
@@ -26,9 +72,13 @@ class InvestorListSerializer(serializers.ModelSerializer):
     scheme_name = serializers.CharField(source='scheme.name', read_only=True)
     added_by_name = serializers.CharField(source='added_by.name', read_only=True, default=None)
     document_url = serializers.SerializerMethodField()
+    loi_document_url = serializers.SerializerMethodField()
 
     def get_document_url(self, obj):
         return obj.document.url if obj.document else ''
+
+    def get_loi_document_url(self, obj):
+        return obj.loi_document.url if obj.loi_document else ''
 
     class Meta:
         model = Investor
@@ -36,19 +86,24 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'id', 'company_id', 'scheme', 'scheme_name', 'reference_name', 'reference_phone',
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
             'maturity_date', 'interest_payout', 'total_return_pct', 'document_url', 'status',
-            'added_by', 'added_by_name', 'notes', 'created_at', 'updated_at',
+            'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
+            'loi_no', 'loi_document_url', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'company_id', 'maturity_date', 'status', 'added_by', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'company_id', 'maturity_date', 'status', 'approval_status', 'added_by',
+                             'lead', 'loi_no', 'created_at', 'updated_at']
 
 
 class InvestorCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Investor
         fields = ['id', 'scheme', 'reference_name', 'reference_phone', 'name', 'phone', 'email', 'pan',
-                  'amount_invested', 'investment_date', 'interest_payout', 'total_return_pct', 'notes']
+                  'amount_invested', 'investment_date', 'interest_payout', 'total_return_pct', 'notes',
+                  'lead', 'security']
         extra_kwargs = {
             'interest_payout': {'required': False},
             'total_return_pct': {'required': False},
+            'lead': {'required': False},
+            'security': {'required': False},
         }
 
     def validate(self, attrs):
