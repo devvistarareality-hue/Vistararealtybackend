@@ -130,6 +130,9 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
 class FollowUpSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
+    # Current lead status so the completion modal can pre-select it (TC or STM).
+    lead_telecaller_status = serializers.CharField(source='lead.telecaller_status', read_only=True, default='')
+    lead_stm_status = serializers.CharField(source='lead.stm_status', read_only=True, default='')
 
     class Meta:
         model = FollowUp
