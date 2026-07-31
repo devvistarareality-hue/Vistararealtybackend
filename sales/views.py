@@ -199,6 +199,16 @@ def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     uses for its manager-level access) additionally sees the whole unassigned pool
     (no stm, no telecaller) alongside their own team's owned leads — they need that
     visibility to review and distribute leads, not just to see what's already theirs."""
+    # Frontline callers (telecaller / STM / CP) are ALWAYS restricted to leads owned
+    # by them (or their own reports) — never the unassigned pool, never full-company
+    # data — regardless of any manager_modules flag or reporting-line quirk. Without
+    # this a telecaller who also carries the 'Sales' manager flag (mis-config) would
+    # see every unrouted lead in the company as "My Leads".
+    if is_telecaller(user) or is_stm(user) or is_cp(user):
+        ids = _visible_user_ids(user)
+        return qs.filter(
+            Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
+        )
     if _sees_all_company(user, request):
         return qs
     ids = _visible_user_ids(user)
