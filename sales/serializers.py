@@ -154,8 +154,10 @@ class SiteVisitSerializer(serializers.ModelSerializer):
 
 
 class ClosureSerializer(serializers.ModelSerializer):
-    lead_name = serializers.CharField(source='lead.name', read_only=True)
-    lead_phone = serializers.CharField(source='lead.phone', read_only=True)
+    # The lead can be gone (deleted / trial reset) — fall back to the snapshot taken
+    # when the closure was recorded so conversions never render as blank rows.
+    lead_name = serializers.SerializerMethodField()
+    lead_phone = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
     referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
@@ -163,7 +165,13 @@ class ClosureSerializer(serializers.ModelSerializer):
     class Meta:
         model = Closure
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'company']
+
+    def get_lead_name(self, obj):
+        return (obj.lead.name if obj.lead_id else '') or obj.client_name or None
+
+    def get_lead_phone(self, obj):
+        return (obj.lead.phone if obj.lead_id else '') or obj.client_phone or None
 
 
 class LeadStatusHistorySerializer(serializers.ModelSerializer):

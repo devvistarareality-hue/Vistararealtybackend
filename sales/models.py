@@ -419,7 +419,17 @@ class Booking(models.Model):
 
 
 class Closure(models.Model):
-    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='closures')
+    """A booked/closed unit — the revenue record. It is deliberately NOT owned by the
+    lead: `company` is denormalised (like Booking) and `lead` is SET_NULL, so wiping
+    leads never destroys the conversion history that Bookings still point at. The
+    client name/phone are snapshotted for the same reason."""
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE, related_name='closures', null=True, blank=True
+    )
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='closures')
+    # Snapshot of the client at closure time — survives the lead being deleted.
+    client_name = models.CharField(max_length=200, blank=True)
+    client_phone = models.CharField(max_length=20, blank=True)
     site_visit = models.ForeignKey(SiteVisit, on_delete=models.SET_NULL, null=True, blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True)
     stm = models.ForeignKey(
@@ -440,6 +450,19 @@ class Closure(models.Model):
 
     class Meta:
         ordering = ['-closure_date']
+
+    def save(self, *args, **kwargs):
+        # Derive the company + client snapshot from the lead on first write so callers
+        # that only know the lead (serializer POST, imports) still get a self-contained
+        # row. bulk_create() bypasses this — those call sites set the fields directly.
+        if self.lead_id:
+            if not self.company_id:
+                self.company_id = Lead.objects.filter(pk=self.lead_id).values_list('company_id', flat=True).first()
+            if not self.client_name or not self.client_phone:
+                lead = self.lead
+                self.client_name = self.client_name or (lead.name or '')
+                self.client_phone = self.client_phone or (lead.phone or '')
+        return super().save(*args, **kwargs)
 
 
 CRM_ROLES = [

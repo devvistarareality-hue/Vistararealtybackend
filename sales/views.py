@@ -264,7 +264,7 @@ class StatsView(APIView):
         if company_id and is_platform_admin(request.user):
             leads_qs   = leads_qs.filter(company_id=company_id)
             sv_filter  = {'lead__company_id': company_id}
-            cl_filter  = {'lead__company_id': company_id}
+            cl_filter  = {'company_id': company_id}
             prj_filter = {'company_id': company_id}
         else:
             sv_filter = cl_filter = prj_filter = {}
@@ -297,7 +297,7 @@ class StatsView(APIView):
             stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -433,12 +433,12 @@ class StatsTrendView(APIView):
         )
 
         # Closures per day (by closure_date) — for the STM/CP reports charts.
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'lead__company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
         if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
         if company_id and is_platform_admin(request.user):
-            cl_qs = cl_qs.filter(lead__company_id=company_id)
+            cl_qs = cl_qs.filter(company_id=company_id)
         # booking/total amounts are EncryptedDecimalField (cannot Sum() in the DB),
         # so aggregate count + amount per day in Python for the closures chart tooltip.
         closure_map = {}
@@ -1070,7 +1070,7 @@ class SiteVisitListView(APIView):
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
-            qs = qs.filter(lead__company_id=cid)
+            qs = qs.filter(company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
@@ -1133,7 +1133,7 @@ class ClosureListView(APIView):
     def get(self, request):
         qs = scope_to_company(
             Closure.objects.select_related('lead', 'project', 'stm'),
-            request.user, 'lead__company',
+            request.user, 'company',
         )
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
@@ -1141,7 +1141,7 @@ class ClosureListView(APIView):
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
-            qs = qs.filter(lead__company_id=cid)
+            qs = qs.filter(company_id=cid)
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -2024,7 +2024,9 @@ class BulkImportLeadsView(APIView):
                     # Historical closure (no Booking/LOI) — tagged so it's distinguishable
                     # from closures produced by the booking form.
                     closures.append(Closure(
-                        lead=lead, project_id=lead.project_id, stm_id=lead.stm_id,
+                        company_id=lead.company_id, lead=lead,
+                        client_name=lead.name or '', client_phone=lead.phone or '',
+                        project_id=lead.project_id, stm_id=lead.stm_id,
                         referred_by_telecaller_id=lead.telecaller_id, status=m['cl_status'],
                         closure_date=m['cl_date'], unit_no=m['unit_no'], unit_type=m['unit_type'],
                         booking_amount=m['booking_amount'], total_amount=m['total_amount'],
@@ -2174,12 +2176,12 @@ class ReportsView(APIView):
         user      = request.user
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
-        closure_qs = scope_to_company(Closure.objects.all(), user, 'lead__company')
+        closure_qs = scope_to_company(Closure.objects.all(), user, 'company')
         company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(user):
             leads_qs   = leads_qs.filter(company_id=company_id)
             sv_qs      = sv_qs.filter(lead__company_id=company_id)
-            closure_qs = closure_qs.filter(lead__company_id=company_id)
+            closure_qs = closure_qs.filter(company_id=company_id)
 
         # Optional date window — bounds the aggregate scans. No default, so the
         # existing all-time behaviour is unchanged unless the client sends dates.
@@ -2333,7 +2335,7 @@ class MyTeamView(APIView):
             for row in Lead.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
                 lead_counts[row[fld]] = lead_counts.get(row[fld], 0) + row['c']
         for fld in ('stm_id', 'referred_by_telecaller_id'):
-            for row in Closure.objects.filter(lead__company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+            for row in Closure.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
                 closure_counts[row[fld]] = closure_counts.get(row[fld], 0) + row['c']
         data = [{
             'id':                u.id,
@@ -2670,7 +2672,8 @@ class BookingActionView(APIView):
                 if b.lead_id:
                     Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed')
                 closure = Closure.objects.create(
-                    lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
+                    company_id=b.company_id, lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
+                    client_name=b.client_name or '', client_phone=b.phone or '',
                     status='booked', closure_date=b.booking_date or timezone.now().date(),
                     unit_no=(b.plot_numbers or (b.plot.number if b.plot_id else b.area)),
                     unit_type=b.villa_type or b.bunglow_type or '',
@@ -2793,7 +2796,7 @@ class ClosureCancelView(APIView):
     def post(self, request, pk):
         closure = scope_to_company(
             Closure.objects.filter(pk=pk).select_related('stm', 'project', 'lead'),
-            request.user, 'lead__company').first()
+            request.user, 'company').first()
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         # Only an approver (admin/manager) may cancel a booking — same authority that
@@ -2806,7 +2809,7 @@ class ClosureCancelView(APIView):
         notif_stm      = closure.stm
         notif_project  = closure.project
         notif_unit     = (closure.unit_type + ' ' + (closure.unit_no or '')).strip() or '—'
-        notif_client   = getattr(closure.lead, 'name', None) or '—'
+        notif_client   = getattr(closure.lead, 'name', None) or closure.client_name or '—'
         notif_amount   = int(closure.total_amount or 0)
         notif_extra    = {'closure_id': closure.pk}
 
@@ -3367,7 +3370,7 @@ class SalesDataResetView(APIView):
             'site_visits':      SiteVisit.objects.filter(lead__company=co).count(),
             'bookings':         Booking.objects.filter(company=co).count(),
             'cancelled_bookings': Booking.objects.filter(company=co, approval_status='CANCELLED').count(),
-            'closures':         Closure.objects.filter(lead__company=co).count(),
+            'closures':         Closure.objects.filter(company=co).count(),
             'lead_history':     LeadStatusHistory.objects.filter(lead__company=co).count(),
             'distribution_log': DistributionLog.objects.filter(company=co).count(),
             'availability':     UserAvailability.objects.filter(user__company=co).count(),
@@ -3401,8 +3404,18 @@ class SalesDataResetView(APIView):
             targets = list(all_keys)
         sel = set(targets)
         # Deleting leads cascades their children in the DB — reflect that in the summary.
-        cascades = {'closures', 'site_visits', 'follow_ups', 'lead_history'}
+        # Closures are deliberately NOT in that set: they own their company FK and only
+        # SET_NULL their lead, so clearing leads leaves the conversion history (and the
+        # bookings that point at it) intact.
+        cascades = {'site_visits', 'follow_ups', 'lead_history'}
         effective = set(sel) | (cascades if 'leads' in sel else set())
+        # An approved booking mirrors itself into a Closure; drop those alongside the
+        # bookings so the two counts can never disagree. Standalone closures (imported
+        # or recorded by hand, with no booking) are only removed by ticking Closures.
+        booking_closures = Closure.objects.filter(
+            id__in=Booking.objects.filter(company=co).exclude(closure=None).values('closure_id')
+        ) if 'bookings' in sel else Closure.objects.none()
+        n_booking_closures = booking_closures.count()
 
         # Optionally purge confidential LOI PDFs from Supabase before deleting bookings.
         if with_loi and 'bookings' in sel:
@@ -3413,11 +3426,13 @@ class SalesDataResetView(APIView):
         from django.db import transaction
         from accounts.models import Notification
         with transaction.atomic():
-            if 'bookings' in sel:         Booking.objects.filter(company=co).delete()
+            if 'bookings' in sel:
+                Closure.objects.filter(id__in=list(booking_closures.values_list('id', flat=True))).delete()
+                Booking.objects.filter(company=co).delete()
             # Purge only the cancelled booking records (the CANCELLED log entries).
             if 'cancelled_bookings' in sel and 'bookings' not in sel:
                 Booking.objects.filter(company=co, approval_status='CANCELLED').delete()
-            if 'closures' in sel:         Closure.objects.filter(lead__company=co).delete()
+            if 'closures' in sel:         Closure.objects.filter(company=co).delete()
             if 'site_visits' in sel:      SiteVisit.objects.filter(lead__company=co).delete()
             if 'follow_ups' in sel:       FollowUp.objects.filter(lead__company=co).delete()
             if 'lead_history' in sel:     LeadStatusHistory.objects.filter(lead__company=co).delete()
@@ -3433,4 +3448,6 @@ class SalesDataResetView(APIView):
                 LeaveTransaction.objects.filter(user__company=co).delete()
                 LeaveBalance.objects.filter(user__company=co).delete()
         deleted = {k: v for k, v in before.items() if k in effective}
+        if n_booking_closures and 'closures' not in effective:
+            deleted['closures'] = n_booking_closures  # the booking-mirrored ones only
         return Response({'detail': 'Trial data cleared.', 'deleted': deleted, 'targets': sorted(effective)})
