@@ -1,8 +1,13 @@
 import re
-from calendar import monthrange
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from dateutil.relativedelta import relativedelta
 from .models import Payout, PAYOUT_TYPE_CHOICES
+
+# Every interest instalment (quarterly or monthly) falls on this fixed day of
+# its month rather than the month-end — e.g. investing 25 Jun means the first
+# quarterly instalment is 10 Jul (a 15-day stub), not 31 Jul.
+PAYOUT_DAY = 10
 
 
 def normalize_phone(phone):
@@ -24,45 +29,72 @@ def _quarter_index(month):
 
 
 def _next_quarter_payout(d):
-    """Last day of the first month of the fiscal quarter immediately following `d`'s quarter."""
+    """The PAYOUT_DAY of the first month of the fiscal quarter immediately following `d`'s quarter."""
     idx = _quarter_index(d.month)
     next_idx = (idx + 1) % 4
     target_month = QUARTER_START_MONTHS[next_idx]
     # Only the Q3 (Oct-Dec) -> Q4 (Jan) handoff crosses a calendar year boundary.
     year = d.year + 1 if idx == 2 else d.year
-    return date(year, target_month, monthrange(year, target_month)[1])
+    return date(year, target_month, PAYOUT_DAY)
 
 
 def default_quarterly_dates(investment_date, tenure_months):
     """Due dates for each quarterly interest instalment — the first one in the
     start month of the fiscal quarter following `investment_date`'s quarter,
-    then every 3 months after that."""
-    quarters = max(tenure_months // 3, 1)
+    then every 3 months after that. The LAST one is capped at the maturity
+    date (investment_date + tenure_months) instead of always landing on the
+    next quarter's PAYOUT_DAY — otherwise the stretch from the last regular
+    quarterly date to maturity would go completely uncompensated. This means
+    the final instalment lands exactly on the maturity date (alongside the
+    separate principal payout there) and is usually a stub itself."""
+    maturity_date = investment_date + relativedelta(months=tenure_months)
     dates = []
     current = investment_date
-    for _ in range(quarters):
-        current = _next_quarter_payout(current)
-        dates.append(current)
+    while True:
+        nxt = _next_quarter_payout(current)
+        if nxt >= maturity_date:
+            dates.append(maturity_date)
+            break
+        dates.append(nxt)
+        current = nxt
     return dates
 
 
-def _next_month_end(d):
-    """Last day of the calendar month strictly after `d`'s month."""
+def _next_month_10th(d):
+    """The PAYOUT_DAY of the calendar month strictly after `d`'s month."""
     total_month = d.month + 1
     year = d.year + (total_month - 1) // 12
     month = (total_month - 1) % 12 + 1
-    return date(year, month, monthrange(year, month)[1])
+    return date(year, month, PAYOUT_DAY)
 
 
 def default_monthly_dates(investment_date, tenure_months):
     """Due dates for each monthly interest instalment, one per calendar
-    month-end, for the full tenure."""
+    month on PAYOUT_DAY. The LAST one is capped at the maturity date
+    (investment_date + tenure_months) instead of always landing on the next
+    month's PAYOUT_DAY — see default_quarterly_dates for why."""
+    maturity_date = investment_date + relativedelta(months=tenure_months)
     dates = []
     current = investment_date
-    for _ in range(max(tenure_months, 1)):
-        current = _next_month_end(current)
-        dates.append(current)
+    while True:
+        nxt = _next_month_10th(current)
+        if nxt >= maturity_date:
+            dates.append(maturity_date)
+            break
+        dates.append(nxt)
+        current = nxt
     return dates
+
+
+def maturity_value(principal, total_return_pct, investment_date, maturity_date):
+    """Principal + full-tenure interest, day-count basis — the total an
+    investor holds by maturity_date regardless of payout cadence (equals the
+    sum of every quarterly/monthly instalment, or the one-shot maturity
+    payout, whichever cadence is actually chosen — same daily_rate formula as
+    generate_payout_schedule, just totalled over the whole tenure instead of
+    per instalment)."""
+    days = (maturity_date - investment_date).days
+    return principal + principal * (total_return_pct / Decimal('100')) * Decimal(days) / Decimal('365')
 
 
 def generate_payout_schedule(investor, custom_entries=None):
@@ -75,9 +107,17 @@ def generate_payout_schedule(investor, custom_entries=None):
     of the auto-computed one.
 
     Auto-computed default:
-    - Quarterly: one 'interest' row every 3 months for the tenure, the
-      investor's total_return_pct spread evenly across the quarters, plus one
-      final 'maturity' row for the principal only (interest already paid out).
+    - Quarterly / Monthly: one 'interest' row per instalment date (see
+      default_quarterly_dates / default_monthly_dates — each due on
+      PAYOUT_DAY, except the last which is capped at the maturity date so no
+      stretch of the tenure goes uncompensated), sized by actual day-count
+      proration at the investor's annual total_return_pct (daily_rate =
+      principal * pct/100 / 365, instalment = daily_rate * days since the
+      PREVIOUS instalment, or since investment_date for the first one). Both
+      the first AND last instalments are usually stubs — e.g. investing 25
+      Jun with quarterly payout means a 15-day first instalment due 10 Jul,
+      not a full quarter's share — plus one final 'maturity' row for the
+      principal only, due the same day as that last (capped) interest row.
     - Maturity: a single 'maturity' row (principal + full total return) due
       on the maturity date.
     """
@@ -108,15 +148,18 @@ def generate_payout_schedule(investor, custom_entries=None):
             if investor.interest_payout == 'quarterly'
             else default_monthly_dates(investor.investment_date, scheme.tenure_months)
         )
-        interest_total = principal * (total_return_pct / Decimal('100'))
-        per_instalment = (interest_total / len(dates)).quantize(Decimal('0.01'))
+        daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal('365')
+        prev_date = investor.investment_date
         for due_date in dates:
+            days_elapsed = (due_date - prev_date).days
+            amount_due = (daily_rate * Decimal(days_elapsed)).quantize(Decimal('0.01'))
             Payout.objects.create(
                 investor=investor,
                 payout_type='interest',
                 due_date=due_date,
-                amount_due=per_instalment,
+                amount_due=amount_due,
             )
+            prev_date = due_date
         Payout.objects.create(
             investor=investor,
             payout_type='maturity',
@@ -124,10 +167,10 @@ def generate_payout_schedule(investor, custom_entries=None):
             amount_due=principal,
         )
     else:
-        total_payable = principal * (Decimal('1') + total_return_pct / Decimal('100'))
+        total_payable = maturity_value(principal, total_return_pct, investor.investment_date, investor.maturity_date)
         Payout.objects.create(
             investor=investor,
             payout_type='maturity',
             due_date=investor.maturity_date,
-            amount_due=total_payable,
+            amount_due=total_payable.quantize(Decimal('0.01')),
         )

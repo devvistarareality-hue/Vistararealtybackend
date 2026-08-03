@@ -1,5 +1,15 @@
+from decimal import Decimal
 from rest_framework import serializers
-from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, INTEREST_PAYOUT_CHOICES
+from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory, INTEREST_PAYOUT_CHOICES
+from .services import maturity_value
+
+
+class LeadStatusHistorySerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.CharField(source='changed_by.name', read_only=True, default=None)
+
+    class Meta:
+        model = LeadStatusHistory
+        fields = ['id', 'field_changed', 'old_value', 'new_value', 'remarks', 'changed_by_name', 'created_at']
 
 
 class LeadListSerializer(serializers.ModelSerializer):
@@ -11,8 +21,8 @@ class LeadListSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'id', 'company_id', 'name', 'phone', 'alt_phone', 'email',
-            'reference_name', 'reference_phone', 'source',
-            'scheme_interest', 'scheme_interest_name', 'amount_interested',
+            'reference_name', 'reference_phone', 'source', 'lead_date',
+            'scheme_interest', 'scheme_interest_name', 'amount_interested', 'total_return_pct',
             'assigned_to', 'assigned_to_name', 'status', 'remarks', 'next_follow_up_date',
             'created_by', 'created_by_name', 'created_at', 'updated_at',
         ]
@@ -26,19 +36,20 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'id', 'name', 'phone', 'alt_phone', 'email', 'reference_name', 'reference_phone',
-            'source', 'scheme_interest', 'amount_interested', 'assigned_to', 'status', 'remarks',
+            'source', 'lead_date', 'scheme_interest', 'amount_interested', 'total_return_pct', 'assigned_to', 'status', 'remarks',
         ]
-        extra_kwargs = {'assigned_to': {'required': False}, 'status': {'required': False}}
+        extra_kwargs = {'assigned_to': {'required': False}, 'status': {'required': False}, 'total_return_pct': {'required': False}, 'lead_date': {'required': False}}
 
 
 class FollowUpSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
+    lead_status = serializers.CharField(source='lead.status', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default=None)
 
     class Meta:
         model = FollowUp
         fields = [
-            'id', 'lead', 'lead_name', 'assigned_to', 'assigned_to_name',
+            'id', 'lead', 'lead_name', 'lead_status', 'assigned_to', 'assigned_to_name',
             'scheduled_at', 'completed_at', 'status', 'remarks', 'outcome',
             'created_by', 'created_at', 'updated_at',
         ]
@@ -52,14 +63,12 @@ class SchemeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Scheme
         fields = [
-            'id', 'company_id', 'name', 'tenure_months', 'fixed_return_pct',
-            'loyalty_benefit_pct', 'total_return_pct', 'min_ticket_size',
-            'interest_payout_options', 'principal_payout', 'premature_redemption_allowed',
+            'id', 'company_id', 'name', 'tenure_months', 'min_ticket_size',
+            'interest_payout_options', 'payout_rates', 'principal_payout', 'premature_redemption_allowed',
             'premature_redemption_lock_months', 'premature_redemption_rate_pct_per_month',
             'investor_approvers', 'is_active', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'company_id', 'created_at', 'updated_at']
-        extra_kwargs = {'total_return_pct': {'required': False}}
 
     def validate_interest_payout_options(self, value):
         valid = {c[0] for c in INTEREST_PAYOUT_CHOICES}
@@ -67,12 +76,23 @@ class SchemeSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f'Select at least one of: {", ".join(sorted(valid))}.')
         return value
 
+    def validate(self, attrs):
+        options = attrs.get('interest_payout_options', getattr(self.instance, 'interest_payout_options', None) or [])
+        rates = attrs.get('payout_rates', getattr(self.instance, 'payout_rates', None) or {})
+        missing = [o for o in options if rates.get(o) in (None, '')]
+        if missing:
+            raise serializers.ValidationError({'payout_rates': f'Missing a return % for: {", ".join(missing)}.'})
+        return attrs
+
 
 class InvestorListSerializer(serializers.ModelSerializer):
     scheme_name = serializers.CharField(source='scheme.name', read_only=True)
     added_by_name = serializers.CharField(source='added_by.name', read_only=True, default=None)
     document_url = serializers.SerializerMethodField()
     loi_document_url = serializers.SerializerMethodField()
+    pending_loi_document_url = serializers.SerializerMethodField()
+    is_matured = serializers.SerializerMethodField()
+    maturity_value = serializers.SerializerMethodField()
 
     def get_document_url(self, obj):
         return obj.document.url if obj.document else ''
@@ -80,26 +100,40 @@ class InvestorListSerializer(serializers.ModelSerializer):
     def get_loi_document_url(self, obj):
         return obj.loi_document.url if obj.loi_document else ''
 
+    def get_pending_loi_document_url(self, obj):
+        return obj.pending_loi_document.url if obj.pending_loi_document else ''
+
+    def get_is_matured(self, obj):
+        return obj.is_matured()
+
+    def get_maturity_value(self, obj):
+        if not obj.maturity_date or not obj.investment_date:
+            return None
+        return str(maturity_value(obj.amount_invested, obj.total_return_pct, obj.investment_date, obj.maturity_date).quantize(Decimal('0.01')))
+
     class Meta:
         model = Investor
         fields = [
-            'id', 'company_id', 'scheme', 'scheme_name', 'reference_name', 'reference_phone',
+            'id', 'company_id', 'scheme', 'scheme_name', 'source', 'reference_name', 'reference_phone',
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
-            'maturity_date', 'interest_payout', 'total_return_pct', 'document_url', 'status',
+            'maturity_date', 'is_matured', 'maturity_value', 'interest_payout', 'total_return_pct', 'document_url', 'status',
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
-            'loi_no', 'loi_document_url', 'created_at', 'updated_at',
+            'loi_no', 'loi_document_url', 'revision_no', 'pending_revision', 'pending_revision_type',
+            'pending_loi_document_url', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'company_id', 'maturity_date', 'status', 'approval_status', 'added_by',
-                             'lead', 'loi_no', 'created_at', 'updated_at']
+                             'lead', 'loi_no', 'revision_no', 'pending_revision', 'pending_revision_type',
+                             'created_at', 'updated_at']
 
 
 class InvestorCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Investor
-        fields = ['id', 'scheme', 'reference_name', 'reference_phone', 'name', 'phone', 'email', 'pan',
+        fields = ['id', 'scheme', 'source', 'reference_name', 'reference_phone', 'name', 'phone', 'email', 'pan',
                   'amount_invested', 'investment_date', 'interest_payout', 'total_return_pct', 'notes',
                   'lead', 'security']
         extra_kwargs = {
+            'source': {'required': False},
             'interest_payout': {'required': False},
             'total_return_pct': {'required': False},
             'lead': {'required': False},
@@ -142,7 +176,7 @@ class ReferralRewardSerializer(serializers.ModelSerializer):
         model = ReferralReward
         fields = [
             'id', 'investor', 'investor_name', 'reference_name', 'reference_phone',
-            'amount', 'status', 'paid_date', 'paid_by', 'created_at', 'updated_at',
+            'amount', 'pct', 'status', 'paid_date', 'paid_by', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'investor', 'reference_name', 'reference_phone', 'amount',
+        read_only_fields = ['id', 'investor', 'reference_name', 'reference_phone', 'amount', 'pct',
                              'paid_date', 'paid_by', 'created_at', 'updated_at']

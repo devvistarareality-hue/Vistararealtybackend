@@ -104,6 +104,14 @@ class Project(models.Model):
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
+    # Layout mode. False (default) = a plotted scheme: a flat list of plot numbers with
+    # an interactive site map. True = a tower (Pratishtha: G+13): units are defined floor
+    # by floor, each floor carrying its own numbering run and plan drawing.
+    floor_wise = models.BooleanField(default=False)
+    # Tower projects: one entry per floor, in display order — the plan drawing a buyer
+    # sees when they pick a unit on that floor.
+    #   [{floor: 0, label: 'Ground', image_url: '…'}, {floor: 1, label: '1st Floor', …}]
+    floor_plans = models.JSONField(default=list, blank=True)
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
@@ -145,6 +153,12 @@ class Plot(models.Model):
     facing = models.CharField(max_length=50, blank=True)
     price = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
+    # ── Tower projects (Pratishtha-style: G+13, units stacked per floor) ──
+    # Plotted schemes leave `floor` NULL; a tower sets 0 for ground, 1.. upward, so
+    # units can be grouped and shown against that floor's plan.
+    floor = models.SmallIntegerField(null=True, blank=True)
+    # Some flats carry a private terrace, priced separately from the built-up area.
+    terrace_area = models.CharField(max_length=100, blank=True)
 
     class Meta:
         unique_together = ['project', 'number']
@@ -419,7 +433,17 @@ class Booking(models.Model):
 
 
 class Closure(models.Model):
-    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='closures')
+    """A booked/closed unit — the revenue record. It is deliberately NOT owned by the
+    lead: `company` is denormalised (like Booking) and `lead` is SET_NULL, so wiping
+    leads never destroys the conversion history that Bookings still point at. The
+    client name/phone are snapshotted for the same reason."""
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE, related_name='closures', null=True, blank=True
+    )
+    lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='closures')
+    # Snapshot of the client at closure time — survives the lead being deleted.
+    client_name = models.CharField(max_length=200, blank=True)
+    client_phone = models.CharField(max_length=20, blank=True)
     site_visit = models.ForeignKey(SiteVisit, on_delete=models.SET_NULL, null=True, blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True)
     stm = models.ForeignKey(
@@ -440,6 +464,19 @@ class Closure(models.Model):
 
     class Meta:
         ordering = ['-closure_date']
+
+    def save(self, *args, **kwargs):
+        # Derive the company + client snapshot from the lead on first write so callers
+        # that only know the lead (serializer POST, imports) still get a self-contained
+        # row. bulk_create() bypasses this — those call sites set the fields directly.
+        if self.lead_id:
+            if not self.company_id:
+                self.company_id = Lead.objects.filter(pk=self.lead_id).values_list('company_id', flat=True).first()
+            if not self.client_name or not self.client_phone:
+                lead = self.lead
+                self.client_name = self.client_name or (lead.name or '')
+                self.client_phone = self.client_phone or (lead.phone or '')
+        return super().save(*args, **kwargs)
 
 
 CRM_ROLES = [

@@ -18,6 +18,10 @@ from sales.models import Lead, Project, Plot, LeadSource
 
 def auth(client, user):
     token = RefreshToken.for_user(user).access_token
+    # SessionJWTAuthentication rejects any token without a matching per-platform
+    # session_token, so mint the same claims the real login view does.
+    token['platform'] = 'app'
+    token['session_token'] = str(user.session_token_app)
     client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
 
@@ -546,7 +550,7 @@ class DataResetTests(APITestCase):
         lead = Lead.objects.create(company=co, name='L', phone='+9190000' + code.zfill(5)[:5], project=proj, stm=admin)
         SiteVisit.objects.create(lead=lead, stm=admin)
         Booking.objects.create(company=co, plot=plot, lead=lead, stm=admin, client_name='L', booking_date=date.today())
-        Closure.objects.create(lead=lead, project=proj, stm=admin, status='booked', closure_date=date.today(), unit_no='1')
+        Closure.objects.create(company=co, lead=lead, project=proj, stm=admin, status='booked', closure_date=date.today(), unit_no='1')
         return co, admin, proj, plot, lead
 
     def test_reset_scoped_to_company(self):
@@ -564,7 +568,7 @@ class DataResetTests(APITestCase):
         # company A wiped + plot reset
         self.assertFalse(Lead.objects.filter(company=a_co).exists())
         self.assertFalse(Booking.objects.filter(company=a_co).exists())
-        self.assertFalse(Closure.objects.filter(lead__company=a_co).exists())
+        self.assertFalse(Closure.objects.filter(company=a_co).exists())
         self.assertFalse(SiteVisit.objects.filter(lead__company=a_co).exists())
         a_plot.refresh_from_db(); self.assertEqual(a_plot.status, 'available')
 
@@ -572,6 +576,42 @@ class DataResetTests(APITestCase):
         self.assertTrue(Lead.objects.filter(company=b_co).exists())
         self.assertTrue(Booking.objects.filter(company=b_co).exists())
         b_plot.refresh_from_db(); self.assertEqual(b_plot.status, 'sold')
+
+    def test_clearing_leads_keeps_closures_and_bookings(self):
+        """Regression: closures used to CASCADE off the lead, so wiping leads left
+        bookings alive with zero closures. They must now survive (lead → NULL)."""
+        from sales.models import Booking, Closure
+        co, admin, proj, plot, lead = self._seed('44')
+
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/admin/reset-trial-data/',
+                               {'confirm': 'DELETE', 'targets': ['leads']}, format='json')
+        self.assertEqual(res.status_code, 200)
+
+        self.assertFalse(Lead.objects.filter(company=co).exists())
+        self.assertEqual(Booking.objects.filter(company=co).count(), 1)
+        c = Closure.objects.filter(company=co).first()
+        self.assertIsNotNone(c)
+        self.assertIsNone(c.lead_id)
+        self.assertEqual(c.client_name, 'L')  # snapshot kept the client readable
+
+    def test_clearing_bookings_removes_their_mirrored_closure(self):
+        from sales.models import Booking, Closure
+        co, admin, proj, plot, lead = self._seed('55')
+        b = Booking.objects.get(company=co)
+        c = Closure.objects.get(company=co)
+        b.closure = c; b.save(update_fields=['closure'])
+        standalone = Closure.objects.create(
+            company=co, lead=lead, project=proj, stm=admin, status='booked',
+            closure_date=c.closure_date, unit_no='9')
+
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/admin/reset-trial-data/',
+                               {'confirm': 'DELETE', 'targets': ['bookings']}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(Booking.objects.filter(company=co).exists())
+        self.assertFalse(Closure.objects.filter(pk=c.pk).exists())
+        self.assertTrue(Closure.objects.filter(pk=standalone.pk).exists())
 
     def test_non_admin_forbidden(self):
         a_co, a_admin, *_ = self._seed('33')

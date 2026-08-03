@@ -19,7 +19,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'allow_unit_switch', 'booking_approvers',
-            'kiosk_enabled',
+            'kiosk_enabled', 'floor_wise', 'floor_plans',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
@@ -38,7 +38,8 @@ class ProjectSerializer(serializers.ModelSerializer):
 class PlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Plot
-        fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type', 'facing', 'price', 'notes']
+        fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
+                  'facing', 'price', 'notes', 'floor', 'terrace_area']
         read_only_fields = ['id', 'project']
 
 
@@ -130,6 +131,9 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
 class FollowUpSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
+    # Current lead status so the completion modal can pre-select it (TC or STM).
+    lead_telecaller_status = serializers.CharField(source='lead.telecaller_status', read_only=True, default='')
+    lead_stm_status = serializers.CharField(source='lead.stm_status', read_only=True, default='')
 
     class Meta:
         model = FollowUp
@@ -151,8 +155,10 @@ class SiteVisitSerializer(serializers.ModelSerializer):
 
 
 class ClosureSerializer(serializers.ModelSerializer):
-    lead_name = serializers.CharField(source='lead.name', read_only=True)
-    lead_phone = serializers.CharField(source='lead.phone', read_only=True)
+    # The lead can be gone (deleted / trial reset) — fall back to the snapshot taken
+    # when the closure was recorded so conversions never render as blank rows.
+    lead_name = serializers.SerializerMethodField()
+    lead_phone = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
     referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
@@ -160,7 +166,13 @@ class ClosureSerializer(serializers.ModelSerializer):
     class Meta:
         model = Closure
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'company']
+
+    def get_lead_name(self, obj):
+        return (obj.lead.name if obj.lead_id else '') or obj.client_name or None
+
+    def get_lead_phone(self, obj):
+        return (obj.lead.phone if obj.lead_id else '') or obj.client_phone or None
 
 
 class LeadStatusHistorySerializer(serializers.ModelSerializer):
