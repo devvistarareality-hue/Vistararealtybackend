@@ -680,7 +680,9 @@ def _investor_loi_path(investor):
     """Object storage path for a generated Investment Proposal Form — mirrors
     sales._loi_path's GAS-style layout."""
     import re
-    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    # Also strips &%#+;= — an "&"/"+" etc. in the path breaks Supabase's signed-URL
+    # scheme (confirmed against real Sales bookings — see sales.views._loi_path).
+    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
     scheme_name = san(investor.scheme.name)
     client = san(investor.name)
     loi_no = san(investor.loi_no)
@@ -692,7 +694,9 @@ def _investor_pending_loi_path(investor):
     from the live loi_document so a rejected revision never touches the
     original signed file."""
     import re
-    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    # Also strips &%#+;= — an "&"/"+" etc. in the path breaks Supabase's signed-URL
+    # scheme (confirmed against real Sales bookings — see sales.views._loi_path).
+    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
     scheme_name = san(investor.scheme.name)
     client = san(investor.name)
     loi_no = san(investor.loi_no)

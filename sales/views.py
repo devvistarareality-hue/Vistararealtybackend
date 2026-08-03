@@ -2,6 +2,7 @@ import logging
 import secrets
 from datetime import timedelta
 import requests as http_requests
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q, Count
 from django.utils import timezone
@@ -2361,7 +2362,11 @@ class MyTeamView(APIView):
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
     import re
-    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    # Also strips &%#+;= — safe as literal filesystem chars, but they break Supabase's
+    # signed-URL scheme (an "&" in the path produced a token whose embedded path didn't
+    # match the actual object key, failing signature verification on every open —
+    # confirmed against a real booking, "PARAG & SAHIL BHAI").
+    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
     proj = san(b.project.name if b.project_id else 'Project')
     # EOI bookings have no plot — fall back to the EOI code held in plot_numbers.
     plot = san(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
@@ -2412,6 +2417,43 @@ class BookingListCreateView(APIView):
     def post(self, request):
         company = _resolve_company(request)
         data = request.data
+
+        # Reject an oversized signed LOI before any booking/lead/plot side effects run —
+        # base64 inflates the raw file by ~1/3, so compare against the encoded length.
+        lf_check = data.get('loi_file')
+        if isinstance(lf_check, dict) and lf_check.get('data'):
+            max_b64_len = int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3)
+            if len(lf_check['data']) > max_b64_len:
+                return Response(
+                    {'detail': f'File too large (max {settings.MAX_UPLOAD_FILE_MB} MB).'},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+
+        # Guard against duplicate submissions: a plot shouldn't have more than one
+        # active (pending/approved) booking at a time. Traced real production
+        # duplicates (same client/plot/amount, 10-30s apart) to a user resubmitting
+        # after an unclear success state — this is the authoritative backend check
+        # regardless of the exact client-side cause. Revisions (revision_of)
+        # legitimately reuse the same plot, so they're excluded, as are EOIs
+        # (no real plot reserved yet).
+        if not data.get('revision_of') and not data.get('eoi'):
+            requested_plot_ids = set()
+            raw_plot_ids = data.get('plot_ids')
+            if isinstance(raw_plot_ids, list) and raw_plot_ids:
+                requested_plot_ids = {int(x) for x in raw_plot_ids if str(x).isdigit()}
+            elif data.get('plot') and str(data['plot']).isdigit():
+                requested_plot_ids = {int(data['plot'])}
+            if requested_plot_ids:
+                active = Booking.objects.filter(company=company, status__in=['pending', 'approved'])
+                for b in active.only('id', 'plot_id', 'plot_ids', 'client_name', 'status'):
+                    b_plot_ids = set(b.plot_ids or [])
+                    if b.plot_id:
+                        b_plot_ids.add(b.plot_id)
+                    if b_plot_ids & requested_plot_ids:
+                        return Response(
+                            {'detail': f'This plot already has a {b.status} booking for {b.client_name} (#{b.id}).'},
+                            status=status.HTTP_409_CONFLICT,
+                        )
 
         # Resolve or create the lead (Book Unit flow types a new client; Record Closure
         # passes an existing lead).
@@ -2748,6 +2790,12 @@ class BookingLOIUrlView(APIView):
         return Response({'url': url})
 
 
+# Largest media file accepted by MediaUploadView. Architects' floor-plan PDFs run
+# well past the old 25 MB. Keep the web/app pickers' own limits in step with this —
+# they check client-side purely to fail fast before the upload starts.
+MEDIA_UPLOAD_MAX_MB = 100
+
+
 class MediaUploadView(APIView):
     """Authenticated media upload to the public erp-media bucket via the service-role
     key. Lets the frontend stop using the anon key for writes (so anon INSERT can be
@@ -2760,8 +2808,8 @@ class MediaUploadView(APIView):
         f = request.FILES.get('file')
         if not f:
             return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
-        if f.size and f.size > 25 * 1024 * 1024:
-            return Response({'detail': 'File too large (max 25 MB).'}, status=status.HTTP_400_BAD_REQUEST)
+        if f.size and f.size > MEDIA_UPLOAD_MAX_MB * 1024 * 1024:
+            return Response({'detail': f'File too large (max {MEDIA_UPLOAD_MAX_MB} MB).'}, status=status.HTTP_400_BAD_REQUEST)
         folder = (request.data.get('folder') or 'erp/media').strip('/')
         ext = (f.name.rsplit('.', 1)[-1].lower() if '.' in (f.name or '') else 'bin')[:10]
         rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
