@@ -104,6 +104,27 @@ class Lead(models.Model):
         return self.name
 
 
+class LeadStatusHistory(models.Model):
+    """Per-lead activity timeline — mirrors sales.LeadStatusHistory exactly,
+    trimmed to the fields Club 1000's simpler single-assignee Lead actually has
+    (no telecaller/STM split, no site visits/closures)."""
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='history')
+    changed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # Free-text event-type discriminator, not choices — observed values: 'created',
+    # 'status', 'assigned_to'.
+    field_changed = models.CharField(max_length=50)
+    old_value = models.CharField(max_length=100, blank=True)
+    new_value = models.CharField(max_length=100, blank=True)
+    remarks = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.lead.name} - {self.field_changed}'
+
+
 class FollowUp(models.Model):
     """Scheduled follow-up on a Club 1000 Lead — mirrors sales.FollowUp's shape,
     but its own model since that one's FK is CASCADE-bound to sales.Lead."""
@@ -113,7 +134,7 @@ class FollowUp(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=FOLLOWUP_STATUS, default='pending')
     remarks = models.TextField(blank=True)
-    outcome = models.CharField(max_length=100, blank=True)
+    outcome = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -132,13 +153,15 @@ class Scheme(models.Model):
     )
     name = models.CharField(max_length=100)
     tenure_months = models.PositiveIntegerField()
-    fixed_return_pct = models.DecimalField(max_digits=6, decimal_places=2)
-    loyalty_benefit_pct = models.DecimalField(max_digits=6, decimal_places=2, default=0)
-    total_return_pct = models.DecimalField(max_digits=6, decimal_places=2)
     min_ticket_size = models.DecimalField(max_digits=14, decimal_places=2)
     # Which interest-payout cadences a manager allows for this scheme (checked at
     # scheme-creation time) — investors added under it can only pick from this set.
     interest_payout_options = models.JSONField(default=list)
+    # Each selected interest_payout_options entry gets its OWN annual return %,
+    # e.g. {"quarterly": "15.00", "maturity": "18.00"} — a scheme's quarterly
+    # and maturity investors are legitimately different products with
+    # different rates, not one flat rate stretched across every cadence.
+    payout_rates = models.JSONField(default=dict, blank=True)
     # Manager user IDs who approve investors submitted under THIS scheme
     # (admin-selected) — mirrors sales.Project.booking_approvers exactly.
     investor_approvers = models.JSONField(default=list, blank=True)
@@ -157,10 +180,9 @@ class Scheme(models.Model):
     def __str__(self):
         return self.name
 
-    def save(self, *args, **kwargs):
-        if self.total_return_pct is None:
-            self.total_return_pct = (self.fixed_return_pct or 0) + (self.loyalty_benefit_pct or 0)
-        super().save(*args, **kwargs)
+    def rate_for(self, frequency):
+        """The scheme's annual return % for one specific payout cadence."""
+        return self.payout_rates.get(frequency)
 
 
 class Investor(models.Model):
@@ -169,6 +191,7 @@ class Investor(models.Model):
         related_name='club1000_investors', null=True, blank=True,
     )
     scheme = models.ForeignKey(Scheme, on_delete=models.PROTECT, related_name='investors')
+    source = models.CharField(max_length=20, choices=LEAD_SOURCE_CHOICES, default='referral')
     reference_name = models.CharField(max_length=150, blank=True)
     reference_phone = models.CharField(max_length=20, blank=True)
     name = models.CharField(max_length=150)
@@ -202,6 +225,24 @@ class Investor(models.Model):
     security = models.CharField(max_length=200, blank=True)
     loi_document = models.FileField(max_length=300, null=True, blank=True)
     loi_no = models.CharField(max_length=50, blank=True)
+    # Revision flow ("Revise LOI") — mirrors sales.Booking's revision_no, but since
+    # Investor (unlike Booking→Closure) IS the final record, a revision updates
+    # THIS row in place rather than creating a new one (a new row would double-count
+    # the payout schedule and referral reward). Proposed new terms + the newly
+    # signed LOI are held in the pending_* fields below and only applied to the
+    # live fields on approval (see InvestorActionView) — a rejected revision
+    # leaves the original terms and loi_document completely untouched.
+    revision_no = models.IntegerField(default=0)
+    pending_revision = models.JSONField(null=True, blank=True)
+    pending_loi_document = models.FileField(max_length=300, null=True, blank=True)
+    # Which kind of proposed change pending_revision holds — a plain "Revise LOI"
+    # edit (terms change, dates untouched) or a maturity "Renew" (investment_date
+    # resets to the renewal date, a new maturity_date is computed, and the
+    # referral reward is forced to REINVESTMENT_REFERRAL_REWARD_PCT). Read by
+    # InvestorActionView.approve to decide how to apply pending_revision.
+    pending_revision_type = models.CharField(
+        max_length=10, choices=[('revise', 'Revise'), ('renew', 'Renew')], default='revise',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -213,6 +254,12 @@ class Investor(models.Model):
 
     def __str__(self):
         return f'{self.name} ({self.scheme.name})'
+
+    def is_matured(self):
+        """Past its maturity date and still sitting active — i.e. due for the
+        investor to choose Renew or Payout. Computed on the fly (no scheduled
+        job ever flips `status` to 'matured') so it's always accurate."""
+        return self.status == 'active' and bool(self.maturity_date) and self.maturity_date <= date.today()
 
     def save(self, *args, **kwargs):
         if not self.maturity_date and self.investment_date and self.scheme_id:
@@ -239,24 +286,31 @@ class Payout(models.Model):
         return f'{self.investor.name} - {self.payout_type} due {self.due_date}'
 
 
-REFERRAL_REWARD_PCT = Decimal('0.5')              # referred person's 1st (approved) investment
-REINVESTMENT_REFERRAL_REWARD_PCT = Decimal('0.25')  # every approved investment after their 1st
+REFERRAL_REWARD_PCT = Decimal('0.5')                # a new investment (maiden or an additional one made before an existing investment matures)
+REINVESTMENT_REFERRAL_REWARD_PCT = Decimal('0.25')  # renewing an investment at maturity (upgrade or downgrade amount)
 
 
 class ReferralReward(models.Model):
     """Owed to whoever referred this investor (identified by reference_phone):
-    0.5% of amount_invested on the referred person's first approved investment,
-    0.25% on every one after — for as long as they keep investing. Tiering is
-    computed at approval time in InvestorActionView by matching the investor's
-    OWN phone number across their approved Investor rows (one row per
-    investment); the reward always attributes to the ORIGINAL referrer found on
-    that person's first approved investment, even if a later submission's
-    reference fields are blank or different. One row per Investor (investment)
-    — mirrors Payout's pending/paid lifecycle."""
-    investor = models.OneToOneField(Investor, on_delete=models.CASCADE, related_name='referral_reward')
+    0.5% of the invested amount on a new investment (this person's first, or
+    any additional one made before an existing investment of theirs matures),
+    0.25% of the renewed amount when they renew a matured investment instead
+    of taking a payout. Computed at approval time in InvestorActionView, using
+    whichever rate applies to that specific approval — a new-investment
+    approval or a "Renew" approval each create a fresh reward row (FK, not
+    OneToOne: a single Investor row can earn a reward more than once over its
+    life as it's renewed at successive maturities); a plain "Revise LOI" edit
+    just rescales the most recent still-pending reward's amount at ITS
+    already-locked-in rate, never changing the rate itself. Mirrors Payout's
+    pending/paid lifecycle."""
+    investor = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name='referral_rewards')
     reference_name = models.CharField(max_length=150)
     reference_phone = models.CharField(max_length=20)
     amount = EncryptedDecimalField(max_digits=14, decimal_places=2)
+    # The % rate locked in for THIS reward at creation time (0.5 for a new
+    # investment, 0.25 for a renewal) — kept so a later plain Revise can
+    # rescale `amount` off a changed amount_invested without re-deriving tier.
+    pct = models.DecimalField(max_digits=5, decimal_places=2, default=REFERRAL_REWARD_PCT)
     status = models.CharField(max_length=10, choices=PAYOUT_STATUS_CHOICES, default='pending')
     paid_date = models.DateField(null=True, blank=True)
     paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
