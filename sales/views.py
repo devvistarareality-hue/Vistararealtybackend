@@ -2362,7 +2362,11 @@ class MyTeamView(APIView):
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
     import re
-    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    # Also strips &%#+;= — safe as literal filesystem chars, but they break Supabase's
+    # signed-URL scheme (an "&" in the path produced a token whose embedded path didn't
+    # match the actual object key, failing signature verification on every open —
+    # confirmed against a real booking, "PARAG & SAHIL BHAI").
+    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
     proj = san(b.project.name if b.project_id else 'Project')
     # EOI bookings have no plot — fall back to the EOI code held in plot_numbers.
     plot = san(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
