@@ -10,11 +10,11 @@ from rest_framework.permissions import IsAuthenticated
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
-from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT
+from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory, REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT
 from .serializers import (
     SchemeSerializer, InvestorListSerializer,
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
-    LeadListSerializer, LeadCreateSerializer, FollowUpSerializer,
+    LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
 from .services import generate_payout_schedule, normalize_phone
 
@@ -70,6 +70,14 @@ class StatsView(APIView):
         pending_amount = sum((p.amount_due or Decimal('0') for p in pending), Decimal('0'))
         paid_amount = sum((p.amount_due or Decimal('0') for p in paid), Decimal('0'))
 
+        leads = scope_leads_to_role(_company_filtered(Lead.objects.all(), request), request.user)
+        if date_from:
+            leads = leads.filter(lead_date__gte=date_from)
+        if date_to:
+            leads = leads.filter(lead_date__lte=date_to)
+        leads_count = leads.count()
+        converted_count = leads.filter(status='converted').count()
+
         data = {
             'total_invested': total_invested,
             'investor_count': investors.count(),
@@ -78,6 +86,8 @@ class StatsView(APIView):
             'paid_payout_count': paid.count(),
             'paid_payout_amount': paid_amount,
             'by_scheme': list(by_scheme.values()),
+            'leads_count': leads_count,
+            'converted_count': converted_count,
         }
         if manager:
             data['active_scheme_count'] = _company_filtered(Scheme.objects.filter(is_active=True), request).count()
@@ -153,6 +163,25 @@ class ReferenceSuggestionsView(APIView):
         return Response(list(seen.values()))
 
 
+class Club1000UsersView(APIView):
+    """Users eligible for Club 1000 Lead assignment — anyone with Club 1000
+    access at all (manager or plain module access), scoped via
+    has_club1000_access. Mirrors sales.TelecallerListView's role for this
+    module, but Club 1000 has no telecaller/STM/CP split — it's just "has
+    access or not" — so no designation-based sub-filtering is needed."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        users = User.objects.filter(company=request.user.company, is_active=True).order_by('name')
+        data = [
+            {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation}
+            for u in users if has_club1000_access(u)
+        ]
+        return Response(data)
+
+
 class InvestorListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -179,6 +208,12 @@ class InvestorListCreateView(APIView):
             # Default view excludes rejected investors — they only show up under
             # an explicit ?approval_status=rejected (or =all) filter.
             qs = qs.exclude(approval_status='rejected')
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search)
+                | Q(loi_no__icontains=search)
+            )
         return Response(InvestorListSerializer(qs.order_by('-created_at'), many=True).data)
 
     def post(self, request):
@@ -203,7 +238,7 @@ class InvestorListCreateView(APIView):
         )
         total_return_pct = ser.validated_data.get('total_return_pct')
         if total_return_pct is None:
-            total_return_pct = scheme.total_return_pct
+            total_return_pct = scheme.rate_for(interest_payout) or 0
 
         # Canonicalize the reference by phone number — free-typed names drift
         # ("chinmay" vs "Chinmay"), but a phone number is stable. If this phone
@@ -349,6 +384,27 @@ class InvestorRedeemView(APIView):
         })
 
 
+class InvestorMaturityPayoutView(APIView):
+    """A matured investor who doesn't want to renew takes their Payout instead
+    — an instant manager action (no approval queue, mirrors the immediacy of
+    InvestorRedeemView) that just closes out the investment. The already-
+    scheduled maturity Payout row is marked paid separately, via the Payouts
+    screen — this view only flips the investor's own status."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not is_club1000_manager(request.user):
+            return _no_permission()
+        investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not investor.is_matured():
+            return Response({'detail': 'Investor has not matured yet.'}, status=status.HTTP_400_BAD_REQUEST)
+        investor.status = 'redeemed'
+        investor.save(update_fields=['status'])
+        return Response(InvestorListSerializer(investor).data)
+
+
 class PayoutListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -387,9 +443,16 @@ class ReferralRewardListView(APIView):
     def get(self, request):
         if not has_club1000_access(request.user):
             return _no_access()
-        qs = _company_filtered(ReferralReward.objects.select_related('investor'), request, field='investor__company')
+        qs = _company_filtered(ReferralReward.objects.select_related('investor', 'investor__lead'), request, field='investor__company')
         if not is_club1000_manager(request.user):
-            qs = qs.filter(investor__added_by=request.user)
+            # A referral reward belongs to whoever owns the CLOSURE — i.e. the
+            # Lead that converted into this investment — not whoever happened
+            # to click "Add Investor". Falls back to added_by only when there's
+            # no lead at all (or the lead has no assignee) to attribute to.
+            no_lead_owner = Q(investor__lead__isnull=True) | Q(investor__lead__assigned_to__isnull=True)
+            qs = qs.filter(
+                Q(investor__lead__assigned_to=request.user) | (no_lead_owner & Q(investor__added_by=request.user))
+            )
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         return Response(ReferralRewardSerializer(qs, many=True).data)
@@ -443,13 +506,23 @@ class LeadListCreateView(APIView):
     def post(self, request):
         if not has_club1000_access(request.user):
             return _no_access()
-        ser = LeadCreateSerializer(data=request.data)
+        data = request.data
+        # Only managers/admins may hand a lead to someone else at creation —
+        # mirrors the Add Lead form, which hides this control for anyone else.
+        if not is_club1000_manager(request.user) and 'assigned_to' in data:
+            data = {**data}
+            data.pop('assigned_to', None)
+        ser = LeadCreateSerializer(data=data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         defaults = {'company': request.user.company, 'created_by': request.user}
         if not ser.validated_data.get('assigned_to'):
             defaults['assigned_to'] = request.user
         lead = ser.save(**defaults)
+        LeadStatusHistory.objects.create(
+            lead=lead, changed_by=request.user, field_changed='created',
+            new_value=lead.get_source_display(), remarks='Lead created',
+        )
         return Response(LeadListSerializer(lead).data, status=status.HTTP_201_CREATED)
 
 
@@ -469,7 +542,11 @@ class LeadDetailView(APIView):
         lead = self._get(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(LeadListSerializer(lead).data)
+        data = LeadListSerializer(lead).data
+        recent = list(lead.history.order_by('-created_at', '-id')[:30])
+        recent.reverse()  # oldest → newest for a top-to-bottom timeline
+        data['history'] = LeadStatusHistorySerializer(recent, many=True).data
+        return Response(data)
 
     def patch(self, request, pk):
         if not has_club1000_access(request.user):
@@ -477,7 +554,16 @@ class LeadDetailView(APIView):
         lead = self._get(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        ser = LeadListSerializer(lead, data=request.data, partial=True)
+        old_status = lead.status
+        old_assigned_id = lead.assigned_to_id
+        old_assigned_name = lead.assigned_to.name if lead.assigned_to_id else ''
+        data = request.data
+        # Only managers/admins may reassign a lead — mirrors the detail sheet,
+        # which shows assignment as read-only for anyone else.
+        if not is_club1000_manager(request.user) and 'assigned_to' in data:
+            data = {**data}
+            data.pop('assigned_to', None)
+        ser = LeadListSerializer(lead, data=data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
@@ -485,6 +571,26 @@ class LeadDetailView(APIView):
         if lead.status in ('not_interested', 'lost', 'converted') and lead.next_follow_up_date:
             lead.next_follow_up_date = None
             lead.save(update_fields=['next_follow_up_date'])
+        history_entries = []
+        if old_status != lead.status:
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='status', old_value=old_status, new_value=lead.status,
+            ))
+        if old_assigned_id != lead.assigned_to_id:
+            new_assigned_name = lead.assigned_to.name if lead.assigned_to_id else ''
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='assigned_to', old_value=old_assigned_name, new_value=new_assigned_name,
+            ))
+            # Reassigning the lead hands off its still-open follow-ups too — a
+            # completed/missed one stays on whoever actually did it (historical
+            # record), but a not-yet-actioned one is still-open work that now
+            # belongs to the new assignee.
+            if lead.assigned_to_id:
+                lead.follow_ups.filter(status__in=['pending', 'rescheduled']).update(assigned_to_id=lead.assigned_to_id)
+        if history_entries:
+            LeadStatusHistory.objects.bulk_create(history_entries)
         return Response(LeadListSerializer(lead).data)
 
     def delete(self, request, pk):
@@ -581,6 +687,31 @@ def _investor_loi_path(investor):
     return f'Club1000/{scheme_name}/{client} - {loi_no}/LOI.pdf'
 
 
+def _investor_pending_loi_path(investor):
+    """Storage path for a proposed revision's newly signed LOI — kept distinct
+    from the live loi_document so a rejected revision never touches the
+    original signed file."""
+    import re
+    san = lambda s: (re.sub(r'[\\/:*?"<>|]+', '', str(s or '')).strip() or 'NA')
+    scheme_name = san(investor.scheme.name)
+    client = san(investor.name)
+    loi_no = san(investor.loi_no)
+    return f'Club1000/{scheme_name}/{client} - {loi_no}/LOI_R{investor.revision_no}.pdf'
+
+
+def _investor_visibility_qs(request):
+    """Investor rows this user may view/act on — mirrors
+    InvestorListCreateView.get's scoping exactly (own + scheme-approver)."""
+    qs = _company_filtered(Investor.objects.select_related('scheme', 'added_by'), request)
+    if not is_club1000_manager(request.user):
+        approver_scheme_ids = _scheme_approver_ids(request.user, request.user.company)
+        if approver_scheme_ids:
+            qs = qs.filter(Q(added_by=request.user) | Q(scheme_id__in=approver_scheme_ids))
+        else:
+            qs = qs.filter(added_by=request.user)
+    return qs
+
+
 class InvestorNextLoiNoView(APIView):
     """Preview the next per-scheme LOI number before the investor even exists,
     so the pre-submit downloaded PDF shows the real value — mirrors
@@ -634,23 +765,6 @@ def _notify_investor_approvers(company, investor, submitter):
         pass
 
 
-def _first_approved_investment(investor):
-    """The earliest OTHER approved Investor row for this same person (matched by
-    their own phone number, normalized) in this company — i.e. their first
-    approved investment, if this one isn't it. None if this IS their first (or
-    only) approved investment."""
-    own_phone = normalize_phone(investor.phone)
-    if not own_phone:
-        return None
-    candidates = Investor.objects.filter(
-        company=investor.company, approval_status='approved',
-    ).exclude(pk=investor.pk).order_by('created_at').only('id', 'phone', 'reference_name', 'reference_phone')
-    for cand in candidates:
-        if normalize_phone(cand.phone) == own_phone:
-            return cand
-    return None
-
-
 class InvestorActionView(APIView):
     """Approve / reject a pending investor (approver = a Club 1000 manager)."""
     permission_classes = [IsAuthenticated]
@@ -669,50 +783,248 @@ class InvestorActionView(APIView):
 
         from notifications import notify
 
+        # A "revision" approval/rejection is one with proposed changes staged in
+        # pending_revision (via InvestorReviseView or InvestorRenewView) —
+        # distinct from an investor's maiden (first-ever) approval. Its
+        # pending_revision_type tells apart a plain terms edit ('revise') from
+        # a maturity rollover ('renew') — they're applied differently below.
+        is_revision = bool(investor.pending_revision)
+        revision_type = investor.pending_revision_type if is_revision else None
+        is_renewal = revision_type == 'renew'
+
         if action == 'approve':
-            investor.approval_status = 'approved'
-            investor.status = 'active'
-            investor.save(update_fields=['approval_status', 'status', 'updated_at'])
-            # Now — and only now — run the three deferred side effects.
-            if investor.lead_id:
-                Lead.objects.filter(pk=investor.lead_id).update(status='converted', next_follow_up_date=None)
-            generate_payout_schedule(investor, custom_entries=investor.pending_payout_schedule)
-            # Tiered referral reward: 0.5% on this person's first approved
-            # investment, 0.25% on every one after — always attributed to the
-            # ORIGINAL referrer (from their first approved investment), even if
-            # this submission's own reference fields are blank or different.
-            first_investment = _first_approved_investment(investor)
-            if first_investment:
-                ref_name, ref_phone, pct = first_investment.reference_name, first_investment.reference_phone, REINVESTMENT_REFERRAL_REWARD_PCT
+            if is_revision:
+                pr = investor.pending_revision or {}
+                if 'amount_invested' in pr:
+                    investor.amount_invested = Decimal(str(pr['amount_invested']))
+                if 'total_return_pct' in pr:
+                    investor.total_return_pct = Decimal(str(pr['total_return_pct']))
+                for f in ('interest_payout', 'security', 'notes'):
+                    if f in pr:
+                        setattr(investor, f, pr[f])
+                update_fields = [
+                    'amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes',
+                    'loi_document', 'pending_loi_document', 'pending_revision', 'pending_revision_type',
+                    'approval_status', 'updated_at',
+                ]
+                if is_renewal:
+                    # A renewal restarts the investment term from the renewal
+                    # date — same row, fresh maturity_date, back to 'active'
+                    # even if it had drifted to 'matured' in the meantime.
+                    try:
+                        renewal_date = date.fromisoformat(str(pr['investment_date'])) if 'investment_date' in pr else date.today()
+                    except (ValueError, TypeError):
+                        renewal_date = date.today()
+                    investor.investment_date = renewal_date
+                    investor.maturity_date = renewal_date + relativedelta(months=investor.scheme.tenure_months)
+                    investor.status = 'active'
+                    update_fields += ['investment_date', 'maturity_date', 'status']
+                if investor.loi_document:
+                    investor.loi_document.delete(save=False)
+                if investor.pending_loi_document:
+                    investor.loi_document.name = investor.pending_loi_document.name
+                    investor.pending_loi_document = None
+                payout_schedule = pr.get('payout_schedule')
+                investor.pending_revision = None
+                investor.pending_revision_type = 'revise'
+                investor.approval_status = 'approved'
+                investor.save(update_fields=update_fields)
+                # Regenerate the payout schedule from the revised terms — only
+                # still-pending entries; anything already paid is left untouched.
+                Payout.objects.filter(investor=investor, status='pending').delete()
+                generate_payout_schedule(investor, custom_entries=payout_schedule)
             else:
-                ref_name, ref_phone, pct = investor.reference_name, investor.reference_phone, REFERRAL_REWARD_PCT
-            if ref_phone:
-                ReferralReward.objects.create(
-                    investor=investor,
-                    reference_name=ref_name,
-                    reference_phone=ref_phone,
-                    amount=(investor.amount_invested * pct / Decimal('100')).quantize(Decimal('0.01')),
-                )
-            investor.pending_payout_schedule = None
-            investor.save(update_fields=['pending_payout_schedule'])
+                investor.approval_status = 'approved'
+                investor.status = 'active'
+                investor.save(update_fields=['approval_status', 'status', 'updated_at'])
+                # Now — and only now — run the three deferred side effects.
+                if investor.lead_id:
+                    old_lead_status = investor.lead.status
+                    Lead.objects.filter(pk=investor.lead_id).update(status='converted', next_follow_up_date=None)
+                    if old_lead_status != 'converted':
+                        LeadStatusHistory.objects.create(
+                            lead_id=investor.lead_id, changed_by=request.user,
+                            field_changed='status', old_value=old_lead_status, new_value='converted',
+                            remarks='Converted via Investor approval',
+                        )
+                generate_payout_schedule(investor, custom_entries=investor.pending_payout_schedule)
+                investor.pending_payout_schedule = None
+                investor.save(update_fields=['pending_payout_schedule'])
+
+            # Referral reward: 0.5% of the amount on a new investment (this
+            # approval isn't a revision at all — maiden approval), 0.25% of
+            # the renewed amount on a Renew approval — each is a fresh
+            # commission-worthy event, so it creates its OWN reward row (a
+            # single Investor can be renewed more than once over its life). A
+            # plain Revise, by contrast, doesn't create anything new — it just
+            # rescales the most recent still-pending reward at ITS own
+            # already-locked-in rate, leaving a paid one alone.
+            ref_name, ref_phone = investor.reference_name, investor.reference_phone
+            if not is_revision or is_renewal:
+                pct = REINVESTMENT_REFERRAL_REWARD_PCT if is_renewal else REFERRAL_REWARD_PCT
+                if ref_phone:
+                    new_amount = (investor.amount_invested * pct / Decimal('100')).quantize(Decimal('0.01'))
+                    ReferralReward.objects.create(
+                        investor=investor, reference_name=ref_name, reference_phone=ref_phone, amount=new_amount, pct=pct,
+                    )
+            elif ref_phone:
+                existing_reward = investor.referral_rewards.filter(status='pending').order_by('-created_at').first()
+                if existing_reward:
+                    new_amount = (investor.amount_invested * existing_reward.pct / Decimal('100')).quantize(Decimal('0.01'))
+                    existing_reward.amount = new_amount
+                    existing_reward.save(update_fields=['amount'])
             try:
-                notify(investor.added_by, 'investor_approved', 'Investor approved',
+                approved_label = 'Investor renewal approved' if is_renewal else ('Investor revision approved' if is_revision else 'Investor approved')
+                notify(investor.added_by, 'investor_approved', approved_label,
                        f'{investor.name} · {investor.scheme.name if investor.scheme_id else ""} was approved.',
                        {'investor_id': investor.id})
             except Exception:
                 pass
         else:
-            investor.approval_status = 'rejected'
-            if investor.loi_document:
-                investor.loi_document.delete(save=False)
-            investor.save(update_fields=['approval_status', 'loi_document', 'updated_at'])
+            if is_revision:
+                # Reject the PROPOSED revision/renewal only — the original
+                # approved terms and signed LOI are completely untouched.
+                if investor.pending_loi_document:
+                    investor.pending_loi_document.delete(save=False)
+                investor.pending_revision = None
+                investor.pending_revision_type = 'revise'
+                investor.approval_status = 'approved'
+                investor.save(update_fields=['pending_revision', 'pending_revision_type', 'pending_loi_document', 'approval_status', 'updated_at'])
+            else:
+                investor.approval_status = 'rejected'
+                if investor.loi_document:
+                    investor.loi_document.delete(save=False)
+                investor.save(update_fields=['approval_status', 'loi_document', 'updated_at'])
             try:
-                notify(investor.added_by, 'investor_rejected', 'Investor rejected',
+                rejected_label = 'Investor renewal rejected' if is_renewal else ('Investor revision rejected' if is_revision else 'Investor rejected')
+                notify(investor.added_by, 'investor_rejected', rejected_label,
                        f'{investor.name} · {investor.scheme.name if investor.scheme_id else ""} was rejected.',
                        {'investor_id': investor.id})
             except Exception:
                 pass
         return Response(InvestorListSerializer(investor).data)
+
+
+class InvestorReviseView(APIView):
+    """Propose revised terms + a newly signed LOI for an already-approved
+    investor ("Revise LOI") — mirrors sales' Booking revision flow, adapted to
+    Club 1000's single-record model: rather than creating a new row (which
+    would double-count the payout schedule and referral reward), the SAME
+    investor row re-enters the approval queue with its proposed changes held
+    in pending_revision/pending_loi_document until InvestorActionView applies
+    or discards them."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        investor = _investor_visibility_qs(request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if investor.approval_status != 'approved':
+            return Response({'detail': 'Only an approved investor can be revised.'}, status=status.HTTP_400_BAD_REQUEST)
+        loi = request.data.get('loi_file')
+        if not isinstance(loi, dict) or not loi.get('data'):
+            return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pending = {}
+        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes'):
+            if f in request.data:
+                pending[f] = request.data[f]
+        try:
+            amount = Decimal(str(pending.get('amount_invested', investor.amount_invested)))
+        except Exception:
+            return Response({'detail': 'Invalid amount_invested.'}, status=status.HTTP_400_BAD_REQUEST)
+        if amount < investor.scheme.min_ticket_size:
+            return Response(
+                {'detail': f'Minimum ticket size for {investor.scheme.name} is {investor.scheme.min_ticket_size}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        payout_schedule = request.data.get('payout_schedule')
+        if isinstance(payout_schedule, list):
+            pending['payout_schedule'] = payout_schedule
+
+        investor.pending_revision = pending
+        investor.pending_revision_type = 'revise'
+        investor.revision_no += 1
+        investor.approval_status = 'pending'
+        import base64
+        from django.core.files.base import ContentFile
+        try:
+            investor.pending_loi_document.save(
+                _investor_pending_loi_path(investor), ContentFile(base64.b64decode(loi['data'])), save=False,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Investor pending LOI save failed for %s', investor.id)
+            return Response({'detail': 'Could not save the signed LOI.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        investor.save(update_fields=['pending_revision', 'pending_revision_type', 'revision_no', 'approval_status', 'pending_loi_document', 'updated_at'])
+        _notify_investor_approvers(investor.company, investor, request.user)
+        return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
+
+
+class InvestorRenewView(APIView):
+    """Propose renewed terms + a newly signed LOI for a MATURED investor
+    ("Renew" at maturity) — same staged pending_revision/pending_loi_document
+    mechanic as InvestorReviseView (so a rejected renewal leaves the original
+    matured terms and LOI untouched), but distinguished via
+    pending_revision_type='renew' so InvestorActionView.approve knows to also
+    reset investment_date/maturity_date and apply the renewal referral-reward
+    rate (REINVESTMENT_REFERRAL_REWARD_PCT) instead of a plain rescale."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        investor = _investor_visibility_qs(request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not investor.is_matured():
+            return Response({'detail': 'Only a matured investor can be renewed.'}, status=status.HTTP_400_BAD_REQUEST)
+        loi = request.data.get('loi_file')
+        if not isinstance(loi, dict) or not loi.get('data'):
+            return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pending = {}
+        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes'):
+            if f in request.data:
+                pending[f] = request.data[f]
+        try:
+            amount = Decimal(str(pending.get('amount_invested', investor.amount_invested)))
+        except Exception:
+            return Response({'detail': 'Invalid amount_invested.'}, status=status.HTTP_400_BAD_REQUEST)
+        if amount < investor.scheme.min_ticket_size:
+            return Response(
+                {'detail': f'Minimum ticket size for {investor.scheme.name} is {investor.scheme.min_ticket_size}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        renewal_date = request.data.get('investment_date') or str(date.today())
+        try:
+            date.fromisoformat(str(renewal_date))
+        except (ValueError, TypeError):
+            return Response({'detail': 'Invalid investment_date.'}, status=status.HTTP_400_BAD_REQUEST)
+        pending['investment_date'] = renewal_date
+        payout_schedule = request.data.get('payout_schedule')
+        if isinstance(payout_schedule, list):
+            pending['payout_schedule'] = payout_schedule
+
+        investor.pending_revision = pending
+        investor.pending_revision_type = 'renew'
+        investor.revision_no += 1
+        investor.approval_status = 'pending'
+        import base64
+        from django.core.files.base import ContentFile
+        try:
+            investor.pending_loi_document.save(
+                _investor_pending_loi_path(investor), ContentFile(base64.b64decode(loi['data'])), save=False,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Investor pending LOI save failed for %s', investor.id)
+            return Response({'detail': 'Could not save the signed LOI.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        investor.save(update_fields=['pending_revision', 'pending_revision_type', 'revision_no', 'approval_status', 'pending_loi_document', 'updated_at'])
+        _notify_investor_approvers(investor.company, investor, request.user)
+        return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
 
 class InvestorLoiNoView(APIView):
@@ -765,21 +1077,24 @@ class InvestorUploadLoiView(APIView):
 
 class InvestorLoiUrlView(APIView):
     """Short-lived signed URL for an investor's generated LOI PDF — mirrors
-    sales.views.BookingLOIUrlView exactly."""
+    sales.views.BookingLOIUrlView exactly. ?pending=1 serves the not-yet-approved
+    revision's newly signed LOI instead of the live one (see InvestorReviseView)."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
         investor = _company_filtered(Investor.objects.all(), request).filter(pk=pk).first()
-        if not investor or not investor.loi_document:
+        wants_pending = request.query_params.get('pending') == '1'
+        doc = investor.pending_loi_document if (investor and wants_pending) else (investor.loi_document if investor else None)
+        if not investor or not doc:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         is_scheme_approver = investor.scheme_id in _scheme_approver_ids(request.user, request.user.company)
         if not (is_club1000_manager(request.user) or investor.added_by_id == request.user.id or is_scheme_approver):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         from sales.supabase_storage import create_signed_url
-        url = create_signed_url(investor.loi_document.name, expires_in=120)
+        url = create_signed_url(doc.name, expires_in=120)
         if not url:
             try:
-                url = request.build_absolute_uri(investor.loi_document.url)
+                url = request.build_absolute_uri(doc.url)
             except Exception:
                 url = None
         if not url:
