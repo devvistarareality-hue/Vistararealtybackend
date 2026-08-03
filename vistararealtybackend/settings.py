@@ -151,6 +151,15 @@ elif SUPABASE_S3_ENDPOINT:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Signed LOIs (and similar documents) are uploaded as base64 inside a JSON body,
+# which inflates the raw file size by ~1/3 — so a 100 MB cap on the actual file
+# needs real headroom above 100 MB here, or Django rejects the request before
+# it even reaches view code. Django's own default (2.5 MB) is far too small for
+# this flow. Also raised for multipart uploads for consistency.
+MAX_UPLOAD_FILE_MB = 100
+DATA_UPLOAD_MAX_MEMORY_SIZE = 150 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 150 * 1024 * 1024
+
 # ── Django REST Framework ─────────────────────────────────────────────
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
@@ -164,6 +173,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'login': os.getenv('LOGIN_THROTTLE_RATE', '10/min'),
     },
+    'EXCEPTION_HANDLER': 'accounts.exceptions.exception_handler',
 }
 
 # ── JWT Settings ──────────────────────────────────────────────────────
