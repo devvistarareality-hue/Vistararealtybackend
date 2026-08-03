@@ -2425,6 +2425,32 @@ class BookingListCreateView(APIView):
                     status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
 
+        # Guard against duplicate submissions: a plot shouldn't have more than one
+        # active (pending/approved) booking at a time. Traced real production
+        # duplicates (same client/plot/amount, 10-30s apart) to a user resubmitting
+        # after an unclear success state — this is the authoritative backend check
+        # regardless of the exact client-side cause. Revisions (revision_of)
+        # legitimately reuse the same plot, so they're excluded, as are EOIs
+        # (no real plot reserved yet).
+        if not data.get('revision_of') and not data.get('eoi'):
+            requested_plot_ids = set()
+            raw_plot_ids = data.get('plot_ids')
+            if isinstance(raw_plot_ids, list) and raw_plot_ids:
+                requested_plot_ids = {int(x) for x in raw_plot_ids if str(x).isdigit()}
+            elif data.get('plot') and str(data['plot']).isdigit():
+                requested_plot_ids = {int(data['plot'])}
+            if requested_plot_ids:
+                active = Booking.objects.filter(company=company, status__in=['pending', 'approved'])
+                for b in active.only('id', 'plot_id', 'plot_ids', 'client_name', 'status'):
+                    b_plot_ids = set(b.plot_ids or [])
+                    if b.plot_id:
+                        b_plot_ids.add(b.plot_id)
+                    if b_plot_ids & requested_plot_ids:
+                        return Response(
+                            {'detail': f'This plot already has a {b.status} booking for {b.client_name} (#{b.id}).'},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+
         # Resolve or create the lead (Book Unit flow types a new client; Record Closure
         # passes an existing lead).
         lead_id = data.get('lead') or None
