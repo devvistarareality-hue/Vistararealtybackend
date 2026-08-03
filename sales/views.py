@@ -2,6 +2,7 @@ import logging
 import secrets
 from datetime import timedelta
 import requests as http_requests
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q, Count
 from django.utils import timezone
@@ -2412,6 +2413,17 @@ class BookingListCreateView(APIView):
     def post(self, request):
         company = _resolve_company(request)
         data = request.data
+
+        # Reject an oversized signed LOI before any booking/lead/plot side effects run —
+        # base64 inflates the raw file by ~1/3, so compare against the encoded length.
+        lf_check = data.get('loi_file')
+        if isinstance(lf_check, dict) and lf_check.get('data'):
+            max_b64_len = int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3)
+            if len(lf_check['data']) > max_b64_len:
+                return Response(
+                    {'detail': f'File too large (max {settings.MAX_UPLOAD_FILE_MB} MB).'},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
 
         # Resolve or create the lead (Book Unit flow types a new client; Record Closure
         # passes an existing lead).
