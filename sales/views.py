@@ -3301,18 +3301,33 @@ class PlotBulkCreateView(APIView):
             project = scope_to_company(Project.objects.all(), request.user).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
+        # Tower floor-builder sends the whole unit record (floor, areas, facing, price),
+        # not just a number — carry every field through instead of dropping them.
+        def _floor(v):
+            try: return int(v)
+            except (TypeError, ValueError): return None
         plots = [
             Plot(
                 project=project,
                 number=p.get('number', ''),
                 cluster_type=p.get('cluster_type', ''),
+                size=p.get('size', '') or '',
+                construction_area=p.get('construction_area', '') or '',
+                terrace_area=p.get('terrace_area', '') or '',
+                facing=p.get('facing', '') or '',
+                price=p.get('price', '') or '',
+                notes=p.get('notes', '') or '',
+                floor=_floor(p.get('floor')),
                 status='available',
             )
             for p in plots_data
             if p.get('number')
         ]
-        Plot.objects.bulk_create(plots)
-        return Response({'created': len(plots)}, status=201)
+        # Re-running the builder for one floor must not blow up on units that already
+        # exist (project+number is unique) — skip the clashes, report what landed.
+        created = Plot.objects.bulk_create(plots, ignore_conflicts=True)
+        n = Plot.objects.filter(project=project, number__in=[p.number for p in plots]).count()
+        return Response({'created': len(plots), 'existing_total': n}, status=201)
 
 
 class PlotBulkDeleteView(APIView):

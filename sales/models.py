@@ -104,6 +104,10 @@ class Project(models.Model):
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
+    # Tower projects: one entry per floor, in display order — the plan drawing a buyer
+    # sees when they pick a unit on that floor.
+    #   [{floor: 0, label: 'Ground', image_url: '…'}, {floor: 1, label: '1st Floor', …}]
+    floor_plans = models.JSONField(default=list, blank=True)
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
@@ -145,6 +149,12 @@ class Plot(models.Model):
     facing = models.CharField(max_length=50, blank=True)
     price = models.CharField(max_length=100, blank=True)
     notes = models.TextField(blank=True)
+    # ── Tower projects (Pratishtha-style: G+13, units stacked per floor) ──
+    # Plotted schemes leave `floor` NULL; a tower sets 0 for ground, 1.. upward, so
+    # units can be grouped and shown against that floor's plan.
+    floor = models.SmallIntegerField(null=True, blank=True)
+    # Some flats carry a private terrace, priced separately from the built-up area.
+    terrace_area = models.CharField(max_length=100, blank=True)
 
     class Meta:
         unique_together = ['project', 'number']
