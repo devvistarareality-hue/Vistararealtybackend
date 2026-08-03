@@ -19,7 +19,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'allow_unit_switch', 'booking_approvers',
-            'kiosk_enabled',
+            'kiosk_enabled', 'floor_wise', 'floor_plans',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 

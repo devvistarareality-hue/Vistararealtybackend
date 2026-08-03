@@ -104,6 +104,10 @@ class Project(models.Model):
     site_map_image_url = models.CharField(max_length=500, blank=True)
     site_map_zones = models.JSONField(default=list, blank=True)
     plot_type_plans = models.JSONField(default=list, blank=True)
+    # Layout mode. False (default) = a plotted scheme: a flat list of plot numbers with
+    # an interactive site map. True = a tower (Pratishtha: G+13): units are defined floor
+    # by floor, each floor carrying its own numbering run and plan drawing.
+    floor_wise = models.BooleanField(default=False)
     # Tower projects: one entry per floor, in display order — the plan drawing a buyer
     # sees when they pick a unit on that floor.
     #   [{floor: 0, label: 'Ground', image_url: '…'}, {floor: 1, label: '1st Floor', …}]
