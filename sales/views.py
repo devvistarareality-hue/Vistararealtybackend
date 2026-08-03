@@ -2748,6 +2748,12 @@ class BookingLOIUrlView(APIView):
         return Response({'url': url})
 
 
+# Largest media file accepted by MediaUploadView. Architects' floor-plan PDFs run
+# well past the old 25 MB. Keep the web/app pickers' own limits in step with this —
+# they check client-side purely to fail fast before the upload starts.
+MEDIA_UPLOAD_MAX_MB = 100
+
+
 class MediaUploadView(APIView):
     """Authenticated media upload to the public erp-media bucket via the service-role
     key. Lets the frontend stop using the anon key for writes (so anon INSERT can be
@@ -2760,8 +2766,8 @@ class MediaUploadView(APIView):
         f = request.FILES.get('file')
         if not f:
             return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
-        if f.size and f.size > 25 * 1024 * 1024:
-            return Response({'detail': 'File too large (max 25 MB).'}, status=status.HTTP_400_BAD_REQUEST)
+        if f.size and f.size > MEDIA_UPLOAD_MAX_MB * 1024 * 1024:
+            return Response({'detail': f'File too large (max {MEDIA_UPLOAD_MAX_MB} MB).'}, status=status.HTTP_400_BAD_REQUEST)
         folder = (request.data.get('folder') or 'erp/media').strip('/')
         ext = (f.name.rsplit('.', 1)[-1].lower() if '.' in (f.name or '') else 'bin')[:10]
         rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
