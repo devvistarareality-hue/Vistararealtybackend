@@ -420,6 +420,11 @@ class Booking(models.Model):
 
     booking_date = models.DateField(null=True, blank=True)
     cp_name      = models.CharField(max_length=200, blank=True)
+    # Kiosk self-booking: `stm` is the kiosk account, not the salesperson who assisted,
+    # so the staff member types their name here. Preferred over stm.name wherever a
+    # booking's STM is displayed. Named to avoid clashing with the serializer's
+    # existing stm_name (which reads stm.name).
+    manual_stm_name = models.CharField(max_length=200, blank=True)
     # max_length must be generous: the GAS-style path is Project/Plot <no> - <Client>/R<rev>_LOI_...pdf
     # and long project+client names exceed the FileField default of 100 (silently failed the DB save).
     loi_document = models.FileField(upload_to='', null=True, blank=True, max_length=300)  # path set explicitly (project/plot/rev)
