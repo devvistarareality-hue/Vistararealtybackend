@@ -46,7 +46,12 @@ class PlotSerializer(serializers.ModelSerializer):
 class BookingSerializer(serializers.ModelSerializer):
     project_name = serializers.CharField(source='project.name', read_only=True)
     plot_number  = serializers.CharField(source='plot.number', read_only=True)
-    stm_name     = serializers.CharField(source='stm.name', read_only=True)
+    # A kiosk booking's `stm` is the kiosk account, so a manually entered name wins —
+    # every existing consumer of stm_name then shows the real salesperson.
+    stm_name     = serializers.SerializerMethodField()
+
+    def get_stm_name(self, obj):
+        return obj.manual_stm_name or (obj.stm.name if obj.stm_id else None)
     # Never expose the public storage URL — only a truthy path so the UI can show
     # the button. The file itself is fetched via a short-lived signed-URL endpoint.
     loi_document = serializers.SerializerMethodField()
