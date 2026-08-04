@@ -2685,11 +2685,30 @@ def _notify_booking_approvers(company, booking, submitter):
         if not recipients and booking.stm_id:
             recipients = reporting_chain(booking.stm)
         # 3) Last resort: every manager/admin in the company (so it's never silent).
+        #    role='Admin' is included explicitly — a company admin need not be is_staff,
+        #    and without this the last resort skipped exactly the people who can always
+        #    approve.
         if not recipients:
-            recipients = list(User.objects.filter(company=company, is_active=True).filter(Q(role='Manager') | Q(is_staff=True)))
+            recipients = list(User.objects.filter(company=company, is_active=True)
+                              .filter(Q(role='Manager') | Q(role='Admin') | Q(is_staff=True)))
         # Never notify the person who submitted it; de-dup.
         sub_id = getattr(submitter, 'id', None)
         recipients = [u for u in recipients if u and u.id != sub_id]
+        # This is a request to *act*, so it must reach only people who actually can:
+        # the same authority the approve/reject endpoint enforces. Without this, the
+        # tier-2/3 fallbacks would ask a manager to approve a project they are not an
+        # approver for -- they would tap the notification and get a 403 -- and would
+        # ask non-managers, who cannot approve at all.
+        if booking.project_id:
+            recipients = [
+                u for u in recipients
+                if is_admin_or_manager(u) and _can_approve_project(u, booking.project, company)
+            ]
+            # Never let the filter silence the request entirely: if no one qualifies,
+            # fall back to the company admins, who can approve any project.
+            if not recipients:
+                recipients = [u for u in User.objects.filter(company=company, is_active=True)
+                              if _is_hard_admin(u) and u.id != sub_id]
         if not recipients:
             return
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)

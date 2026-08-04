@@ -592,6 +592,37 @@ class ProjectApproverScopeTests(APITestCase):
         self.assertEqual(res.status_code, 200)
         self.assertFalse(Closure.objects.filter(id=c.id).exists())
 
+    def test_approval_notification_only_reaches_actual_approvers(self):
+        """An 'approval needed' push is a request to act, so it must not go to someone
+        who would get a 403 on tapping it."""
+        from sales.views import _notify_booking_approvers
+        sent = []
+        with mock.patch('notifications.notify', side_effect=lambda u, *a, **k: sent.append(u.id)):
+            # Kalrav names nobody; the STM's chain leads to Sachin, who approves only
+            # Pratishtha, so he must not be asked to approve this one.
+            _notify_booking_approvers(self.co, self.b_kal, self.stm)
+        self.assertNotIn(self.sachin.id, sent)
+
+        sent.clear()
+        with mock.patch('notifications.notify', side_effect=lambda u, *a, **k: sent.append(u.id)):
+            _notify_booking_approvers(self.co, self.b_prat, self.stm)
+        self.assertIn(self.sachin.id, sent, 'the named approver must still be notified')
+
+    def test_approval_notification_is_never_silent(self):
+        """If nobody but admins can approve a project, the request must still reach
+        them rather than being filtered into silence."""
+        from sales.views import _notify_booking_approvers
+        # A project naming an approver who is not the submitter's chain, so tier-1 is
+        # the only source and the submitter is excluded from it.
+        self.kalrav.booking_approvers = [self.stm.id]   # an STM cannot approve
+        self.kalrav.save(update_fields=['booking_approvers'])
+        sent = []
+        with mock.patch('notifications.notify', side_effect=lambda u, *a, **k: sent.append(u.id)):
+            _notify_booking_approvers(self.co, self.b_kal, self.sachin)
+        self.assertIn(self.admin.id, sent, 'must fall back to a company admin, not go silent')
+        self.kalrav.booking_approvers = []
+        self.kalrav.save(update_fields=['booking_approvers'])
+
     def test_mine_still_returns_own_bookings_outside_approved_projects(self):
         """`?mine` is the user's own bookings list, not the approvals queue — scoping it
         to approver projects would hide a manager's own bookings elsewhere."""
