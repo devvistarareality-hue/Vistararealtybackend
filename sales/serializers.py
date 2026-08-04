@@ -39,7 +39,7 @@ class PlotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
-                  'facing', 'price', 'notes', 'floor', 'terrace_area']
+                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book']
         read_only_fields = ['id', 'project']
 
 
@@ -130,6 +130,7 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
 
 class FollowUpSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
+    lead_phone = serializers.CharField(source='lead.phone', read_only=True, default='')
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True)
     # Current lead status so the completion modal can pre-select it (TC or STM).
     lead_telecaller_status = serializers.CharField(source='lead.telecaller_status', read_only=True, default='')
