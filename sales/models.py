@@ -86,7 +86,10 @@ class Project(models.Model):
     location = models.CharField(max_length=200, blank=True)
     project_type = models.CharField(max_length=50, default='residential')
     # Booking pricing engine variant (mirrors the GAS "Formula Set").
-    FORMULA_SETS = [('kalrav', 'Kalrav'), ('ankhol', 'Ankhol'), ('industrial', 'Industrial')]
+    # 'pratishtha' is not a computed formula like the others — its units carry fixed,
+    # pre-agreed prices in Plot.price_book and the LOI renders those verbatim.
+    FORMULA_SETS = [('kalrav', 'Kalrav'), ('ankhol', 'Ankhol'), ('industrial', 'Industrial'),
+                    ('pratishtha', 'Pratishtha')]
     formula_set = models.CharField(max_length=20, choices=FORMULA_SETS, default='kalrav')
     allow_unit_switch = models.BooleanField(default=False)  # sq.yd ↔ sq.ft toggle (Kalrav)
     # Manager user IDs who approve bookings for THIS project (admin-selected).
@@ -159,6 +162,10 @@ class Plot(models.Model):
     floor = models.SmallIntegerField(null=True, blank=True)
     # Some flats carry a private terrace, priced separately from the built-up area.
     terrace_area = models.CharField(max_length=100, blank=True)
+    # Fixed price book for projects whose LOI is not computed from a rate formula
+    # (Pratishtha): the finished line items for this unit, rendered verbatim on the LOI.
+    # Shape depends on the unit kind — see sales/pricing/pratishtha.py.
+    price_book = models.JSONField(default=dict, blank=True)
 
     class Meta:
         unique_together = ['project', 'number']
