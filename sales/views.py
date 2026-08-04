@@ -133,6 +133,26 @@ def _approver_project_ids(user, company):
     ]
 
 
+def _can_approve_project(user, project, company):
+    """Whether `user` holds approver authority over `project`'s bookings. Two cases:
+    someone named on any project is confined to those projects (a project they don't
+    approve is off limits even if it names nobody), and someone named nowhere is
+    blocked from projects that do name approvers. Real admins are exempt.
+
+    Shared by approve/reject and cancel so the two cannot drift apart — cancel undoes
+    an approval, frees the plots and deletes the signed LOI, so it needs at least the
+    same authority as granting the approval did.
+    """
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    approver_project_ids = _approver_project_ids(user, company)
+    if approver_project_ids:
+        return project_id in approver_project_ids
+    named = (getattr(project, 'booking_approvers', None) or []) if not isinstance(project, int) else []
+    return not (named and user.id not in named)
+
+
 def can_assign_leads(user):
     """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
     else (admins/managers/Sales CRM)."""
@@ -2725,16 +2745,11 @@ class BookingActionView(APIView):
         # (a project they don't approve is off limits even if it names nobody), and
         # someone named nowhere is blocked from projects that do name approvers.
         # Real admins are exempt.
-        if not _is_hard_admin(request.user):
-            approver_project_ids = _approver_project_ids(request.user, company)
-            named = (getattr(b.project, 'booking_approvers', None) or []) if b.project_id else []
-            if (approver_project_ids and b.project_id not in approver_project_ids) or (
-                not approver_project_ids and named and request.user.id not in named
-            ):
-                return Response(
-                    {'detail': 'You are not a booking approver for this project.'},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+        if b.project_id and not _can_approve_project(request.user, b.project, company):
+            return Response(
+                {'detail': 'You are not a booking approver for this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         action = request.data.get('action')
         is_rev = b.revision_no and b.revision_no > 0
 
@@ -2892,6 +2907,11 @@ class ClosureCancelView(APIView):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
+        # ...and only for a project they actually approve. Cancelling undoes an approval,
+        # frees the plots and deletes the signed LOI, so it cannot be laxer than approving.
+        if closure.project_id and not _can_approve_project(request.user, closure.project, company):
+            return Response({'detail': 'You are not a booking approver for this project.'},
+                            status=status.HTTP_403_FORBIDDEN)
 
         # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
         notif_stm      = closure.stm

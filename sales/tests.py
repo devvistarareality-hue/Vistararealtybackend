@@ -568,6 +568,30 @@ class ProjectApproverScopeTests(APITestCase):
         self.kalrav.refresh_from_db()
         self.assertEqual(self.kalrav.booking_approvers or [], [])
 
+    def test_approver_cannot_cancel_another_projects_closure(self):
+        """Cancelling undoes an approval, frees the plots and deletes the signed LOI —
+        it must not be laxer than approving."""
+        from sales.models import Closure
+        from datetime import date
+        c = Closure.objects.create(company=self.co, project=self.kalrav, stm=self.stm,
+                                   status='booked', unit_type='Plot', unit_no='7',
+                                   client_name='C', closure_date=date.today())
+        auth(self.client, self.sachin)
+        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/')
+        self.assertEqual(res.status_code, 403)
+        self.assertTrue(Closure.objects.filter(id=c.id).exists(), 'closure must survive')
+
+    def test_approver_can_cancel_their_own_projects_closure(self):
+        from sales.models import Closure
+        from datetime import date
+        c = Closure.objects.create(company=self.co, project=self.pratishtha, stm=self.stm,
+                                   status='booked', unit_type='Flat', unit_no='101',
+                                   client_name='C', closure_date=date.today())
+        auth(self.client, self.sachin)
+        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/')
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(Closure.objects.filter(id=c.id).exists())
+
     def test_mine_still_returns_own_bookings_outside_approved_projects(self):
         """`?mine` is the user's own bookings list, not the approvals queue — scoping it
         to approver projects would hide a manager's own bookings elsewhere."""
