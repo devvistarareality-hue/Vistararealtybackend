@@ -499,6 +499,90 @@ class BookingApprovalTests(APITestCase):
         self.assertEqual(pl.status, 'available')
 
 
+class ProjectApproverScopeTests(APITestCase):
+    """Naming a manager as a project's booking approver restricts them to that project:
+    they see only its bookings in Bookings & Approvals and cannot act on any other's."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from datetime import date
+        from sales.models import Booking
+        cls.co = Company.objects.create(code='APR', name='Approver Co')
+        cls.pratishtha = Project.objects.create(company=cls.co, name='Pratishtha')
+        cls.kalrav = Project.objects.create(company=cls.co, name='Kalrav')
+        # A top-of-tree Manager: reports to nobody but has a report, so he otherwise
+        # has company-wide visibility. Naming him on one project must narrow him.
+        cls.sachin = User.objects.create(email='sachin@apr.com', company=cls.co, role='Manager',
+                                         user_code='M1', designation='Manager')
+        cls.stm = User.objects.create(email='stm@apr.com', company=cls.co, role='Sales',
+                                      user_code='S1', designation='STM', reporting_manager=cls.sachin)
+        cls.admin = User.objects.create(email='admin@apr.com', company=cls.co, role='Admin', user_code='AD')
+        cls.pratishtha.booking_approvers = [cls.sachin.id]
+        cls.pratishtha.save(update_fields=['booking_approvers'])
+
+        mk = lambda proj, num: Booking.objects.create(
+            company=cls.co, project=proj,
+            plot=Plot.objects.create(project=proj, number=num, status='hold'),
+            stm=cls.stm, status='pending', client_name='C', booking_date=date.today())
+        cls.b_prat = mk(cls.pratishtha, '101')
+        cls.b_kal = mk(cls.kalrav, '7')
+
+    def test_approver_sees_only_their_project(self):
+        auth(self.client, self.sachin)
+        res = self.client.get('/api/sales/bookings/')
+        self.assertEqual(res.status_code, 200)
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual({r['id'] for r in rows}, {self.b_prat.id},
+                         'a named approver must not see other projects\' bookings')
+
+    def test_approver_cannot_act_on_another_project(self):
+        auth(self.client, self.sachin)
+        res = self.client.post(f'/api/sales/bookings/{self.b_kal.id}/action/',
+                               {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 403)
+        self.b_kal.refresh_from_db()
+        self.assertEqual(self.b_kal.status, 'pending')
+
+    def test_approver_can_act_on_their_own_project(self):
+        auth(self.client, self.sachin)
+        res = self.client.post(f'/api/sales/bookings/{self.b_prat.id}/action/',
+                               {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.b_prat.refresh_from_db()
+        self.assertEqual(self.b_prat.status, 'sold')
+
+    def test_admin_still_sees_and_approves_everything(self):
+        auth(self.client, self.admin)
+        res = self.client.get('/api/sales/bookings/')
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual({r['id'] for r in rows}, {self.b_prat.id, self.b_kal.id})
+        res = self.client.post(f'/api/sales/bookings/{self.b_kal.id}/action/',
+                               {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 200)
+
+    def test_approver_cannot_grant_themselves_another_project(self):
+        auth(self.client, self.sachin)
+        res = self.client.patch(f'/api/sales/projects/{self.kalrav.id}/',
+                                {'booking_approvers': [self.sachin.id]}, format='json')
+        self.assertEqual(res.status_code, 403)
+        self.kalrav.refresh_from_db()
+        self.assertEqual(self.kalrav.booking_approvers or [], [])
+
+    def test_mine_still_returns_own_bookings_outside_approved_projects(self):
+        """`?mine` is the user's own bookings list, not the approvals queue — scoping it
+        to approver projects would hide a manager's own bookings elsewhere."""
+        from datetime import date
+        from sales.models import Booking
+        own = Booking.objects.create(
+            company=self.co, project=self.kalrav,
+            plot=Plot.objects.create(project=self.kalrav, number='9', status='hold'),
+            stm=self.sachin, status='pending', client_name='C', booking_date=date.today())
+        auth(self.client, self.sachin)
+        res = self.client.get('/api/sales/bookings/?mine=1')
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertIn(own.id, {r['id'] for r in rows})
+
+
 class MultiPlotBookingTests(APITestCase):
     """A booking can span multiple plots: all are reserved on create, all sold on
     approve, and plot_numbers is the comma display."""

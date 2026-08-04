@@ -117,6 +117,13 @@ def _visible_user_ids(user):
     return ids
 
 
+def _is_hard_admin(user):
+    """A real company/platform administrator, as opposed to someone who merely reaches
+    company-wide visibility through the org tree (a top-of-tree department head) or the
+    Sales admin-modules flag. Only these are exempt from per-project approver scoping."""
+    return is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
+
+
 def _approver_project_ids(user, company):
     """Ids of projects where `user` is a configured booking approver — they should
     see every booking for that project regardless of the STM's reporting chain."""
@@ -893,6 +900,17 @@ class ProjectDetailView(APIView):
     def patch(self, request, pk):
         if not is_admin_or_manager(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        # Who approves a project's bookings is an administrative setting, not a field any
+        # Manager may edit — otherwise an approver restricted to one project could simply
+        # add themselves to another and approve it. Mirrors the same gate the Approver
+        # Setup panel uses on the client (role Admin / staff / Sales admin-module).
+        if 'booking_approvers' in request.data and not (
+            _is_hard_admin(request.user) or 'Sales' in (getattr(request.user, 'admin_modules', None) or [])
+        ):
+            return Response(
+                {'detail': 'Only an administrator can change booking approvers.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             project = scope_to_company(Project.objects.all(), request.user).get(pk=pk)
         except Project.DoesNotExist:
@@ -2398,12 +2416,18 @@ class BookingListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
-        if not _sees_all_company(request.user, request):
-            approver_project_ids = _approver_project_ids(request.user, company)
-            if approver_project_ids:
-                qs = qs.filter(Q(stm__in=_visible_user_ids(request.user)) | Q(project_id__in=approver_project_ids))
-            else:
-                qs = qs.filter(stm__in=_visible_user_ids(request.user))
+        # Naming someone a project's booking approver is a narrowing statement: they
+        # review those projects and no others. It therefore takes precedence over the
+        # broad org-tree visibility a Manager may otherwise have (a top-of-tree head
+        # like Sachin sees all company data everywhere else, but approves only the
+        # projects he is named on). `?mine` is the user's own bookings list, so it is
+        # left on the normal scoping or an approver loses sight of their own bookings
+        # in projects they don't approve. Real admins are exempt entirely.
+        approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
+        if approver_project_ids and not request.query_params.get('mine'):
+            qs = qs.filter(project_id__in=approver_project_ids)
+        elif not _sees_all_company(request.user, request):
+            qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
             qs = qs.filter(stm=request.user)
         if request.query_params.get('closure'):
@@ -2695,6 +2719,22 @@ class BookingActionView(APIView):
             b = Booking.objects.get(pk=pk, company=company)
         except Booking.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Enforced here and not merely hidden in the list, or a manager could approve
+        # another project's booking straight through the API. Two cases, mirroring the
+        # list scoping above: someone named on any project is confined to those projects
+        # (a project they don't approve is off limits even if it names nobody), and
+        # someone named nowhere is blocked from projects that do name approvers.
+        # Real admins are exempt.
+        if not _is_hard_admin(request.user):
+            approver_project_ids = _approver_project_ids(request.user, company)
+            named = (getattr(b.project, 'booking_approvers', None) or []) if b.project_id else []
+            if (approver_project_ids and b.project_id not in approver_project_ids) or (
+                not approver_project_ids and named and request.user.id not in named
+            ):
+                return Response(
+                    {'detail': 'You are not a booking approver for this project.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         action = request.data.get('action')
         is_rev = b.revision_no and b.revision_no > 0
 
