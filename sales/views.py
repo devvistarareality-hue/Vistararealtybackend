@@ -45,6 +45,13 @@ def is_admin_or_manager(user):
     return user.role in ('Admin', 'Manager') or user.is_staff
 
 
+def has_sales_access(user):
+    """Admin/Manager, or a plain employee who's been granted the Sales module —
+    used for actions (like bulk lead import) that used to be manager-only but
+    shouldn't be gated tighter than "can this person use Sales at all"."""
+    return is_admin_or_manager(user) or 'Sales' in (getattr(user, 'modules', None) or [])
+
+
 def _designation(user):
     return (getattr(user, 'designation', '') or '').lower()
 
@@ -1780,13 +1787,24 @@ def _imp_dec(val):
         return None
 
 
+def _imp_purpose(val, valid):
+    """Comma/pipe/semicolon-separated purpose values ('Investment, End Use') → the
+    matching canonical option keys, dropping anything that doesn't match."""
+    if not val:
+        return []
+    import re as _re
+    parts = [p.strip().lower().replace(' ', '_') for p in _re.split(r'[,;|/]+', str(val)) if p.strip()]
+    return [p for p in parts if p in valid]
+
+
 # Canonical row keys the importer understands (the full-pipeline columns).
 IMPORT_COLUMNS = [
     'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
-    'requirement', 'budget_min', 'budget_max', 'preferred_location', 'lead_date', 'overall_status',
-    'telecaller_id', 'telecaller_status', 'telecaller_remarks',
-    'stm_id', 'stm_status', 'stm_remarks',
-    'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_id', 'sv_remarks',
+    'requirement', 'budget_min', 'budget_max', 'preferred_location', 'city', 'address', 'purpose', 'budget_bucket',
+    'lead_date', 'overall_status',
+    'telecaller_code', 'telecaller_status', 'telecaller_remarks',
+    'stm_code', 'stm_status', 'stm_remarks',
+    'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_code', 'sv_remarks',
     'closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks',
 ]
 # Header → canonical-key aliases (the per-row loop reads 'creative', not 'ad_name').
@@ -1799,6 +1817,12 @@ _IMP_ALIASES = {
     'adset': {'adset', 'adset_name', 'ad_set', 'ad_group_name', 'adgroup'},
     'creative': {'creative', 'ad_name', 'creative_name', 'ad_creative', 'advertisement_name'},
     'lead_date': {'lead_date', 'date', 'created', 'created_at', 'submission_date', 'timestamp'},
+    # Backward-compat: these columns used to hold a raw numeric id (pre-user_code
+    # rename) — a template downloaded before the rename, or a habitually-typed old
+    # header, should still auto-map instead of silently dropping the column.
+    'telecaller_code': {'telecaller_code', 'telecaller_id'},
+    'stm_code': {'stm_code', 'stm_id'},
+    'sv_referred_by_code': {'sv_referred_by_code', 'sv_referred_by_id'},
 }
 _IMP_CANON = set(IMPORT_COLUMNS) | {'creative'}
 
@@ -1849,10 +1873,10 @@ class BulkImportLeadsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if not is_admin_or_manager(request.user):
+        if not has_sales_access(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
-        from .models import LEAD_STATUS, TC_STATUS, STM_STATUS, SV_STATUS, CLOSURE_STATUS
+        from .models import LEAD_STATUS, TC_STATUS, STM_STATUS, SV_STATUS, CLOSURE_STATUS, BUDGET_BUCKETS
 
         rows       = request.data.get('leads', [])
         project_id = request.data.get('project_id')   # default project for every row
@@ -1882,15 +1906,27 @@ class BulkImportLeadsView(APIView):
         STM_ST  = {k for k, _ in STM_STATUS}
         SV_ST   = {k for k, _ in SV_STATUS}
         CL_ST   = {k for k, _ in CLOSURE_STATUS}
+        BB_ST   = {k for k, _ in BUDGET_BUCKETS}
+        PURPOSE_VALID = {'investment', 'end_use', 'other'}
         proj_by_name = {p.name.strip().lower(): p.id for p in scope_to_company(Project.objects.all(), request.user)}
         src_by_name  = {s.name.strip().lower(): s.id for s in scope_to_company(LeadSource.objects.all(), request.user)}
         uq = User.objects.filter(is_active=True)
         if company:
             uq = uq.filter(company=company)
-        valid_user_ids = set(uq.values_list('id', flat=True))
+        uq = list(uq)
+        code_to_id = {u.user_code.strip().lower(): u.id for u in uq if u.user_code}
+        valid_user_ids = {u.id for u in uq}
 
         def _uid(v):
-            i = _imp_int(v)
+            s = str(v or '').strip()
+            if not s:
+                return None
+            hit = code_to_id.get(s.lower())
+            if hit:
+                return hit
+            # Backward-compat: a file from before the user_code rename may still
+            # carry a raw numeric id in the cell (only the header changed).
+            i = _imp_int(s)
             return i if i in valid_user_ids else None
 
         imported = 0
@@ -1898,6 +1934,7 @@ class BulkImportLeadsView(APIView):
         errors = 0
         bare_new = 0
         failed = []
+        warnings = []  # non-fatal: row still imports, but a code/value didn't resolve
 
         # Build existing dup set (last-10-digits) scoped to this company — O(n) once.
         company_leads = scope_to_company(Lead.objects.all(), request.user)
@@ -1922,13 +1959,26 @@ class BulkImportLeadsView(APIView):
 
             rproj = proj_by_name.get(str(row.get('project', '')).strip().lower()) or project_id or None
             rsrc  = src_by_name.get(str(row.get('source', '')).strip().lower()) or source_id or None
-            tc_id  = _uid(row.get('telecaller_id'))
-            stm_id = _uid(row.get('stm_id'))
+            tc_id  = _uid(row.get('telecaller_code'))
+            stm_id = _uid(row.get('stm_code'))
+            sv_ref_id = _uid(row.get('sv_referred_by_code'))
+            for label, raw_val, resolved in (
+                ('Telecaller Code', row.get('telecaller_code'), tc_id),
+                ('STM Code', row.get('stm_code'), stm_id),
+                ('SV Referred By Code', row.get('sv_referred_by_code'), sv_ref_id),
+            ):
+                if str(raw_val or '').strip() and not resolved:
+                    warnings.append({'row': i + 1, 'name': name, 'field': label, 'value': str(raw_val).strip(),
+                                      'reason': "didn't match any user's code — left unassigned"})
 
             tc_status  = str(row.get('telecaller_status', '')).strip().lower()
             tc_status  = tc_status if tc_status in TC_ST else ''
             stm_status = str(row.get('stm_status', '')).strip().lower()
             stm_status = stm_status if stm_status in STM_ST else ''
+
+            budget_bucket = str(row.get('budget_bucket', '')).strip().lower().replace(' ', '_')
+            budget_bucket = budget_bucket if budget_bucket in BB_ST else ''
+            purpose = _imp_purpose(row.get('purpose'), PURPOSE_VALID)
 
             lead_dt = _imp_dt(row.get('lead_date'))
 
@@ -1969,6 +2019,10 @@ class BulkImportLeadsView(APIView):
                 preferred_location=str(row.get('preferred_location', '')).strip(),
                 budget_min=_imp_int(row.get('budget_min')),
                 budget_max=_imp_int(row.get('budget_max')),
+                city=str(row.get('city', '')).strip(),
+                address=str(row.get('address', '')).strip(),
+                purpose=purpose,
+                budget_bucket=budget_bucket,
                 status=overall,
                 telecaller_id=tc_id,
                 telecaller_status=tc_status,
@@ -1983,7 +2037,7 @@ class BulkImportLeadsView(APIView):
             meta.append({
                 'lead_dt': lead_dt,
                 'has_sv': has_sv, 'sv_sched': sv_sched, 'sv_vis': sv_vis, 'sv_stat': sv_stat or 'scheduled',
-                'sv_ref': _uid(row.get('sv_referred_by_id')), 'sv_remarks': str(row.get('sv_remarks', '')).strip(),
+                'sv_ref': sv_ref_id, 'sv_remarks': str(row.get('sv_remarks', '')).strip(),
                 'cl_date': cl_date, 'cl_status': (str(row.get('closure_status', '')).strip().lower() if str(row.get('closure_status', '')).strip().lower() in CL_ST else 'booked'),
                 'unit_no': str(row.get('unit_no', '')).strip(), 'unit_type': str(row.get('unit_type', '')).strip(),
                 'booking_amount': _imp_dec(row.get('booking_amount')), 'total_amount': _imp_dec(row.get('total_amount')),
@@ -2044,6 +2098,7 @@ class BulkImportLeadsView(APIView):
             _run_distribution(company, 'telecaller')
         return Response({
             'imported': imported, 'duplicates': duplicates, 'errors': errors, 'failed': failed,
+            'warnings': warnings,
             'site_visits': len([m for m in meta if m['has_sv']]),
             'closures': len([m for m in meta if m['cl_date']]),
         })
@@ -2057,7 +2112,7 @@ class LeadImportTemplateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not is_admin_or_manager(request.user):
+        if not has_sales_access(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
         import openpyxl
@@ -2073,34 +2128,57 @@ class LeadImportTemplateView(APIView):
         uq = User.objects.filter(is_active=True).exclude(role='Admin')
         if company:
             uq = uq.filter(company=company)
-        users = list(uq.values('id', 'name', 'designation', 'role', 'phone').order_by('name'))
+        users = list(uq.values('id', 'name', 'user_code', 'designation', 'role', 'phone').order_by('name'))
 
         cols = [
             'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
-            'requirement', 'budget_min', 'budget_max', 'preferred_location', 'lead_date', 'overall_status',
-            'telecaller_id', 'telecaller_status', 'telecaller_remarks', 'stm_id', 'stm_status', 'stm_remarks',
-            'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_id', 'sv_remarks',
+            'requirement', 'budget_min', 'budget_max', 'preferred_location', 'city', 'address', 'purpose', 'budget_bucket',
+            'lead_date', 'overall_status',
+            'telecaller_code', 'telecaller_status', 'telecaller_remarks', 'stm_code', 'stm_status', 'stm_remarks',
+            'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_code', 'sv_remarks',
             'closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks',
         ]
+        # Display-only header text — the parser normalises spaces/case back to the
+        # canonical snake_case key (see _imp_canon_key), so this is purely cosmetic.
+        HEADER_LABELS = {
+            'name': 'Name', 'phone': 'Phone', 'alt_phone': 'Alt Phone', 'email': 'Email',
+            'project': 'Project', 'source': 'Source', 'campaign': 'Campaign Name', 'adset': 'Ad Set',
+            'ad_name': 'Ad Name', 'requirement': 'Requirement', 'budget_min': 'Budget Min',
+            'budget_max': 'Budget Max', 'preferred_location': 'Preferred Location', 'city': 'City',
+            'address': 'Address', 'purpose': 'Purpose', 'budget_bucket': 'Budget Bucket',
+            'lead_date': 'Lead Date', 'overall_status': 'Overall Status',
+            'telecaller_code': 'Telecaller Code', 'telecaller_status': 'Telecaller Status',
+            'telecaller_remarks': 'Telecaller Remarks', 'stm_code': 'STM Code', 'stm_status': 'STM Status',
+            'stm_remarks': 'STM Remarks', 'sv_scheduled_date': 'SV Scheduled Date',
+            'sv_visited_date': 'SV Visited Date', 'sv_status': 'SV Status',
+            'sv_referred_by_code': 'SV Referred By Code', 'sv_remarks': 'SV Remarks',
+            'closure_date': 'Closure Date', 'closure_status': 'Closure Status', 'unit_no': 'Unit No',
+            'unit_type': 'Unit Type', 'booking_amount': 'Booking Amount', 'total_amount': 'Total Amount',
+            'closure_remarks': 'Closure Remarks',
+        }
         STATUS = {
             'overall_status': 'new,assigned,contacted,not_reachable,warm_transferred,hot,warm,cold,not_interested,sv_scheduled,sv_done,closed,lost',
             'telecaller_status': 'warm,cold,not_interested,not_reachable,callback',
             'stm_status': 'hot,warm,cold,not_interested,sv_scheduled,sv_done,closed',
             'sv_status': 'scheduled,completed,cancelled,no_show',
             'closure_status': 'booked,cancelled,refunded',
+            'budget_bucket': 'lt_10l,10_50l,50l_1cr,1_2cr,2_3cr,3_5cr,gt_5cr',
         }
+        # purpose is multi-select (comma-separated) so it can't use the same
+        # single-value dropdown as STATUS — documented in the Reference sheet instead.
+        PURPOSE_VALUES = 'investment, end_use, other'
         def _role(u):
             return (u['designation'] or u['role'] or '').lower()
-        tc_id  = next((u['id'] for u in users if 'tele' in _role(u)), (users[0]['id'] if users else ''))
-        stm_id = next((u['id'] for u in users if any(k in _role(u) for k in ('stm', 'sales', 'manager'))),
-                      (users[1]['id'] if len(users) > 1 else (users[0]['id'] if users else '')))
+        tc_code  = next((u['user_code'] for u in users if 'tele' in _role(u) and u['user_code']), (users[0]['user_code'] if users else ''))
+        stm_code = next((u['user_code'] for u in users if any(k in _role(u) for k in ('stm', 'sales', 'manager')) and u['user_code']),
+                        (users[1]['user_code'] if len(users) > 1 else (users[0]['user_code'] if users else '')))
 
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Leads'
-        ws.append(cols)
-        ex1 = {'name': 'Rahul Sharma', 'phone': '9876543210', 'email': 'rahul@example.com', 'source': (sources[0] if sources else 'meta'), 'campaign': 'Meta - Luxury Homes', 'ad_name': 'Video 2BHK', 'lead_date': '01-05-2025', 'overall_status': 'new', 'telecaller_id': tc_id, 'telecaller_status': 'callback', 'telecaller_remarks': 'Call back evening'}
-        ex2 = {'name': 'Priya Mehta', 'phone': '9988776655', 'email': 'priya@example.com', 'project': (projects[0] if projects else 'Kalrav'), 'source': (sources[0] if sources else 'walk-in'), 'lead_date': '02-04-2025', 'overall_status': 'closed', 'telecaller_id': tc_id, 'telecaller_status': 'warm', 'stm_id': stm_id, 'stm_status': 'closed', 'sv_scheduled_date': '05-04-2025', 'sv_visited_date': '06-04-2025', 'sv_status': 'completed', 'sv_remarks': 'Liked plot A-12', 'closure_date': '08-04-2025', 'closure_status': 'booked', 'unit_no': 'A-12', 'unit_type': '2BHK', 'booking_amount': 200000, 'total_amount': 5000000, 'closure_remarks': 'Token received'}
+        ws.append([HEADER_LABELS.get(c, c) for c in cols])
+        ex1 = {'name': 'Rahul Sharma', 'phone': '9876543210', 'email': 'rahul@example.com', 'source': (sources[0] if sources else 'meta'), 'campaign': 'Meta - Luxury Homes', 'ad_name': 'Video 2BHK', 'city': 'Ahmedabad', 'purpose': 'end_use', 'budget_bucket': '50l_1cr', 'lead_date': '01-05-2025', 'overall_status': 'new', 'telecaller_code': tc_code, 'telecaller_status': 'callback', 'telecaller_remarks': 'Call back evening'}
+        ex2 = {'name': 'Priya Mehta', 'phone': '9988776655', 'email': 'priya@example.com', 'project': (projects[0] if projects else 'Kalrav'), 'source': (sources[0] if sources else 'walk-in'), 'city': 'Vadodara', 'address': '12 Alkapuri Society', 'purpose': 'investment, end_use', 'budget_bucket': '1_2cr', 'lead_date': '02-04-2025', 'overall_status': 'closed', 'telecaller_code': tc_code, 'telecaller_status': 'warm', 'stm_code': stm_code, 'stm_status': 'closed', 'sv_scheduled_date': '05-04-2025', 'sv_visited_date': '06-04-2025', 'sv_status': 'completed', 'sv_remarks': 'Liked plot A-12', 'closure_date': '08-04-2025', 'closure_status': 'booked', 'unit_no': 'A-12', 'unit_type': '2BHK', 'booking_amount': 200000, 'total_amount': 5000000, 'closure_remarks': 'Token received'}
         for ex in (ex1, ex2):
             ws.append([ex.get(c, '') for c in cols])
 
@@ -2110,7 +2188,7 @@ class LeadImportTemplateView(APIView):
         ws.add_table(table)
         ws.freeze_panes = 'A2'
         for i, c in enumerate(cols, start=1):
-            ws.column_dimensions[get_column_letter(i)].width = min(26, max(12, len(c) + 3))
+            ws.column_dimensions[get_column_letter(i)].width = min(26, max(12, len(HEADER_LABELS.get(c, c)) + 3))
 
         def col_of(name):
             return get_column_letter(cols.index(name) + 1)
@@ -2141,21 +2219,23 @@ class LeadImportTemplateView(APIView):
         if sources:
             add_dv('source', 'Lists!$B$1:$B$%d' % len(sources))
 
-        ref = wb.create_sheet('Reference — IDs & values')
-        ref.append(['— TEAM — put this id in telecaller_id / stm_id / sv_referred_by_id —'])
-        ref.append(['id', 'name', 'role / designation', 'phone'])
+        ref = wb.create_sheet('Reference — codes & values')
+        ref.append(['— TEAM — put this code in the Telecaller Code / STM Code / SV Referred By Code columns —'])
+        ref.append(['User Code', 'Name', 'Role / Designation', 'Phone'])
         ref['A2'].font = Font(bold=True)
         for u in users:
-            ref.append([u['id'], u['name'], (u['designation'] or u['role'] or ''), u['phone'] or ''])
+            ref.append([u['user_code'] or '—', u['name'], (u['designation'] or u['role'] or ''), u['phone'] or ''])
         ref.append([])
         ref.append(['— ALLOWED VALUES (the Leads sheet has dropdowns for these) —'])
         for k, v in STATUS.items():
-            ref.append([k, v.replace(',', ', ')])
+            ref.append([HEADER_LABELS.get(k, k), v.replace(',', ', ')])
+        ref.append(['Purpose (multi-select — separate multiple with a comma)', PURPOSE_VALUES])
         ref.append([])
         ref.append(['— NOTES —'])
         ref.append(['Header colours: RED = required (name, phone). PURPLE = closure columns.'])
         ref.append(['Dates: dd-mm-yyyy. project/source are matched by name. Leave a cell blank to skip.'])
         ref.append(['Fill any sv_* column to create a Site Visit; fill closure_date to create a Closure.'])
+        ref.append(['purpose accepts multiple values in one cell, e.g. "investment, end_use".'])
         ref.column_dimensions['A'].width = 24
         ref.column_dimensions['B'].width = 62
 

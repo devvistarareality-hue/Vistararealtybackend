@@ -596,6 +596,8 @@ class LeadDetailView(APIView):
     def delete(self, request, pk):
         if not has_club1000_access(request.user):
             return _no_access()
+        if not is_club1000_manager(request.user):
+            return _no_permission()
         lead = self._get(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
