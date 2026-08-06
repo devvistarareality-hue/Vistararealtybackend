@@ -35,11 +35,51 @@ class ProjectSerializer(serializers.ModelSerializer):
         return counts
 
 
+def _plot_agent_map(project_id):
+    """{plot_id: salesperson name} for every held/sold unit in a project.
+
+    A plot carries no link back to whoever took it, so it is resolved through the
+    booking that reserved it — which may name the plot singly or in plot_ids. Done as
+    one query for the whole project rather than per plot, since a unit map renders
+    every plot at once. Cancelled/rejected bookings free their plots, so they are
+    excluded; where a plot has been booked more than once the latest booking wins.
+    """
+    from sales.models import Booking
+    out = {}
+    rows = (Booking.objects
+            .filter(project_id=project_id)
+            .exclude(status='rejected')
+            .order_by('created_at')
+            .values('plot_id', 'plot_ids', 'stm__name', 'manual_stm_name'))
+    for b in rows:
+        name = (b['manual_stm_name'] or '').strip() or (b['stm__name'] or '')
+        if not name:
+            continue
+        for pid in (b['plot_ids'] or ([b['plot_id']] if b['plot_id'] else [])):
+            out[pid] = name
+    return out
+
+
 class PlotSerializer(serializers.ModelSerializer):
+    # Who holds or has sold this unit — shown on the unit map so the team can see at a
+    # glance who is on a booked plot without opening it.
+    agent_name = serializers.SerializerMethodField()
+
+    def get_agent_name(self, obj):
+        if obj.status == Plot.AVAILABLE:
+            return None
+        cache = getattr(self, '_agent_cache', None)
+        if cache is None:
+            cache = {}
+            self._agent_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_agent_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
-                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book']
+                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name']
         read_only_fields = ['id', 'project']
 
 
