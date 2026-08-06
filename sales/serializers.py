@@ -140,6 +140,11 @@ class FollowUpSerializer(serializers.ModelSerializer):
     # Current lead status so the completion modal can pre-select it (TC or STM).
     lead_telecaller_status = serializers.CharField(source='lead.telecaller_status', read_only=True, default='')
     lead_stm_status = serializers.CharField(source='lead.stm_status', read_only=True, default='')
+    # The completion modal mirrors the lead modal: closing routes into the booking flow
+    # and sv_scheduled creates a site visit, both of which need the lead's project and
+    # its telecaller for attribution.
+    lead_project = serializers.PrimaryKeyRelatedField(source='lead.project', read_only=True)
+    lead_telecaller = serializers.PrimaryKeyRelatedField(source='lead.telecaller', read_only=True)
 
     class Meta:
         model = FollowUp
