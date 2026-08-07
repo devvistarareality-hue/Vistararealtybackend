@@ -2587,6 +2587,7 @@ class BookingListCreateView(APIView):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
             qs = qs.filter(stm=request.user)
+        qs = _drop_superseded_revisions(qs)
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
@@ -2761,6 +2762,37 @@ class BookingNextEOIView(APIView):
         return Response({'eoi_no': _next_eoi_no(company, pid)})
 
 
+def _drop_superseded_revisions(qs):
+    """Hide bookings that a later revision has replaced, so a deal appears once.
+
+    Revising a booking creates a NEW row carrying revision_no + 1, and approving that
+    revision leaves the original approved as well — so both were listed and the project
+    totals counted the deal twice. Only the latest revision should stand.
+
+    The client posts `revision_of` but it has never been persisted, so there is no
+    parent link to follow: a chain is identified by (project, phone, unit), and only
+    where a revision actually exists. Two ordinary bookings that happen to share those
+    fields are left alone, as are rejected rows — a cancelled booking belongs in the
+    Rejected tab, not folded into a live chain. Ties on revision_no fall to the newest
+    row, which happens where a booking was revised twice from the same parent.
+    """
+    rows = list(qs.values('id', 'project_id', 'phone', 'plot_numbers',
+                          'plot__number', 'area', 'revision_no', 'status'))
+    groups = {}
+    for r in rows:
+        if r['status'] == 'rejected':
+            continue
+        unit = (r['plot_numbers'] or r['plot__number'] or r['area'] or '').strip()
+        groups.setdefault((r['project_id'], (r['phone'] or '').strip(), unit), []).append(r)
+    drop = set()
+    for g in groups.values():
+        if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
+            continue
+        keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
+        drop.update(x['id'] for x in g if x['id'] != keep['id'])
+    return qs.exclude(id__in=drop) if drop else qs
+
+
 def _can_view_all_bookings(user):
     """Whole-company booking visibility: company-wide viewers (admin/staff/dept head)
     plus the Accounts & Finance department (read-only review of LOIs/EOIs)."""
@@ -2779,7 +2811,9 @@ class BookingAllView(APIView):
         if not _can_view_all_bookings(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
-        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm').order_by('-created_at')
+        qs = _drop_superseded_revisions(
+            Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+        ).order_by('-created_at')
         return Response(BookingSerializer(qs[:1000], many=True).data)
 
 
