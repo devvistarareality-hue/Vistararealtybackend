@@ -961,6 +961,20 @@ class ProjectDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
+
+
+def _release_expired_holds(plots_qs):
+    """Self-healing: flip stale soft-holds (a rep selected the unit on the picker but
+    never submitted) back to available before reading. Only touches held_by-tracked
+    holds — never a hard hold backed by a real pending Booking (held_by is cleared at
+    submission time), and never an admin's manual hold via PlotDetailView.patch (which
+    never sets held_by)."""
+    cutoff = timezone.now() - PLOT_HOLD_TIMEOUT
+    plots_qs.filter(status='hold', held_by__isnull=False, held_at__lt=cutoff) \
+            .update(status='available', held_by=None, held_at=None)
+
+
 class PlotListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -970,6 +984,7 @@ class PlotListView(APIView):
             return Response({'detail': 'A valid numeric project query param is required.'}, status=status.HTTP_400_BAD_REQUEST)
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        _release_expired_holds(Plot.objects.filter(project_id=project_id))
         plots = Plot.objects.filter(project_id=project_id)
         return Response(PlotSerializer(plots, many=True).data)
 
@@ -988,6 +1003,48 @@ class PlotDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         return Response(PlotSerializer(ser.save()).data)
+
+
+class PlotHoldView(APIView):
+    """A rep selecting units on the plot map — soft-reserve them immediately so no
+    other rep can also select the same unit while this one is getting an LOI signed.
+    Self-releases after PLOT_HOLD_TIMEOUT if never submitted (see _release_expired_holds)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ids = [int(x) for x in (request.data.get('plot_ids') or []) if str(x).isdigit()]
+        held, failed = [], []
+        with transaction.atomic():
+            for pid in ids:
+                try:
+                    plot = scope_to_company(Plot.objects.select_for_update(), request.user, 'project__company').get(pk=pid)
+                except Plot.DoesNotExist:
+                    failed.append({'id': pid, 'reason': 'not_found'})
+                    continue
+                _release_expired_holds(Plot.objects.filter(pk=pid))
+                plot.refresh_from_db()
+                if plot.status != 'available':
+                    reason = 'held_by_other' if (plot.held_by_id and plot.held_by_id != request.user.id) else plot.status
+                    failed.append({'id': pid, 'number': plot.number, 'reason': reason})
+                    continue
+                plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
+                plot.save(update_fields=['status', 'held_by', 'held_at'])
+                held.append(pid)
+        return Response({'held': held, 'failed': failed})
+
+
+class PlotReleaseView(APIView):
+    """Release units this rep soft-held but didn't end up booking (deselected, hit
+    Clear, or picked something else). No-ops on plots not held by this user — in
+    particular a plot that's since become a real booking's hard hold (held_by cleared
+    at submission) is silently skipped rather than accidentally freed."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ids = [int(x) for x in (request.data.get('plot_ids') or []) if str(x).isdigit()]
+        n = Plot.objects.filter(pk__in=ids, held_by=request.user, status='hold') \
+                         .update(status='available', held_by=None, held_at=None)
+        return Response({'released': n})
 
 
 class LeadSourceListView(APIView):
@@ -2578,6 +2635,20 @@ class BookingListCreateView(APIView):
                             {'detail': f'This plot already has a {b.status} booking for {b.client_name} (#{b.id}).'},
                             status=status.HTTP_409_CONFLICT,
                         )
+                # A plot soft-held by a DIFFERENT rep (selected on the plot-map picker
+                # via PlotHoldView, not yet submitted) or already sold blocks submission
+                # too — closes the gap where someone bypasses the picker's lock (stale
+                # page, direct API call) and submits anyway. select_for_update so this
+                # resolves consistently against a PlotHoldView call racing at the same
+                # instant.
+                with transaction.atomic():
+                    for p in Plot.objects.select_for_update().filter(pk__in=requested_plot_ids):
+                        ok = p.status == 'available' or (p.status == 'hold' and p.held_by_id == request.user.id)
+                        if not ok:
+                            return Response(
+                                {'detail': f'Plot {p.number} is no longer available — it may have just been selected or booked by another salesperson.'},
+                                status=status.HTTP_409_CONFLICT,
+                            )
 
         # Resolve or create the lead (Book Unit flow types a new client; Record Closure
         # passes an existing lead).
@@ -2667,8 +2738,10 @@ class BookingListCreateView(APIView):
             # New booking: reserve ALL selected plots. The Closure is mirrored into
             # My Conversions on APPROVAL (see BookingActionView) — so a booking that
             # is still pending approval does NOT appear as a booked closure.
+            # held_by/held_at are cleared here — this is now a hard hold backed by a
+            # real pending Booking, not the picker's soft hold, so it never auto-expires.
             if pids:
-                Plot.objects.filter(id__in=pids).update(status='hold')
+                Plot.objects.filter(id__in=pids).update(status='hold', held_by=None, held_at=None)
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)

@@ -36,10 +36,18 @@ class ProjectSerializer(serializers.ModelSerializer):
 
 
 class PlotSerializer(serializers.ModelSerializer):
+    # Who currently soft-holds this unit on the plot-map picker (None once it's
+    # either free again or has a real booking behind it) — lets the UI show
+    # "On Hold · selected by <name>" instead of just an unavailable unit.
+    held_by_name = serializers.SerializerMethodField()
+
+    def get_held_by_name(self, obj):
+        return obj.held_by.name if obj.held_by_id else None
+
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
-                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book']
+                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'held_by_name']
         read_only_fields = ['id', 'project']
 
 
