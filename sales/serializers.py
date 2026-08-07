@@ -60,6 +60,20 @@ def _plot_agent_map(project_id):
     return out
 
 
+def _plot_draft_map(project_id):
+    """{plot_id: draft Booking id} for every unit a saved (unsubmitted) draft still
+    references in this project. Lets the picker show a distinct "drafted" colour —
+    visible to anyone, but only clickable-to-resume by the drafter — instead of
+    lumping it in with a bare in-progress selection. One query per project rather
+    than per plot, same pattern as _plot_agent_map above."""
+    out = {}
+    rows = Booking.objects.filter(project_id=project_id, status='draft').only('id', 'plot_id', 'plot_ids')
+    for b in rows:
+        for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
+            out[pid] = b.id
+    return out
+
+
 class PlotSerializer(serializers.ModelSerializer):
     # Who holds or has sold this unit — shown on the unit map so the team can see at a
     # glance who is on a booked plot without opening it.
@@ -85,10 +99,27 @@ class PlotSerializer(serializers.ModelSerializer):
     def get_held_by_name(self, obj):
         return obj.held_by.name if obj.held_by_id else None
 
+    # Id of the live draft Booking still referencing this unit, if any — the picker
+    # uses this to render a distinct grey "Drafted" state (vs. plain orange "On
+    # Hold") and to route a click straight to resuming that draft.
+    drafted_booking_id = serializers.SerializerMethodField()
+
+    def get_drafted_booking_id(self, obj):
+        if obj.status != Plot.HOLD:
+            return None
+        cache = getattr(self, '_draft_cache', None)
+        if cache is None:
+            cache = {}
+            self._draft_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_draft_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
-                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name', 'held_by_name']
+                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
+                  'held_by_name', 'drafted_booking_id']
         read_only_fields = ['id', 'project']
 
 

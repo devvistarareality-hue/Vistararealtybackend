@@ -969,10 +969,24 @@ def _release_expired_holds(plots_qs):
     never submitted) back to available before reading. Only touches held_by-tracked
     holds — never a hard hold backed by a real pending Booking (held_by is cleared at
     submission time), and never an admin's manual hold via PlotDetailView.patch (which
-    never sets held_by)."""
+    never sets held_by). A hold pinned by a saved draft is also exempt — the rep is
+    still mid-way through the form, not just browsing; it only frees on submit,
+    discard, or an explicit release."""
     cutoff = timezone.now() - PLOT_HOLD_TIMEOUT
-    plots_qs.filter(status='hold', held_by__isnull=False, held_at__lt=cutoff) \
-            .update(status='available', held_by=None, held_at=None)
+    candidates = list(plots_qs.filter(status='hold', held_by__isnull=False, held_at__lt=cutoff)
+                               .values_list('id', 'project_id'))
+    if not candidates:
+        return
+    candidate_ids = {pid for pid, _ in candidates}
+    project_ids   = {proj for _, proj in candidates}
+    pinned = set()
+    for b in Booking.objects.filter(status='draft', project_id__in=project_ids).only('plot_id', 'plot_ids'):
+        if b.plot_id:
+            pinned.add(b.plot_id)
+        pinned.update(b.plot_ids or [])
+    to_expire = candidate_ids - pinned
+    if to_expire:
+        Plot.objects.filter(id__in=to_expire).update(status='available', held_by=None, held_at=None)
 
 
 class PlotListView(APIView):
@@ -2573,6 +2587,13 @@ class BookingListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+        # Drafts are private scratch work, not something an approver/manager should
+        # browse mid-edit — exclude anyone else's draft unconditionally, regardless of
+        # which status filter (or none at all, e.g. the "All" tab) is requested. This
+        # has to run before every other visibility rule below, since those exist to
+        # broaden access (to a whole company, an approver's projects, etc.) and would
+        # otherwise leak drafts right back in.
+        qs = qs.exclude(Q(status='draft') & ~Q(stm=request.user))
         # Naming someone a project's booking approver is a narrowing statement: they
         # review those projects and no others. It therefore takes precedence over the
         # broad org-tree visibility a Manager may otherwise have (a top-of-tree head
@@ -2675,7 +2696,14 @@ class BookingListCreateView(APIView):
             if prior:
                 lead_id = prior.lead_id
 
-        ser = BookingSerializer(data=data)
+        # Submitting a saved draft promotes that same row instead of creating a new
+        # Booking — otherwise the draft would be left behind as an orphaned duplicate.
+        draft = None
+        if data.get('draft_id'):
+            draft = Booking.objects.filter(id=data['draft_id'], company=company,
+                                            stm=request.user, status='draft').first()
+
+        ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
         ser.is_valid(raise_exception=True)
         if prior:
             extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure, plot=prior.plot,
@@ -2748,6 +2776,116 @@ class BookingListCreateView(APIView):
         _notify_booking_approvers(company, booking, request.user)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+
+
+class BookingDraftView(APIView):
+    """Save an in-progress booking as a draft — same payload shape as
+    BookingListCreateView.post, but with none of its completeness requirements (no
+    signed LOI, no 100%-installment check — those are the frontend's job to enforce
+    only when calling Submit, not Save). Lets a rep persist partially-filled work so
+    closing the browser mid-flow doesn't lose it. Pass `id` to update an existing
+    draft in place rather than creating a new row on every Save click."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        company = _resolve_company(request)
+        data = request.data
+
+        draft = None
+        if data.get('id'):
+            draft = Booking.objects.filter(id=data['id'], company=company,
+                                            stm=request.user, status='draft').first()
+            if not draft:
+                return Response({'detail': 'Draft not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Resolve or create the lead — reuse the draft's existing lead on repeat
+        # Saves instead of minting a new one every time the rep clicks Save.
+        lead_id = data.get('lead') or (draft.lead_id if draft else None)
+        if not lead_id and (data.get('client_name') or '').strip():
+            src = None
+            sname = (data.get('source') or '').strip()
+            if sname:
+                src = LeadSource.objects.filter(company=company, name__iexact=sname).first()
+            lead = Lead.objects.create(
+                company=company, name=data.get('client_name', '').strip(),
+                phone=(data.get('phone') or '').strip(), status='new',
+                project_id=data.get('project') or None, source=src,
+            )
+            lead_id = lead.id
+
+        ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
+        ser.is_valid(raise_exception=True)
+        booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='draft')
+
+        # Resolve selected plots the same way BookingListCreateView.post does.
+        pids = data.get('plot_ids')
+        if isinstance(pids, list) and pids:
+            pids = [int(x) for x in pids if str(x).isdigit()]
+        elif booking.plot_id:
+            pids = [booking.plot_id]
+        else:
+            pids = []
+
+        plot_conflicts = []
+        if pids:
+            num_map = dict(Plot.objects.filter(id__in=pids).values_list('id', 'number'))
+            booking.plot_ids = pids
+            booking.plot_numbers = ', '.join(num_map[p] for p in pids if p in num_map)
+            if not booking.plot_id:
+                booking.plot_id = pids[0]
+            booking.save(update_fields=['plot_ids', 'plot_numbers', 'plot'])
+
+            # Claim any plot that's free; never fail the whole save over one that
+            # isn't — losing typed data is worse than a stale plot reference. Flag
+            # the conflict instead so the frontend can warn without discarding anything.
+            with transaction.atomic():
+                for plot in Plot.objects.select_for_update().filter(pk__in=pids):
+                    if plot.status == 'available':
+                        plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
+                        plot.save(update_fields=['status', 'held_by', 'held_at'])
+                    elif not (plot.status == 'hold' and plot.held_by_id == request.user.id):
+                        plot_conflicts.append({'id': plot.id, 'number': plot.number})
+
+        # Signed LOI, if one happens to already be attached — same handling as the
+        # real submit path, kept for forward compatibility even though drafts don't
+        # require it.
+        lf = data.get('loi_file')
+        if isinstance(lf, dict) and lf.get('data'):
+            max_b64_len = int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3)
+            if len(lf['data']) <= max_b64_len:
+                import base64
+                from django.core.files.base import ContentFile
+                try:
+                    booking.loi_document.save(_loi_path(booking),
+                                              ContentFile(base64.b64decode(lf['data'])), save=True)
+                except Exception:
+                    logging.getLogger(__name__).exception('LOI document save failed for draft %s', booking.id)
+
+        resp = BookingSerializer(booking).data
+        resp['plot_conflicts'] = plot_conflicts
+        return Response(resp, status=status.HTTP_200_OK)
+
+
+class BookingDiscardDraftView(APIView):
+    """Discard a saved draft — releases any plots it still holds and deletes the row.
+    Irreversible. The drafter can discard their own; a manager/admin can discard
+    anyone's (e.g. from the plot map, where a drafted unit's name is visible to the
+    whole team even though the draft's own details aren't)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        company = _resolve_company(request)
+        try:
+            b = Booking.objects.get(pk=pk, company=company, status='draft')
+        except Booking.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if b.stm_id != request.user.id and not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+        if pids:
+            Plot.objects.filter(id__in=pids).update(status='available', held_by=None, held_at=None)
+        b.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class BookingNextEOIView(APIView):

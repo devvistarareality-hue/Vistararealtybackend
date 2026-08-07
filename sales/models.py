@@ -351,7 +351,7 @@ class SiteVisit(models.Model):
 class Booking(models.Model):
     """Full plot-booking record — the ERP-native equivalent of the GAS submission
     sheet row. Holds client, pricing, schedule, LOI doc and approval state."""
-    STATUS = [('pending', 'Pending Approval'), ('sold', 'Sold'), ('rejected', 'Rejected'), ('hold', 'Hold')]
+    STATUS = [('draft', 'Draft'), ('pending', 'Pending Approval'), ('sold', 'Sold'), ('rejected', 'Rejected'), ('hold', 'Hold')]
 
     company   = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='bookings', null=True, blank=True)
     project   = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
