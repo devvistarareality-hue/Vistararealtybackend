@@ -1994,9 +1994,7 @@ class BulkImportLeadsView(APIView):
         # An STM only works the STM stage — telecaller assignment isn't theirs to set,
         # so any telecaller_code/status/remarks in the file is ignored for their
         # uploads (mirrors the template omitting those columns for an STM login).
-        # Same designation-substring check TelecallerListView uses to tell STM/
-        # Telecaller logins apart — there's no separate CRM-role field on User.
-        uploader_is_stm = 'stm' in (request.user.designation or '').lower()
+        uploader_is_stm = is_stm(request.user)
 
         # App/web may upload the spreadsheet itself (multipart) instead of pre-parsed
         # JSON rows — parse it server-side into the same canonical row dicts.
@@ -2087,6 +2085,14 @@ class BulkImportLeadsView(APIView):
                 if str(raw_val or '').strip() and not resolved:
                     warnings.append({'row': i + 1, 'name': name, 'field': label, 'value': str(raw_val).strip(),
                                       'reason': "didn't match any user's code — left unassigned"})
+            # An STM uploading their own leads (e.g. a walk-in sign-in sheet, no STM
+            # Code column filled in) self-sources them, same as the single "Add Lead"
+            # flow already does — checked after the warning above so a genuinely wrong
+            # code still surfaces its warning rather than silently becoming "assign to
+            # me". Otherwise a row with neither STM nor telecaller falls through to
+            # telecaller auto-distribution, handing the STM's own lead to someone else.
+            if uploader_is_stm and not stm_id:
+                stm_id = request.user.id
 
             tc_status  = '' if uploader_is_stm else str(row.get('telecaller_status', '')).strip().lower()
             tc_status  = tc_status if tc_status in TC_ST else ''
@@ -2255,9 +2261,8 @@ class LeadImportTemplateView(APIView):
         # An STM only works the STM stage — telecaller assignment isn't theirs to set,
         # so the template doesn't even offer those columns for an STM login (uploads
         # ignore them regardless — see BulkImportLeadsView — this just avoids handing
-        # out a template with fields that'll silently be dropped). Same designation-
-        # substring check TelecallerListView uses; there's no separate CRM-role field.
-        uploader_is_stm = 'stm' in (request.user.designation or '').lower()
+        # out a template with fields that'll silently be dropped).
+        uploader_is_stm = is_stm(request.user)
 
         cols = [
             'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
