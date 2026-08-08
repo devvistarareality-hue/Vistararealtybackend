@@ -2933,9 +2933,10 @@ class BookingDraftView(APIView):
 
 class BookingDiscardDraftView(APIView):
     """Discard a saved draft — releases any plots it still holds and deletes the row.
-    Irreversible. The drafter can discard their own; a manager/admin can discard
-    anyone's (e.g. from the plot map, where a drafted unit's name is visible to the
-    whole team even though the draft's own details aren't)."""
+    Irreversible. The drafter can discard their own; a real Admin can discard anyone's;
+    a Manager can discard one belonging to an STM in their own reporting chain, not
+    just any Manager company-wide (e.g. from the plot map, where a drafted unit's name
+    is visible to the whole team even though the draft's own details aren't)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -2944,7 +2945,11 @@ class BookingDiscardDraftView(APIView):
             b = Booking.objects.get(pk=pk, company=company, status='draft')
         except Booking.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if b.stm_id != request.user.id and not is_admin_or_manager(request.user):
+        # _visible_user_ids already includes the requester themselves, so this alone
+        # covers "the drafter", "an admin" is the only other unconditional case, and a
+        # Manager only clears it when the drafting STM is actually in their own
+        # reporting subtree — not any Manager company-wide.
+        if not _is_hard_admin(request.user) and b.stm_id not in _visible_user_ids(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
         if pids:
