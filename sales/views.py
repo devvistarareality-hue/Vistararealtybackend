@@ -1997,6 +1997,12 @@ class BulkImportLeadsView(APIView):
         project_id = request.data.get('project_id')   # default project for every row
         source_id  = request.data.get('source_id')    # default source for every row
         company    = request.user.company
+        # An STM only works the STM stage — telecaller assignment isn't theirs to set,
+        # so any telecaller_code/status/remarks in the file is ignored for their
+        # uploads (mirrors the template omitting those columns for an STM login).
+        # Same designation-substring check TelecallerListView uses to tell STM/
+        # Telecaller logins apart — there's no separate CRM-role field on User.
+        uploader_is_stm = 'stm' in (request.user.designation or '').lower()
 
         # App/web may upload the spreadsheet itself (multipart) instead of pre-parsed
         # JSON rows — parse it server-side into the same canonical row dicts.
@@ -2074,19 +2080,21 @@ class BulkImportLeadsView(APIView):
 
             rproj = proj_by_name.get(str(row.get('project', '')).strip().lower()) or project_id or None
             rsrc  = src_by_name.get(str(row.get('source', '')).strip().lower()) or source_id or None
-            tc_id  = _uid(row.get('telecaller_code'))
+            tc_id  = None if uploader_is_stm else _uid(row.get('telecaller_code'))
             stm_id = _uid(row.get('stm_code'))
             sv_ref_id = _uid(row.get('sv_referred_by_code'))
-            for label, raw_val, resolved in (
-                ('Telecaller Code', row.get('telecaller_code'), tc_id),
+            code_checks = [
                 ('STM Code', row.get('stm_code'), stm_id),
                 ('SV Referred By Code', row.get('sv_referred_by_code'), sv_ref_id),
-            ):
+            ]
+            if not uploader_is_stm:
+                code_checks.insert(0, ('Telecaller Code', row.get('telecaller_code'), tc_id))
+            for label, raw_val, resolved in code_checks:
                 if str(raw_val or '').strip() and not resolved:
                     warnings.append({'row': i + 1, 'name': name, 'field': label, 'value': str(raw_val).strip(),
                                       'reason': "didn't match any user's code — left unassigned"})
 
-            tc_status  = str(row.get('telecaller_status', '')).strip().lower()
+            tc_status  = '' if uploader_is_stm else str(row.get('telecaller_status', '')).strip().lower()
             tc_status  = tc_status if tc_status in TC_ST else ''
             stm_status = str(row.get('stm_status', '')).strip().lower()
             stm_status = stm_status if stm_status in STM_ST else ''
@@ -2141,7 +2149,7 @@ class BulkImportLeadsView(APIView):
                 status=overall,
                 telecaller_id=tc_id,
                 telecaller_status=tc_status,
-                telecaller_remarks=str(row.get('telecaller_remarks', '')).strip(),
+                telecaller_remarks='' if uploader_is_stm else str(row.get('telecaller_remarks', '')).strip(),
                 telecaller_assigned_at=(lead_dt or timezone.now()) if tc_id else None,
                 stm_id=stm_id,
                 stm_status=stm_status,
@@ -2165,7 +2173,12 @@ class BulkImportLeadsView(APIView):
                 imported += 1
                 if clean:
                     existing_keys.add(clean)  # catch in-batch duplicates too
-            if not tc_id and overall == 'new':
+            # Only a genuinely untouched lead (no telecaller AND no STM) should be swept
+            # into telecaller auto-distribution — mirrors the single-lead-create check
+            # above (`not lead.telecaller_id and not lead.stm_id`). A row that names an
+            # STM but not a telecaller has already skipped/passed that stage; sweeping
+            # it in anyway is what was handing STM-assigned leads to a telecaller too.
+            if not tc_id and not stm_id and overall == 'new':
                 bare_new += 1
 
         with transaction.atomic():
@@ -2245,6 +2258,13 @@ class LeadImportTemplateView(APIView):
             uq = uq.filter(company=company)
         users = list(uq.values('id', 'name', 'user_code', 'designation', 'role', 'phone').order_by('name'))
 
+        # An STM only works the STM stage — telecaller assignment isn't theirs to set,
+        # so the template doesn't even offer those columns for an STM login (uploads
+        # ignore them regardless — see BulkImportLeadsView — this just avoids handing
+        # out a template with fields that'll silently be dropped). Same designation-
+        # substring check TelecallerListView uses; there's no separate CRM-role field.
+        uploader_is_stm = 'stm' in (request.user.designation or '').lower()
+
         cols = [
             'name', 'phone', 'alt_phone', 'email', 'project', 'source', 'campaign', 'adset', 'ad_name',
             'requirement', 'budget_min', 'budget_max', 'preferred_location', 'city', 'address', 'purpose', 'budget_bucket',
@@ -2253,6 +2273,8 @@ class LeadImportTemplateView(APIView):
             'sv_scheduled_date', 'sv_visited_date', 'sv_status', 'sv_referred_by_code', 'sv_remarks',
             'closure_date', 'closure_status', 'unit_no', 'unit_type', 'booking_amount', 'total_amount', 'closure_remarks',
         ]
+        if uploader_is_stm:
+            cols = [c for c in cols if c not in ('telecaller_code', 'telecaller_status', 'telecaller_remarks')]
         # Display-only header text — the parser normalises spaces/case back to the
         # canonical snake_case key (see _imp_canon_key), so this is purely cosmetic.
         HEADER_LABELS = {
@@ -2279,6 +2301,8 @@ class LeadImportTemplateView(APIView):
             'closure_status': 'booked,cancelled,refunded',
             'budget_bucket': 'lt_10l,10_50l,50l_1cr,1_2cr,2_3cr,3_5cr,gt_5cr',
         }
+        if uploader_is_stm:
+            STATUS.pop('telecaller_status', None)
         # purpose is multi-select (comma-separated) so it can't use the same
         # single-value dropdown as STATUS — documented in the Reference sheet instead.
         PURPOSE_VALUES = 'investment, end_use, other'
@@ -2335,7 +2359,10 @@ class LeadImportTemplateView(APIView):
             add_dv('source', 'Lists!$B$1:$B$%d' % len(sources))
 
         ref = wb.create_sheet('Reference — codes & values')
-        ref.append(['— TEAM — put this code in the Telecaller Code / STM Code / SV Referred By Code columns —'])
+        ref.append([
+            '— TEAM — put this code in the STM Code / SV Referred By Code columns —' if uploader_is_stm else
+            '— TEAM — put this code in the Telecaller Code / STM Code / SV Referred By Code columns —',
+        ])
         ref.append(['User Code', 'Name', 'Role / Designation', 'Phone'])
         ref['A2'].font = Font(bold=True)
         for u in users:
