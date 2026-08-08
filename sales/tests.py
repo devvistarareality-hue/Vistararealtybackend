@@ -499,6 +499,61 @@ class BookingApprovalTests(APITestCase):
         self.assertEqual(pl.status, 'available')
 
 
+class ManagerVisibilityTests(APITestCase):
+    """A Manager sees every project's leads/closures regardless of the reporting
+    chain, but Bookings & Approvals stays scoped to the projects they approve."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from datetime import date
+        from sales.models import Booking, Closure
+        cls.co = Company.objects.create(code='MGR', name='Mgr Co')
+        cls.p1 = Project.objects.create(company=cls.co, name='Alpha')
+        cls.p2 = Project.objects.create(company=cls.co, name='Beta')
+        # A manager with nobody reporting to them — under the old chain rule they saw
+        # only their own records.
+        cls.mgr = User.objects.create(email='m@mgr.com', company=cls.co, role='Manager',
+                                      user_code='M1', designation='Manager')
+        cls.other = User.objects.create(email='o@mgr.com', company=cls.co, role='Sales',
+                                        user_code='S1', designation='STM')
+        cls.p1.booking_approvers = [cls.mgr.id]
+        cls.p1.save(update_fields=['booking_approvers'])
+        # Records owned by someone outside the manager's chain.
+        Lead.objects.create(company=cls.co, name='L1', phone='+919000009001', project=cls.p1, stm=cls.other)
+        Lead.objects.create(company=cls.co, name='L2', phone='+919000009002', project=cls.p2, stm=cls.other)
+        Closure.objects.create(company=cls.co, project=cls.p2, stm=cls.other, status='booked',
+                               unit_type='Plot', unit_no='9', client_name='C', closure_date=date.today())
+        mk = lambda proj, num: Booking.objects.create(
+            company=cls.co, project=proj,
+            plot=Plot.objects.create(project=proj, number=num, status='hold'),
+            stm=cls.other, status='pending', client_name='C', booking_date=date.today())
+        cls.b1, cls.b2 = mk(cls.p1, '1'), mk(cls.p2, '2')
+
+    def test_manager_sees_every_project_leads(self):
+        auth(self.client, self.mgr)
+        res = self.client.get('/api/sales/leads/')
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual(len(rows), 2, 'a Manager should see leads outside their reporting chain')
+
+    def test_manager_sees_every_project_closures(self):
+        auth(self.client, self.mgr)
+        res = self.client.get('/api/sales/closures/')
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual(len(rows), 1)
+
+    def test_manager_approvals_stay_scoped_to_their_projects(self):
+        """The manager role must NOT widen Bookings & Approvals — Beta is not theirs."""
+        auth(self.client, self.mgr)
+        res = self.client.get('/api/sales/bookings/')
+        rows = res.data['results'] if isinstance(res.data, dict) and 'results' in res.data else res.data
+        self.assertEqual({r['id'] for r in rows}, {self.b1.id})
+
+    def test_manager_cannot_approve_a_project_they_do_not_own(self):
+        auth(self.client, self.mgr)
+        res = self.client.post(f'/api/sales/bookings/{self.b2.id}/action/', {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 403)
+
+
 class ProjectApproverScopeTests(APITestCase):
     """Naming a manager as a project's booking approver restricts them to that project:
     they see only its bookings in Bookings & Approvals and cannot act on any other's."""

@@ -79,21 +79,27 @@ def is_cp(user):
 # themselves or by anyone reporting to them, transitively. This scales to any
 # designation/role without code changes — you only maintain reporting_manager.
 
-def _sees_all_company(user, request=None):
-    """Users who see ALL company data: platform admins, staff, the Admin role, and
-    top-of-tree department heads (report to no one but manage others, e.g. a CMO).
+def _sees_all_company(user, request=None, include_manager_role=True):
+    """Users who see ALL company data: platform admins, staff, the Admin role,
+    Managers, and top-of-tree department heads (report to no one but manage others).
 
-    A Sales Admin-Modules user (a Manager granted 'Sales' in Admin Modules) is
-    deliberately NOT included unconditionally — on the regular screens (Leads,
-    Follow-Ups, My Team, …) they see only their own team's data, exactly like any
-    other Manager. They only get full company visibility when `request` is passed
-    AND it explicitly carries `?admin_view=1` — sent only by the web/app's mirrored
-    "Admin" section pages (see isSalesModuleAdmin in sales/layout.js). Deliberately
-    a distinct param name from the pre-existing `scope` (used by MyTeamView for its
-    own unrelated 'all' org-chart toggle) to avoid colliding with it. This keeps
-    real admins (Chinmay, Prince, platform staff) completely unaffected — they
-    already return True unconditionally below, with or without the request/param."""
+    A Manager sees every project's leads, follow-ups, site visits and closures — the
+    reporting chain does not limit them. Bookings are the deliberate exception: that
+    surface is scoped by who is *named an approver* on a project, so the booking
+    views call this with include_manager_role=False and a Manager falls through to
+    the approver/reporting-chain rules below. MyTeamView also opts out, keeping its
+    own `?scope=all` org-chart toggle as the way to widen that view.
+
+    A Sales Admin-Modules user (a Manager granted 'Sales' in Admin Modules) gets
+    full company visibility when `request` carries `?admin_view=1` — sent only by
+    the web/app's mirrored "Admin" section pages (see isSalesModuleAdmin in
+    sales/layout.js). Deliberately a distinct param name from the pre-existing
+    `scope` (used by MyTeamView for its own unrelated org-chart toggle) to avoid
+    colliding with it. Real admins (Chinmay, Prince, platform staff) are unaffected
+    — they already return True unconditionally below."""
     if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
+        return True
+    if include_manager_role and getattr(user, 'role', '') == 'Manager':
         return True
     if (request is not None and request.query_params.get('admin_view') == '1'
             and 'Sales' in (getattr(user, 'admin_modules', None) or [])):
@@ -2482,7 +2488,7 @@ class MyTeamView(APIView):
         scope  = request.query_params.get('scope')                   # 'all' → full company org
         admin_view = request.query_params.get('admin_view') == '1'
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
-        is_admin = _sees_all_company(user, request)
+        is_admin = _sees_all_company(user, request, include_manager_role=False)
 
         def _full_company():
             # Everyone in a reporting relationship + all Managers (leadership shows
@@ -2604,7 +2610,7 @@ class BookingListCreateView(APIView):
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
         if approver_project_ids and not request.query_params.get('mine'):
             qs = qs.filter(project_id__in=approver_project_ids)
-        elif not _sees_all_company(request.user, request):
+        elif not _sees_all_company(request.user, request, include_manager_role=False):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
             qs = qs.filter(stm=request.user)
@@ -2933,8 +2939,9 @@ def _drop_superseded_revisions(qs):
 
 def _can_view_all_bookings(user):
     """Whole-company booking visibility: company-wide viewers (admin/staff/dept head)
-    plus the Accounts & Finance department (read-only review of LOIs/EOIs)."""
-    if _sees_all_company(user):
+    plus the Accounts & Finance department (read-only review of LOIs/EOIs). The
+    Manager role is excluded — bookings stay scoped by approver assignment."""
+    if _sees_all_company(user, include_manager_role=False):
         return True
     mods = [str(m).lower() for m in (getattr(user, 'modules', None) or [])]
     return any('account' in m or 'finance' in m for m in mods)
