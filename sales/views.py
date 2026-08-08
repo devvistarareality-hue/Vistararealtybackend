@@ -423,28 +423,26 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             leads_qs = leads_qs.filter(company_id=company_id)
 
-        # MQL: leads actually CALLED on each day — the status-history entry where
-        # telecaller_status was set, the same basis the Warm and STM trends use.
+        # MQL: of the leads that ARRIVED on each day, how many have had their
+        # telecaller status set — "called" means a new lead came in and its status
+        # was changed. Grouped by created_at so the chart counts exactly the leads
+        # the Called/MQL tile counts over the same date filter.
         #
-        # This was grouped by updated_at, which is not when a lead was called: that
-        # column moves on ANY edit, so a lead touched today for an unrelated reason
-        # counted as a call. It also counted a lead once per day it was edited. On a
-        # live telecaller that read 50 against 42 real calls.
-        #
-        # Counted distinct per day, since one lead can have its status changed more
-        # than once in a day and that is still one lead called.
+        # This was grouped by updated_at, which is neither: that column moves on any
+        # edit, so a lead touched for an unrelated reason counted as a call and a
+        # lead edited on several days counted on each one. On a live telecaller it
+        # read 50 against a tile of 25.
         mql_rows = (
-            LeadStatusHistory.objects
+            leads_qs
             .filter(
-                lead__in=leads_qs,
-                field_changed='telecaller_status',
                 created_at__date__gte=date_from,
                 created_at__date__lte=date_to,
+                telecaller_status__isnull=False,
             )
-            .exclude(new_value='')
+            .exclude(telecaller_status='')
             .annotate(day=TruncDate('created_at'))
             .values('day')
-            .annotate(count=Count('lead_id', distinct=True))
+            .annotate(count=Count('id'))
             .order_by('day')
         )
 
