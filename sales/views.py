@@ -349,6 +349,22 @@ class StatsView(APIView):
         if date_to:
             sv_qs = sv_qs.filter(created_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
+        # Follow-up calls: a completed follow-up IS a call that was made, counted on
+        # the day it was completed so the dashboard's date filter applies to it the
+        # same way it does to everything else. Scoped by assignee exactly as the
+        # Follow-Ups screen is, so the tile and that list agree.
+        fu_qs = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company')
+        if not _sees_all_company(request.user, request):
+            fu_qs = fu_qs.filter(assigned_to__in=_visible_user_ids(request.user))
+        if company_id and is_platform_admin(request.user):
+            fu_qs = fu_qs.filter(lead__company_id=company_id)
+        fu_qs = fu_qs.filter(status='completed', completed_at__isnull=False)
+        if date_from:
+            fu_qs = fu_qs.filter(completed_at__date__gte=date_from)
+        if date_to:
+            fu_qs = fu_qs.filter(completed_at__date__lte=date_to)
+        followup_call_count = fu_qs.count()
+
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_done, closures, active_projects = (
             sv_qs.filter(**sv_filter).count(),
@@ -380,6 +396,9 @@ class StatsView(APIView):
             'new_leads':          agg['new_leads'],
             'leads_today':        agg['leads_today'],
             'called_count':       agg['called_count'],
+            'followup_call_count': followup_call_count,
+            # Every call made in the window: new leads worked plus follow-up calls.
+            'total_called_count': agg['called_count'] + followup_call_count,
             'hot_count':          agg['hot_count'],
             'warm_count':         agg['warm_count'],
             'callback_count':     agg['callback_count'],
