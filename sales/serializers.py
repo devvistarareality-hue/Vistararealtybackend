@@ -35,11 +35,91 @@ class ProjectSerializer(serializers.ModelSerializer):
         return counts
 
 
+def _plot_agent_map(project_id):
+    """{plot_id: salesperson name} for every held/sold unit in a project.
+
+    A plot carries no link back to whoever took it, so it is resolved through the
+    booking that reserved it — which may name the plot singly or in plot_ids. Done as
+    one query for the whole project rather than per plot, since a unit map renders
+    every plot at once. Cancelled/rejected bookings free their plots, so they are
+    excluded; where a plot has been booked more than once the latest booking wins.
+    """
+    from sales.models import Booking
+    out = {}
+    rows = (Booking.objects
+            .filter(project_id=project_id)
+            .exclude(status='rejected')
+            .order_by('created_at')
+            .values('plot_id', 'plot_ids', 'stm__name', 'manual_stm_name'))
+    for b in rows:
+        name = (b['manual_stm_name'] or '').strip() or (b['stm__name'] or '')
+        if not name:
+            continue
+        for pid in (b['plot_ids'] or ([b['plot_id']] if b['plot_id'] else [])):
+            out[pid] = name
+    return out
+
+
+def _plot_draft_map(project_id):
+    """{plot_id: draft Booking id} for every unit a saved (unsubmitted) draft still
+    references in this project. Lets the picker show a distinct "drafted" colour —
+    visible to anyone, but only clickable-to-resume by the drafter — instead of
+    lumping it in with a bare in-progress selection. One query per project rather
+    than per plot, same pattern as _plot_agent_map above."""
+    out = {}
+    rows = Booking.objects.filter(project_id=project_id, status='draft').only('id', 'plot_id', 'plot_ids')
+    for b in rows:
+        for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
+            out[pid] = b.id
+    return out
+
+
 class PlotSerializer(serializers.ModelSerializer):
+    # Who holds or has sold this unit — shown on the unit map so the team can see at a
+    # glance who is on a booked plot without opening it.
+    agent_name = serializers.SerializerMethodField()
+
+    def get_agent_name(self, obj):
+        if obj.status == Plot.AVAILABLE:
+            return None
+        cache = getattr(self, '_agent_cache', None)
+        if cache is None:
+            cache = {}
+            self._agent_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_agent_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
+    # Who currently soft-holds this unit on the plot-map picker (None once it's
+    # either free again or has a real booking behind it — at that point agent_name,
+    # above, is what resolves it instead) — lets the UI show "On Hold · selected by
+    # <name>" for a unit someone's mid-selection on but hasn't submitted yet.
+    held_by_name = serializers.SerializerMethodField()
+
+    def get_held_by_name(self, obj):
+        return obj.held_by.name if obj.held_by_id else None
+
+    # Id of the live draft Booking still referencing this unit, if any — the picker
+    # uses this to render a distinct grey "Drafted" state (vs. plain orange "On
+    # Hold") and to route a click straight to resuming that draft.
+    drafted_booking_id = serializers.SerializerMethodField()
+
+    def get_drafted_booking_id(self, obj):
+        if obj.status != Plot.HOLD:
+            return None
+        cache = getattr(self, '_draft_cache', None)
+        if cache is None:
+            cache = {}
+            self._draft_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_draft_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
-                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book']
+                  'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
+                  'held_by_name', 'drafted_booking_id']
         read_only_fields = ['id', 'project']
 
 

@@ -151,6 +151,12 @@ class Plot(models.Model):
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='plots')
     number = models.CharField(max_length=50)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=AVAILABLE)
+    # Soft hold: a rep has selected this unit on the plot map but not yet submitted a
+    # booking for it. Set/cleared by PlotHoldView/PlotReleaseView and auto-expired by
+    # _release_expired_holds(). Left NULL for an admin's manual hold (PlotDetailView.patch)
+    # and for a hard hold backed by an actual pending Booking, so neither ever auto-expires.
+    held_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='held_plots')
+    held_at = models.DateTimeField(null=True, blank=True)
     size = models.CharField(max_length=100, blank=True)
     construction_area = models.CharField(max_length=100, blank=True)  # sq.ft; auto-maps into booking
     cluster_type = models.CharField(max_length=100, blank=True)
@@ -345,7 +351,7 @@ class SiteVisit(models.Model):
 class Booking(models.Model):
     """Full plot-booking record — the ERP-native equivalent of the GAS submission
     sheet row. Holds client, pricing, schedule, LOI doc and approval state."""
-    STATUS = [('pending', 'Pending Approval'), ('sold', 'Sold'), ('rejected', 'Rejected'), ('hold', 'Hold')]
+    STATUS = [('draft', 'Draft'), ('pending', 'Pending Approval'), ('sold', 'Sold'), ('rejected', 'Rejected'), ('hold', 'Hold')]
 
     company   = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='bookings', null=True, blank=True)
     project   = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
