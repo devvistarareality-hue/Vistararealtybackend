@@ -37,6 +37,7 @@ urlpatterns = [
     path('distribution-log/',          views.DistributionLogView.as_view()),
     path('dist-settings/',             views.DistributionSettingsView.as_view()),
     path('availability/',              views.AvailabilityView.as_view()),
+    path('availability/history/',      views.AvailabilityHistoryView.as_view()),
     path('availability/me/',           views.MyAvailabilityView.as_view()),
     path('dist-weight/',               views.DistributionWeightView.as_view()),
     path('reports/',                   views.ReportsView.as_view()),

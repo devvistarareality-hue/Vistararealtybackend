@@ -1568,6 +1568,51 @@ class AvailabilityView(APIView):
         return Response({'user_id': user.id, 'is_available': obj.is_available})
 
 
+class AvailabilityHistoryView(APIView):
+    """Sign-in history day by day — who marked available and at what time.
+
+    Reports what was recorded on each date rather than reusing _availability_active(),
+    which expires any prior-day record by design: correct for today's board, but a
+    history row must still show that someone signed in on the 3rd. Project labels are
+    likewise left off, since assignments are current state and would misrepresent what
+    a person was on back then.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import date as date_cls
+        company = _resolve_company(request)
+        today = date_cls.today()
+        date_from = request.query_params.get('date_from') or str(today - timedelta(days=29))
+        date_to   = request.query_params.get('date_to')   or str(today)
+
+        desig_map = {'TELECALLER': 'telecaller', 'STM': 'stm'}
+        rows = (
+            UserAvailability.objects
+            .filter(user__company=company, date__gte=date_from, date__lte=date_to,
+                    user__designation__in=['TELECALLER', 'STM'])
+            .select_related('user')
+            .order_by('-date', 'user__name')
+        )
+        days = {}
+        for a in rows:
+            d = days.setdefault(str(a.date), {'date': str(a.date), 'telecallers': [], 'stms': []})
+            entry = {
+                'user_id':       a.user_id,
+                'name':          a.user.name,
+                'is_available':  a.is_available,
+                'checked_in_at': a.checked_in_at.isoformat() if a.checked_in_at else None,
+            }
+            role = desig_map.get((a.user.designation or '').upper())
+            d['stms' if role == 'stm' else 'telecallers'].append(entry)
+        out = []
+        for d in days.values():
+            d['telecaller_count'] = sum(1 for x in d['telecallers'] if x['is_available'])
+            d['stm_count']        = sum(1 for x in d['stms'] if x['is_available'])
+            out.append(d)
+        return Response(out)
+
+
 class MyAvailabilityView(APIView):
     """Self-service availability for telecallers / STMs.
     Marking available stays active for AVAILABILITY_TTL_HOURS, then auto-resets."""
