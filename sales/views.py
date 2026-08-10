@@ -1568,6 +1568,51 @@ class AvailabilityView(APIView):
         return Response({'user_id': user.id, 'is_available': obj.is_available})
 
 
+class AvailabilityHistoryView(APIView):
+    """Sign-in history day by day — who marked available and at what time.
+
+    Reports what was recorded on each date rather than reusing _availability_active(),
+    which expires any prior-day record by design: correct for today's board, but a
+    history row must still show that someone signed in on the 3rd. Project labels are
+    likewise left off, since assignments are current state and would misrepresent what
+    a person was on back then.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import date as date_cls
+        company = _resolve_company(request)
+        today = date_cls.today()
+        date_from = request.query_params.get('date_from') or str(today - timedelta(days=29))
+        date_to   = request.query_params.get('date_to')   or str(today)
+
+        desig_map = {'TELECALLER': 'telecaller', 'STM': 'stm'}
+        rows = (
+            UserAvailability.objects
+            .filter(user__company=company, date__gte=date_from, date__lte=date_to,
+                    user__designation__in=['TELECALLER', 'STM'])
+            .select_related('user')
+            .order_by('-date', 'user__name')
+        )
+        days = {}
+        for a in rows:
+            d = days.setdefault(str(a.date), {'date': str(a.date), 'telecallers': [], 'stms': []})
+            entry = {
+                'user_id':       a.user_id,
+                'name':          a.user.name,
+                'is_available':  a.is_available,
+                'checked_in_at': a.checked_in_at.isoformat() if a.checked_in_at else None,
+            }
+            role = desig_map.get((a.user.designation or '').upper())
+            d['stms' if role == 'stm' else 'telecallers'].append(entry)
+        out = []
+        for d in days.values():
+            d['telecaller_count'] = sum(1 for x in d['telecallers'] if x['is_available'])
+            d['stm_count']        = sum(1 for x in d['stms'] if x['is_available'])
+            out.append(d)
+        return Response(out)
+
+
 class MyAvailabilityView(APIView):
     """Self-service availability for telecallers / STMs.
     Marking available stays active for AVAILABILITY_TTL_HOURS, then auto-resets."""
@@ -1720,7 +1765,13 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
         # (auto + manual firing simultaneously) can't grab the same leads.
         company_leads = Lead.objects.filter(company=company)
         if dist_type == 'telecaller':
-            qs = company_leads.filter(telecaller__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
+            # stm__isnull=True too — a lead an STM (or CP) already self-sourced has
+            # stm set but stays status='new'/telecaller=NULL (nothing else moves it
+            # off 'new' at create time), so without this it silently qualified as
+            # "unassigned" and got swept into telecaller distribution the next time
+            # ANY unrelated lead-create triggered this company-wide run — handing an
+            # STM's own lead to a telecaller entirely by accident.
+            qs = company_leads.filter(telecaller__isnull=True, stm__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
         else:
             qs = company_leads.filter(status='warm_transferred', stm__isnull=True).select_for_update(skip_locked=True).order_by('created_at')
 
