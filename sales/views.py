@@ -1720,7 +1720,13 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
         # (auto + manual firing simultaneously) can't grab the same leads.
         company_leads = Lead.objects.filter(company=company)
         if dist_type == 'telecaller':
-            qs = company_leads.filter(telecaller__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
+            # stm__isnull=True too — a lead an STM (or CP) already self-sourced has
+            # stm set but stays status='new'/telecaller=NULL (nothing else moves it
+            # off 'new' at create time), so without this it silently qualified as
+            # "unassigned" and got swept into telecaller distribution the next time
+            # ANY unrelated lead-create triggered this company-wide run — handing an
+            # STM's own lead to a telecaller entirely by accident.
+            qs = company_leads.filter(telecaller__isnull=True, stm__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
         else:
             qs = company_leads.filter(status='warm_transferred', stm__isnull=True).select_for_update(skip_locked=True).order_by('created_at')
 
