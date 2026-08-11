@@ -615,8 +615,7 @@ class FollowUpListCreateView(APIView):
             FollowUp.objects.select_related('lead', 'assigned_to'), request, field='lead__company'
         )
         if not is_club1000_manager(request.user):
-            from sales.views import _visible_user_ids
-            qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
+            qs = qs.filter(assigned_to=request.user)
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         return Response(FollowUpSerializer(qs, many=True).data)
@@ -650,8 +649,7 @@ class FollowUpDetailView(APIView):
             FollowUp.objects.select_related('lead', 'assigned_to'), request, field='lead__company'
         )
         if not is_club1000_manager(request.user):
-            from sales.views import _visible_user_ids
-            qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
+            qs = qs.filter(assigned_to=request.user)
         followup = qs.filter(pk=pk).first()
         if not followup:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
