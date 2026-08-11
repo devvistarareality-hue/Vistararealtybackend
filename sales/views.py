@@ -2680,15 +2680,37 @@ def _loi_path(b):
     return f'{proj}/Plot {plot} - {client}/R{rev}_LOI_Plot{plot}_{client}.pdf'
 
 
-def _next_eoi_no(company, project_id, prefer=''):
-    """Next per-project EOI code (EOI-1, EOI-2, …). Honours a client-supplied code if
-    it's still free, otherwise assigns the next available so numbers never collide."""
+def _next_eoi_no(company, project_id, prefer='', block=None):
+    """Next per-project EOI code. Honours a client-supplied code if it's still free,
+    otherwise assigns the next available so numbers never collide.
+
+    Default format (block=None, every pre-existing call site): EOI-1, EOI-2, …
+    Block-wise industrial projects pass `block` instead — a block's own running
+    number, prefixed with the block letter ('E' -> E1, E2, …) or bare if there's no
+    block ('' -> 1, 2, 3…). Scoped to block_industrial projects only, so this never
+    changes behaviour for any existing project."""
+    prefer = (prefer or '').strip()
+    if block is not None:
+        import re
+        prefix = block or ''
+        existing = set(
+            Booking.objects.filter(company=company, project_id=project_id)
+            .exclude(plot_numbers='').values_list('plot_numbers', flat=True)
+        )
+        if prefer and prefer not in existing:
+            return prefer
+        pat = re.compile(rf'^{re.escape(prefix)}(\d+)$')
+        used = [int(m.group(1)) for code in existing if (m := pat.match(code))]
+        n = (max(used) + 1) if used else 1
+        while f'{prefix}{n}' in existing:
+            n += 1
+        return f'{prefix}{n}'
+
     existing = set(
         Booking.objects.filter(company=company, project_id=project_id,
                                plot_numbers__istartswith='EOI')
         .values_list('plot_numbers', flat=True)
     )
-    prefer = (prefer or '').strip()
     if prefer and prefer not in existing:
         return prefer
     n = len(existing) + 1
@@ -2855,7 +2877,10 @@ class BookingListCreateView(APIView):
                 # Revising an EOI keeps the same EOI code (EOI-20 stays EOI-20).
                 booking.plot_numbers = prior.plot_numbers
             else:
-                booking.plot_numbers = _next_eoi_no(company, booking.project_id, prefer=(data.get('eoi_no') or ''))
+                # Block-prefixed numbering only for block-wise industrial projects.
+                eoi_block = data.get('eoi_block') if getattr(booking.project, 'block_industrial', False) else None
+                booking.plot_numbers = _next_eoi_no(company, booking.project_id,
+                                                     prefer=(data.get('eoi_no') or ''), block=eoi_block)
             booking.save(update_fields=['plot_numbers'])
 
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
@@ -3018,7 +3043,11 @@ class BookingNextEOIView(APIView):
         pid = request.query_params.get('project')
         if not pid:
             return Response({'detail': 'project is required'}, status=status.HTTP_400_BAD_REQUEST)
-        return Response({'eoi_no': _next_eoi_no(company, pid)})
+        # Block-prefixed numbering only applies to block-wise industrial projects — a
+        # stray `block` param on any other project is ignored so nothing else changes.
+        project = Project.objects.filter(id=pid).only('block_industrial').first()
+        block = request.query_params.get('block') if (project and project.block_industrial) else None
+        return Response({'eoi_no': _next_eoi_no(company, pid, block=block)})
 
 
 def _drop_superseded_revisions(qs):
