@@ -627,7 +627,7 @@ class LeadListView(APIView):
         # 'pending' lists use oldest-first (FIFO) so fresh leads queue at the bottom
         # and never push down the lead currently being worked.
         ordering = request.query_params.get('ordering')
-        if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at'):
+        if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at', 'stm_assigned_at', '-stm_assigned_at'):
             qs = qs.order_by(ordering)
 
         total = qs.count()

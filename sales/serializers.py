@@ -165,7 +165,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'project', 'project_name', 'source', 'source_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
-            'stm', 'stm_name', 'stm_status',
+            'stm', 'stm_name', 'stm_status', 'stm_assigned_at',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]
