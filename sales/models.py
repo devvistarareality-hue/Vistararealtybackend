@@ -116,6 +116,11 @@ class Project(models.Model):
     # sees when they pick a unit on that floor.
     #   [{floor: 0, label: 'Ground', image_url: '…'}, {floor: 1, label: '1st Floor', …}]
     floor_plans = models.JSONField(default=list, blank=True)
+    # Block-wise industrial: floor_wise=True + this flag. Same floor_plans/block
+    # machinery as a multi-block tower, but each block is a single ground-level group
+    # (no real floors) and an unmapped block raises a block-prefixed EOI instead of
+    # falling back to a flat unit list.
+    block_industrial = models.BooleanField(default=False)
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
