@@ -19,7 +19,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'allow_unit_switch', 'booking_approvers',
-            'kiosk_enabled', 'floor_wise', 'floor_plans',
+            'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
@@ -165,7 +165,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'project', 'project_name', 'source', 'source_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
-            'stm', 'stm_name', 'stm_status',
+            'stm', 'stm_name', 'stm_status', 'stm_assigned_at',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]

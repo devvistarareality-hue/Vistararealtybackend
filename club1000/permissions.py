@@ -17,14 +17,12 @@ def has_club1000_access(user):
 
 
 def scope_leads_to_role(qs, user):
-    """Restrict a Club 1000 Lead queryset by org hierarchy: a user sees leads
-    assigned to themselves or to anyone reporting to them, transitively.
-    Managers (is_club1000_manager) see all company leads — mirrors
-    sales.views.scope_leads_to_role, reusing its generic hierarchy walk."""
+    """Restrict a Club 1000 Lead queryset: a plain (non-manager) user sees only
+    leads assigned to themselves — reporting-chain visibility does NOT apply
+    here, unlike Sales. Managers (is_club1000_manager) see all company leads."""
     if is_club1000_manager(user):
         return qs
-    from sales.views import _visible_user_ids  # generic org-tree helper, no Sales coupling
-    return qs.filter(assigned_to__in=_visible_user_ids(user))
+    return qs.filter(assigned_to=user)
 
 
 def _scheme_approver_ids(user, company):
