@@ -619,3 +619,35 @@ class MetaWebhookConfig(models.Model):
 
     def __str__(self):
         return f'MetaWebhookConfig (active={self.is_active})'
+
+
+class BackupSettings(models.Model):
+    """Singleton (always pk=1) — a platform-wide schedule, not per-company. Controls
+    when the automatic full-database backup cron actually produces a new backup."""
+    FREQUENCY_CHOICES = [('weekly', 'Weekly'), ('monthly', 'Monthly'), ('yearly', 'Yearly')]
+    frequency  = models.CharField(max_length=10, choices=FREQUENCY_CHOICES, default='weekly')
+    is_enabled = models.BooleanField(default=True)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'BackupSettings ({self.frequency}, enabled={self.is_enabled})'
+
+
+class BackupRecord(models.Model):
+    """One row per backup attempt (automatic or manually triggered by a super user)."""
+    STATUS_CHOICES = [('running', 'Running'), ('success', 'Success'), ('failed', 'Failed')]
+    status          = models.CharField(max_length=10, choices=STATUS_CHOICES, default='running')
+    file_path       = models.CharField(max_length=300, blank=True)  # Supabase object path
+    file_size_bytes = models.BigIntegerField(null=True, blank=True)
+    # null = automatic (cron-triggered)
+    triggered_by    = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    error_message   = models.TextField(blank=True)
+    started_at      = models.DateTimeField(auto_now_add=True)
+    completed_at    = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f'Backup #{self.id} ({self.status})'
