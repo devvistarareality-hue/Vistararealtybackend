@@ -1250,9 +1250,13 @@ class SiteVisitListView(APIView):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         # Platform admin viewing a specific company (?company_id) — honour the filter.
+        # A site visit has no company of its own; it belongs to its lead's company, the
+        # same path scope_to_company uses above. Filtering company_id directly raised
+        # FieldError, so this endpoint 500'd for any platform admin with a company
+        # selected — which is what left My Conversions showing 0 site visits.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
-            qs = qs.filter(company_id=cid)
+            qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
