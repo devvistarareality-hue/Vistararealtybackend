@@ -240,7 +240,15 @@ class SiteVisitSerializer(serializers.ModelSerializer):
     lead_phone = serializers.CharField(source='lead.phone', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
-    referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
+    # The telecaller behind the visit: the one recorded on the visit, falling back to
+    # the lead's own telecaller. Only some visits carry the field themselves, but the
+    # lead nearly always knows who worked it.
+    referred_by_telecaller_name = serializers.SerializerMethodField()
+
+    def get_referred_by_telecaller_name(self, obj):
+        if obj.referred_by_telecaller_id:
+            return obj.referred_by_telecaller.name
+        return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
 
     class Meta:
         model = SiteVisit
@@ -255,7 +263,15 @@ class ClosureSerializer(serializers.ModelSerializer):
     lead_phone = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
-    referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
+    # As on SiteVisit: the closure's own telecaller, else the lead's. A closure recorded
+    # from the booking flow never sets its own, so without the fallback this is always
+    # blank. The lead can be gone (trial reset), hence the guard.
+    referred_by_telecaller_name = serializers.SerializerMethodField()
+
+    def get_referred_by_telecaller_name(self, obj):
+        if obj.referred_by_telecaller_id:
+            return obj.referred_by_telecaller.name
+        return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
 
     class Meta:
         model = Closure
