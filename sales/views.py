@@ -338,17 +338,23 @@ class StatsView(APIView):
             stm_cold_count=Count('id', filter=Q(stm_status='cold')),
             stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
+        # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
+        # no-show or cancelled visit is not one. Counting every row made the tile read
+        # 48 where only 26 had been done. Dated by when the visit happened, not when
+        # the row was created, so a date range means "visited in this period" the same
+        # way Closures means "closed in this period".
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
+        sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
             cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         if date_from:
-            sv_qs = sv_qs.filter(created_at__date__gte=date_from)
+            sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
         if date_to:
-            sv_qs = sv_qs.filter(created_at__date__lte=date_to)
+            sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
