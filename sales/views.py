@@ -328,17 +328,34 @@ class StatsView(APIView):
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
             called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
-            hot_count=Count('id', filter=Q(telecaller_status='hot')),
-            warm_count=Count('id', filter=Q(telecaller_status='warm')),
-            callback_count=Count('id', filter=Q(telecaller_status='callback')),
-            not_reachable_count=Count('id', filter=Q(telecaller_status='not_reachable')),
-            cold_count=Count('id', filter=Q(telecaller_status='cold')),
-            # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
-            stm_hot_count=Count('id', filter=Q(stm_status='hot')),
-            stm_warm_count=Count('id', filter=Q(stm_status='warm')),
-            stm_cold_count=Count('id', filter=Q(stm_status='cold')),
-            stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
+
+        # Status-bucket counts (hot/warm/callback/not_reachable/cold, and the STM
+        # equivalents) are counted by the date the lead's status actually CHANGED
+        # to that value (LeadStatusHistory), not by created_at. A lead received on
+        # an earlier date but marked warm today must land in "today"'s warm count —
+        # counting against the created_at-filtered leads_qs hid it entirely. Same
+        # fix already applied to sql_count below and to StatsTrendView's per-day
+        # warm/hot/cold rows; this brings the stat-card tiles in line with those.
+        def _status_transition_count(field, value):
+            qs = LeadStatusHistory.objects.filter(
+                lead__in=leads_scope, field_changed=field, new_value=value)
+            if date_from:
+                qs = qs.filter(created_at__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(created_at__date__lte=date_to)
+            return qs.values('lead').distinct().count()
+
+        hot_count           = _status_transition_count('telecaller_status', 'hot')
+        warm_count          = _status_transition_count('telecaller_status', 'warm')
+        callback_count      = _status_transition_count('telecaller_status', 'callback')
+        not_reachable_count = _status_transition_count('telecaller_status', 'not_reachable')
+        cold_count          = _status_transition_count('telecaller_status', 'cold')
+        # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
+        stm_hot_count           = _status_transition_count('stm_status', 'hot')
+        stm_warm_count          = _status_transition_count('stm_status', 'warm')
+        stm_cold_count          = _status_transition_count('stm_status', 'cold')
+        stm_sv_scheduled_count  = _status_transition_count('stm_status', 'sv_scheduled')
         # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
         # no-show or cancelled visit is not one. Counting every row made the tile read
         # 48 where only 26 had been done. Dated by when the visit happened, not when
@@ -374,11 +391,15 @@ class StatsView(APIView):
         followup_call_count = fu_qs.count()
 
         cl_scoped = cl_qs.filter(**cl_filter)
+        sv_scoped = sv_qs.filter(**sv_filter)
         sv_done, closures, active_projects = (
-            sv_qs.filter(**sv_filter).count(),
+            sv_scoped.count(),
             cl_scoped.count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
+        # Post-visit outcome breakdown of the same completed-visits window above.
+        sv_interested_count     = sv_scoped.filter(outcome='interested').count()
+        sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
 
         # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
         sql_hist = LeadStatusHistory.objects.filter(
@@ -407,16 +428,18 @@ class StatsView(APIView):
             'followup_call_count': followup_call_count,
             # Every call made in the window: new leads worked plus follow-up calls.
             'total_called_count': agg['called_count'] + followup_call_count,
-            'hot_count':          agg['hot_count'],
-            'warm_count':         agg['warm_count'],
-            'callback_count':     agg['callback_count'],
-            'not_reachable_count':agg['not_reachable_count'],
-            'cold_count':         agg['cold_count'],
-            'stm_hot_count':          agg['stm_hot_count'],
-            'stm_warm_count':         agg['stm_warm_count'],
-            'stm_cold_count':         agg['stm_cold_count'],
-            'stm_sv_scheduled_count': agg['stm_sv_scheduled_count'],
+            'hot_count':          hot_count,
+            'warm_count':         warm_count,
+            'callback_count':     callback_count,
+            'not_reachable_count':not_reachable_count,
+            'cold_count':         cold_count,
+            'stm_hot_count':          stm_hot_count,
+            'stm_warm_count':         stm_warm_count,
+            'stm_cold_count':         stm_cold_count,
+            'stm_sv_scheduled_count': stm_sv_scheduled_count,
             'sv_done':            sv_done,
+            'sv_interested_count':     sv_interested_count,
+            'sv_not_interested_count': sv_not_interested_count,
             'closures':           closures,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
@@ -1311,6 +1334,17 @@ class SiteVisitDetailView(APIView):
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         old_status = sv.status
+        # Marking a visit Done must record what came of it — an outcome and remarks,
+        # not just a status flip — so the pipeline can tell an interested walk-in
+        # from a dead one. Checked against the merged (existing + incoming) values so
+        # a client that already set these on an earlier PATCH isn't forced to resend.
+        if request.data.get('status') == 'completed' and old_status != 'completed':
+            new_outcome = request.data.get('outcome', sv.outcome)
+            new_remarks = request.data.get('remarks', sv.remarks)
+            if not new_outcome or not str(new_remarks or '').strip():
+                return Response(
+                    {'detail': 'Outcome and remarks are required to mark a site visit as done.'},
+                    status=status.HTTP_400_BAD_REQUEST)
         ser = SiteVisitSerializer(sv, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)

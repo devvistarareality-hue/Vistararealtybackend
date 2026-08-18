@@ -53,6 +53,11 @@ SV_STATUS = [
     ('no_show', 'No Show'),
 ]
 
+SV_OUTCOME = [
+    ('interested', 'Interested'),
+    ('not_interested', 'Not Interested'),
+]
+
 CLOSURE_STATUS = [
     ('booked', 'Booked'),
     ('cancelled', 'Cancelled'),
@@ -356,6 +361,9 @@ class SiteVisit(models.Model):
     scheduled_at = models.DateTimeField(null=True, blank=True)
     visited_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=SV_STATUS, default='scheduled')
+    # Post-visit outcome — set alongside remarks the moment a visit is marked Done,
+    # so the pipeline can tell an interested walk-in from a dead one at a glance.
+    outcome = models.CharField(max_length=20, choices=SV_OUTCOME, blank=True)
     stm = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='site_visits'
     )
