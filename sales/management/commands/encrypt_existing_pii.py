@@ -12,7 +12,7 @@ Safe to re-run: get_prep_value leaves a value alone if it is already ciphertext.
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from sales.fields import get_fernet
+from sales.fields import get_fernet, phone_blind_index
 from sales.models import (Booking, Closure, FollowUp, Lead, LeadStatusHistory,
                           Plot, SiteVisit)
 
@@ -20,7 +20,10 @@ from sales.models import (Booking, Closure, FollowUp, Lead, LeadStatusHistory,
 # and the field-classification pass. Encrypting a field the ORM looks up by value
 # would silently break that lookup, since Fernet is non-deterministic.
 TARGETS = [
-    (Lead,              ['alt_phone', 'address', 'telecaller_remarks', 'stm_remarks',
+    # Lead.name/phone/email are encrypted too; phone stays findable through the
+    # phone_key blind index, which save() keeps in step.
+    (Lead,              ['name', 'phone', 'email', 'alt_phone', 'address',
+                         'telecaller_remarks', 'stm_remarks',
                          'meta_adset_name', 'meta_ad_name']),
     (Booking,           ['client_name', 'address', 'cp_name', 'manual_stm_name']),
     (Closure,           ['client_name', 'client_phone', 'remarks']),
@@ -70,6 +73,10 @@ class Command(BaseCommand):
                         n += cur.fetchone()[0]
                     outstanding += n
                     self.stdout.write(f'  {model.__name__:<20} {n:>6} values still plaintext')
+            missing_key = Lead.objects.filter(phone_key='').exclude(phone='').count()
+            if missing_key:
+                self.stdout.write(f'  {"Lead.phone_key":<20} {missing_key:>6} rows missing a blind index')
+                outstanding += missing_key
             self.stdout.write(self.style.SUCCESS(
                 f'would encrypt {outstanding} values'
                 if outstanding else 'nothing to do — every target value is already encrypted'))
@@ -83,18 +90,24 @@ class Command(BaseCommand):
                 # A read gives plaintext whether the column holds plaintext or
                 # ciphertext; re-saving is what writes ciphertext back.
                 vals = [getattr(obj, f) for f in fields]
-                if not any(v for v in vals):
+                if model is Lead:
+                    # Derive the lookup key from the decrypted attribute. Rows written
+                    # before the column existed have none, and bulk paths may lag.
+                    obj.phone_key = phone_blind_index(obj.phone)
+                elif not any(v for v in vals):
                     continue
                 n_rows += 1
                 n_vals += sum(1 for v in vals if v)
                 buf.append(obj)
                 if not dry and len(buf) >= batch:
+                    cols = fields + (['phone_key'] if model is Lead else [])
                     with transaction.atomic():
-                        model.objects.bulk_update(buf, fields)
+                        model.objects.bulk_update(buf, cols)
                     buf = []
             if not dry and buf:
+                cols = fields + (['phone_key'] if model is Lead else [])
                 with transaction.atomic():
-                    model.objects.bulk_update(buf, fields)
+                    model.objects.bulk_update(buf, cols)
             total_rows += n_rows
             total_vals += n_vals
             self.stdout.write(

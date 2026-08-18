@@ -1,7 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
-from .fields import EncryptedTextField, EncryptedDecimalField
+from .fields import EncryptedTextField, EncryptedDecimalField, phone_blind_index
 
 
 LEAD_STATUS = [
@@ -121,6 +121,10 @@ class Project(models.Model):
     # (no real floors) and an unmapped block raises a block-prefixed EOI instead of
     # falling back to a flat unit list.
     block_industrial = models.BooleanField(default=False)
+    # Some projects render a bespoke LOI layout. Keyed off this rather than the
+    # project's name, so renaming a project can't silently change its paperwork.
+    LOI_VARIANTS = [('', 'Standard'), ('tundav', 'Tundav'), ('kalrav3', 'Kalrav 3')]
+    loi_variant = models.CharField(max_length=30, choices=LOI_VARIANTS, blank=True, default='')
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
@@ -210,10 +214,14 @@ class Lead(models.Model):
         'companies.Company', on_delete=models.CASCADE,
         related_name='leads', null=True, blank=True,
     )
-    name = models.CharField(max_length=200)
-    phone = models.CharField(max_length=20)
+    name = EncryptedTextField()
+    phone = EncryptedTextField()
+    # Searchable fingerprint of `phone` — an encrypted column can't be looked up,
+    # so duplicate detection and phone search go through this instead. Kept in step
+    # with `phone` by save() and, for bulk paths, by the caller.
+    phone_key = models.CharField(max_length=64, blank=True, db_index=True)
     alt_phone = EncryptedTextField(blank=True)
-    email = models.EmailField(blank=True)
+    email = EncryptedTextField(blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
     source = models.ForeignKey(LeadSource, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
 
@@ -284,6 +292,18 @@ class Lead(models.Model):
             models.Index(fields=['telecaller', 'telecaller_status', '-created_at'], name='lead_tc_status_created_idx'),
             models.Index(fields=['stm', 'stm_status', '-created_at'], name='lead_stm_status_created_idx'),
         ]
+
+    def save(self, *args, **kwargs):
+        # Derive the lookup key from the plaintext attribute before the field
+        # encrypts it on write. bulk_create/bulk_update skip save(), so those
+        # callers set phone_key themselves (see the CSV import).
+        self.phone_key = phone_blind_index(self.phone)
+        if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+            uf = set(kwargs['update_fields'])
+            if 'phone' in uf:
+                uf.add('phone_key')
+                kwargs['update_fields'] = list(uf)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f'{self.name} – {self.phone}'
@@ -605,6 +625,10 @@ class MetaWebhookConfig(models.Model):
     # Encrypted at rest (Fernet). Long-lived FB Page token = full page API access.
     # verify_token stays plaintext — it's used in an equality lookup and is low-value.
     page_access_token = EncryptedTextField(blank=True)
+    # Meta signs every webhook POST with HMAC-SHA256 of the raw body, keyed on the
+    # app secret. Without it the endpoint accepts anything the internet sends.
+    # Encrypted for the same reason as the page token.
+    app_secret = EncryptedTextField(blank=True)
     default_project = models.ForeignKey(
         Project, on_delete=models.SET_NULL, null=True, blank=True
     )
