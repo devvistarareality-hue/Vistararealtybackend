@@ -19,7 +19,7 @@ from club1000.models import (FollowUp as C1FollowUp, Investor,
                              Payout, ReferralReward)
 from companies.models import Company
 from sales.models import (Booking, Closure, FollowUp, Lead, LeadStatusHistory,
-                          Plot, Project, SiteVisit)
+                          MetaWebhookConfig, Plot, Project, SiteVisit)
 
 # Only fields that no query filters on — see the audit in test_tenant_isolation
 # and the field-classification pass. Encrypting a field the ORM looks up by value
@@ -30,13 +30,15 @@ TARGETS = [
     (Lead,              ['name', 'phone', 'email', 'alt_phone', 'address',
                          'telecaller_remarks', 'stm_remarks',
                          'meta_adset_name', 'meta_ad_name']),
-    (Booking,           ['client_name', 'address', 'cp_name', 'manual_stm_name']),
+    (Booking,           ['client_name', 'phone', 'address', 'cp_name', 'manual_stm_name']),
     (Closure,           ['client_name', 'client_phone', 'remarks']),
     (SiteVisit,         ['remarks']),
     (FollowUp,          ['remarks']),
     (LeadStatusHistory, ['remarks']),
     (Plot,              ['notes']),
     (Project,           ['approver_email']),
+    # Credentials, not PII, but they live in encrypted columns too.
+    (MetaWebhookConfig, ['page_access_token', 'app_secret']),
     # Every other module, same rule: only fields nothing looks up by value.
     (Company,           ['address', 'phone', 'email']),
     (User,              ['phone']),
