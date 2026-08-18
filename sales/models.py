@@ -131,7 +131,7 @@ class Project(models.Model):
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
-    approver_email = models.EmailField(max_length=254, blank=True, default='')
+    approver_email = EncryptedTextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     updated_at = models.DateTimeField(auto_now=True)
@@ -392,7 +392,7 @@ class Booking(models.Model):
     # Client
     client_name = EncryptedTextField(blank=True)
     gender      = models.CharField(max_length=10, blank=True)
-    phone       = models.CharField(max_length=20, blank=True)
+    phone       = EncryptedTextField(blank=True)
     address     = EncryptedTextField(blank=True)
     source      = models.CharField(max_length=100, blank=True)
 

@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
+from sales.fields import phone_blind_index
 from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
 from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory, REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT
 from .serializers import (
@@ -210,10 +211,18 @@ class InvestorListCreateView(APIView):
             qs = qs.exclude(approval_status='rejected')
         search = request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(
-                Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search)
-                | Q(loi_no__icontains=search)
-            )
+            # name/phone/email are encrypted, so SQL can't match them. A full
+            # ten-digit number uses the blind index; anything else is matched in
+            # Python over the already-scoped rows and fed back as an id filter.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [pk for pk, nm, ph, em in qs.values_list('id', 'name', 'phone', 'email')
+                        if needle in (nm or '').lower() or needle in (ph or '').lower()
+                        or needle in (em or '').lower()]
+                qs = qs.filter(Q(id__in=hits) | Q(loi_no__icontains=search))
         return Response(InvestorListSerializer(qs.order_by('-created_at'), many=True).data)
 
     def post(self, request):
@@ -500,7 +509,18 @@ class LeadListCreateView(APIView):
             qs = qs.filter(created_at__date__lte=request.query_params['date_to'])
         search = request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search))
+            # Same as the investor list above: encrypted columns can't be matched
+            # in SQL, so exact phone goes through the blind index and everything
+            # else is matched in Python over the scoped rows.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [pk for pk, nm, ph, em in qs.values_list('id', 'name', 'phone', 'email')
+                        if needle in (nm or '').lower() or needle in (ph or '').lower()
+                        or needle in (em or '').lower()]
+                qs = qs.filter(id__in=hits)
         return Response(LeadListSerializer(qs, many=True).data)
 
     def post(self, request):

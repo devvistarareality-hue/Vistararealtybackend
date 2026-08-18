@@ -13,8 +13,13 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from sales.fields import get_fernet, phone_blind_index
+from accounts.models import User
+from club1000.models import (FollowUp as C1FollowUp, Investor,
+                             Lead as C1Lead, LeadStatusHistory as C1History,
+                             Payout, ReferralReward)
+from companies.models import Company
 from sales.models import (Booking, Closure, FollowUp, Lead, LeadStatusHistory,
-                          Plot, SiteVisit)
+                          Plot, Project, SiteVisit)
 
 # Only fields that no query filters on — see the audit in test_tenant_isolation
 # and the field-classification pass. Encrypting a field the ORM looks up by value
@@ -31,7 +36,22 @@ TARGETS = [
     (FollowUp,          ['remarks']),
     (LeadStatusHistory, ['remarks']),
     (Plot,              ['notes']),
+    (Project,           ['approver_email']),
+    # Every other module, same rule: only fields nothing looks up by value.
+    (Company,           ['address', 'phone', 'email']),
+    (User,              ['phone']),
+    (C1Lead,            ['name', 'phone', 'alt_phone', 'email',
+                         'reference_name', 'reference_phone', 'remarks']),
+    (Investor,          ['name', 'phone', 'email', 'pan', 'notes',
+                         'reference_name', 'reference_phone']),
+    (C1History,         ['remarks']),
+    (C1FollowUp,        ['remarks']),
+    (Payout,            ['notes']),
+    (ReferralReward,    ['reference_name', 'reference_phone']),
 ]
+
+# Models carrying a phone blind index that must be recomputed from the plaintext.
+KEYED = (Lead, C1Lead, Investor)
 
 BATCH = 500
 
@@ -73,9 +93,9 @@ class Command(BaseCommand):
                         n += cur.fetchone()[0]
                     outstanding += n
                     self.stdout.write(f'  {model.__name__:<20} {n:>6} values still plaintext')
-            missing_key = Lead.objects.filter(phone_key='').exclude(phone='').count()
+            missing_key = sum(m.objects.filter(phone_key='').exclude(phone='').count() for m in KEYED)
             if missing_key:
-                self.stdout.write(f'  {"Lead.phone_key":<20} {missing_key:>6} rows missing a blind index')
+                self.stdout.write(f'  {"phone_key":<20} {missing_key:>6} rows missing a blind index')
                 outstanding += missing_key
             self.stdout.write(self.style.SUCCESS(
                 f'would encrypt {outstanding} values'
@@ -90,7 +110,7 @@ class Command(BaseCommand):
                 # A read gives plaintext whether the column holds plaintext or
                 # ciphertext; re-saving is what writes ciphertext back.
                 vals = [getattr(obj, f) for f in fields]
-                if model is Lead:
+                if model in KEYED:
                     # Derive the lookup key from the decrypted attribute. Rows written
                     # before the column existed have none, and bulk paths may lag.
                     obj.phone_key = phone_blind_index(obj.phone)
@@ -100,12 +120,12 @@ class Command(BaseCommand):
                 n_vals += sum(1 for v in vals if v)
                 buf.append(obj)
                 if not dry and len(buf) >= batch:
-                    cols = fields + (['phone_key'] if model is Lead else [])
+                    cols = fields + (['phone_key'] if model in KEYED else [])
                     with transaction.atomic():
                         model.objects.bulk_update(buf, cols)
                     buf = []
             if not dry and buf:
-                cols = fields + (['phone_key'] if model is Lead else [])
+                cols = fields + (['phone_key'] if model in KEYED else [])
                 with transaction.atomic():
                     model.objects.bulk_update(buf, cols)
             total_rows += n_rows

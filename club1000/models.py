@@ -4,7 +4,7 @@ from dateutil.relativedelta import relativedelta
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
-from sales.fields import EncryptedDecimalField
+from sales.fields import EncryptedDecimalField, EncryptedTextField, phone_blind_index
 from sales.models import FOLLOWUP_STATUS
 
 
@@ -67,12 +67,15 @@ class Lead(models.Model):
         'companies.Company', on_delete=models.CASCADE,
         related_name='club1000_leads', null=True, blank=True,
     )
-    name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=20, blank=True)
-    alt_phone = models.CharField(max_length=20, blank=True)
-    email = models.EmailField(blank=True)
-    reference_name = models.CharField(max_length=150, blank=True)
-    reference_phone = models.CharField(max_length=20, blank=True)
+    name = EncryptedTextField()
+    phone = EncryptedTextField()
+    # Searchable fingerprint of `phone` — an encrypted column can't be looked
+    # up, so duplicate checks and phone search go through this instead.
+    phone_key = models.CharField(max_length=64, blank=True, db_index=True)
+    alt_phone = EncryptedTextField(blank=True)
+    email = EncryptedTextField(blank=True)
+    reference_name = EncryptedTextField(blank=True)
+    reference_phone = EncryptedTextField(blank=True)
     source = models.CharField(max_length=20, choices=LEAD_SOURCE_CHOICES, default='other')
     # The date this lead was actually received — editable at add-time (defaults to
     # today) so a lead entered late can be backdated. Distinct from `created_at`,
@@ -86,7 +89,7 @@ class Lead(models.Model):
     total_return_pct = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_leads')
     status = models.CharField(max_length=20, choices=LEAD_STATUS, default='new')
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     # Mirrors the lead's single open FollowUp (if any) — set when one is scheduled,
     # cleared when it's actioned (completed/missed) or the lead reaches a terminal
     # status (not_interested / lost / converted), so there's never a stale date on
@@ -99,6 +102,11 @@ class Lead(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        # Derive the key from the plaintext attribute before the field encrypts it.
+        self.phone_key = phone_blind_index(self.phone)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
@@ -115,7 +123,7 @@ class LeadStatusHistory(models.Model):
     field_changed = models.CharField(max_length=50)
     old_value = models.CharField(max_length=100, blank=True)
     new_value = models.CharField(max_length=100, blank=True)
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -133,7 +141,7 @@ class FollowUp(models.Model):
     scheduled_at = models.DateTimeField()
     completed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=FOLLOWUP_STATUS, default='pending')
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     outcome = models.TextField(blank=True)
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -192,12 +200,15 @@ class Investor(models.Model):
     )
     scheme = models.ForeignKey(Scheme, on_delete=models.PROTECT, related_name='investors')
     source = models.CharField(max_length=20, choices=LEAD_SOURCE_CHOICES, default='referral')
-    reference_name = models.CharField(max_length=150, blank=True)
-    reference_phone = models.CharField(max_length=20, blank=True)
-    name = models.CharField(max_length=150)
-    phone = models.CharField(max_length=20, blank=True)
-    email = models.EmailField(blank=True)
-    pan = models.CharField(max_length=20, blank=True)
+    reference_name = EncryptedTextField(blank=True)
+    reference_phone = EncryptedTextField(blank=True)
+    name = EncryptedTextField()
+    phone = EncryptedTextField()
+    # Searchable fingerprint of `phone` — an encrypted column can't be looked
+    # up, so duplicate checks and phone search go through this instead.
+    phone_key = models.CharField(max_length=64, blank=True, db_index=True)
+    email = EncryptedTextField(blank=True)
+    pan = EncryptedTextField(blank=True)
     amount_invested = EncryptedDecimalField(max_digits=14, decimal_places=2)
     investment_date = models.DateField(default=timezone.now)
     maturity_date = models.DateField()
@@ -217,7 +228,7 @@ class Investor(models.Model):
     # submitter's edits aren't lost — cleared once consumed by InvestorActionView.
     pending_payout_schedule = models.JSONField(null=True, blank=True)
     added_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_added')
-    notes = models.TextField(blank=True)
+    notes = EncryptedTextField(blank=True)
     # Set when this Investor was created by converting a Lead.
     lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='investor_conversions')
     # Free-text collateral/security description for the Investment Proposal Form (LOI)
@@ -252,6 +263,7 @@ class Investor(models.Model):
             models.Index(fields=['added_by'], name='club1000_inv_addedby_idx'),
         ]
 
+
     def __str__(self):
         return f'{self.name} ({self.scheme.name})'
 
@@ -262,6 +274,10 @@ class Investor(models.Model):
         return self.status == 'active' and bool(self.maturity_date) and self.maturity_date <= date.today()
 
     def save(self, *args, **kwargs):
+        # Derive the phone key from the plaintext attribute before the field
+        # encrypts it. Folded into this save() rather than a second one, which
+        # Python would simply shadow.
+        self.phone_key = phone_blind_index(self.phone)
         if not self.maturity_date and self.investment_date and self.scheme_id:
             self.maturity_date = self.investment_date + relativedelta(months=self.scheme.tenure_months)
         super().save(*args, **kwargs)
@@ -275,7 +291,7 @@ class Payout(models.Model):
     status = models.CharField(max_length=10, choices=PAYOUT_STATUS_CHOICES, default='pending')
     paid_date = models.DateField(null=True, blank=True)
     paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
-    notes = models.TextField(blank=True)
+    notes = EncryptedTextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -304,8 +320,8 @@ class ReferralReward(models.Model):
     already-locked-in rate, never changing the rate itself. Mirrors Payout's
     pending/paid lifecycle."""
     investor = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name='referral_rewards')
-    reference_name = models.CharField(max_length=150)
-    reference_phone = models.CharField(max_length=20)
+    reference_name = EncryptedTextField(blank=True)
+    reference_phone = EncryptedTextField(blank=True)
     amount = EncryptedDecimalField(max_digits=14, decimal_places=2)
     # The % rate locked in for THIS reward at creation time (0.5 for a new
     # investment, 0.25 for a renewal) — kept so a later plain Revise can
