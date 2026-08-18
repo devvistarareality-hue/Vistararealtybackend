@@ -5,6 +5,7 @@ authenticated GET endpoint as an ALPHA user and fails if the sentinel appears in
 any response. Sentinel-in-JSON catches leakage whatever the response shape is.
 """
  
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import get_resolver
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -72,6 +73,16 @@ class TenantLeak(TestCase):
                                approval_status='APPROVED', booking_date='2026-08-01')
         FollowUp.objects.create(lead=cls.lb, assigned_to=cls.b_admin,
                                 scheduled_at='2026-08-02T10:00:00Z', remarks=SENTINEL)
+
+    def setUp(self):
+        # StatsView and friends cache per user id for 20s. Test rollbacks free those
+        # ids up for reuse, so without this a cached response from one test class can
+        # be served to a different user in the next one. (Production is unaffected --
+        # user ids there are unique and never reused.)
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
 
     def _get_views(self):
         seen, out = set(), []

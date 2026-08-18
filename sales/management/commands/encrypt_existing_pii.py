@@ -51,6 +51,30 @@ class Command(BaseCommand):
         dry, batch = opts['dry_run'], opts['batch']
         total_rows = total_vals = 0
 
+        if dry:
+            # Count what is genuinely still plaintext. Reading through the ORM would
+            # decrypt first and make every populated row look outstanding, so ask the
+            # database for the stored bytes: Fernet tokens all begin 'gAAAAA'.
+            from django.db import connection
+            outstanding = 0
+            with connection.cursor() as cur:
+                for model, fields in TARGETS:
+                    table = model._meta.db_table
+                    n = 0
+                    for f in fields:
+                        col = model._meta.get_field(f).column
+                        cur.execute(
+                            f'SELECT count(*) FROM {table} '
+                            f"WHERE {col} IS NOT NULL AND {col} <> '' AND {col} NOT LIKE 'gAAAAA%%'"
+                        )
+                        n += cur.fetchone()[0]
+                    outstanding += n
+                    self.stdout.write(f'  {model.__name__:<20} {n:>6} values still plaintext')
+            self.stdout.write(self.style.SUCCESS(
+                f'would encrypt {outstanding} values'
+                if outstanding else 'nothing to do — every target value is already encrypted'))
+            return
+
         for model, fields in TARGETS:
             qs = model.objects.all().only('pk', *fields).order_by('pk')
             n_rows = n_vals = 0
