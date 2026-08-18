@@ -15,7 +15,13 @@ from attendance.models import LeaveApplication
 
 
 def auth(client, user):
-    client.credentials(HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(user).access_token}')
+    token = RefreshToken.for_user(user).access_token
+    # SessionJWTAuthentication rejects any token without a matching per-platform
+    # session_token, so mint the same claims the real login view does. Without
+    # these every request here came back 401 and the suite tested nothing.
+    token['platform'] = 'app'
+    token['session_token'] = str(user.session_token_app)
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
 
 
 class LeaveApprovalAuthTests(APITestCase):
