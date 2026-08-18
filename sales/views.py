@@ -29,13 +29,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking,
+    UserProjectAssignment, Booking, BackupSettings, BackupRecord,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
+    BackupSettingsSerializer, BackupRecordSerializer,
 )
 
 PAGE_SIZE = 25
@@ -710,6 +711,14 @@ class LeadListView(APIView):
             existing.duplicate_count += 1
             existing.save(update_fields=['duplicate_count'])
 
+        # Optional backdate — "when did this lead actually come in" (e.g. a walk-in
+        # logged a day later). created_at is auto_now_add, so it can't be set via the
+        # serializer; overwrite it directly afterward, same as the bulk importer does.
+        lead_date = _imp_dt(data.get('lead_date'))
+        if lead_date:
+            lead.created_at = lead_date
+            lead.save(update_fields=['created_at'])
+
         _record_lead_created(lead, by=request.user)
         # Notify the assignee when an admin/manager hand-picks them on create.
         if can_assign:
@@ -783,6 +792,8 @@ class LeadDetailView(APIView):
         old_stm_id       = lead.stm_id
         old_tc_name      = lead.telecaller.name if lead.telecaller else ''
         old_stm_name     = lead.stm.name        if lead.stm        else ''
+        old_tc_remarks   = lead.telecaller_remarks
+        old_stm_remarks  = lead.stm_remarks
 
         # Field-level write restrictions (mirrors the portal UI):
         #  - Telecallers may only write telecaller (TC) fields.
@@ -845,6 +856,21 @@ class LeadDetailView(APIView):
             history_entries.append(LeadStatusHistory(
                 lead=lead, changed_by=request.user,
                 field_changed='stm_status', old_value=old_stm_status, new_value=lead.stm_status,
+            ))
+        # Remarks are free text, not a status transition — logged so the STM (or anyone
+        # else) can see exactly what the telecaller wrote and when, once the lead is
+        # transferred to them. Same for STM's own remarks, for symmetry.
+        # new_value is capped at 100 chars in the DB, but remarks can run much longer —
+        # the full text goes in `remarks` (a TextField), new_value just holds a preview.
+        if old_tc_remarks != lead.telecaller_remarks and lead.telecaller_remarks:
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user, field_changed='telecaller_remarks',
+                old_value='', new_value=lead.telecaller_remarks[:100], remarks=lead.telecaller_remarks,
+            ))
+        if old_stm_remarks != lead.stm_remarks and lead.stm_remarks:
+            history_entries.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user, field_changed='stm_remarks',
+                old_value='', new_value=lead.stm_remarks[:100], remarks=lead.stm_remarks,
             ))
         if old_tc_id != lead.telecaller_id:
             new_tc_name = lead.telecaller.name if lead.telecaller else ''
@@ -4069,3 +4095,65 @@ class SalesDataResetView(APIView):
         if n_booking_closures and 'closures' not in effective:
             deleted['closures'] = n_booking_closures  # the booking-mirrored ones only
         return Response({'detail': 'Trial data cleared.', 'deleted': deleted, 'targets': sorted(effective)})
+
+
+class BackupSettingsView(APIView):
+    """Platform-super-user-only: view/update the automatic backup schedule."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
+        return Response(BackupSettingsSerializer(settings_row).data)
+
+    def patch(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
+        ser = BackupSettingsSerializer(settings_row, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        ser.save(updated_by=request.user)
+        return Response(ser.data)
+
+
+class BackupListView(APIView):
+    """Platform-super-user-only: recent backup history."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        records = BackupRecord.objects.select_related('triggered_by')[:50]
+        return Response(BackupRecordSerializer(records, many=True).data)
+
+
+class BackupRunNowView(APIView):
+    """Platform-super-user-only: trigger a backup immediately, outside the schedule."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        from .backup_service import run_backup
+        record = run_backup(triggered_by=request.user)
+        return Response(BackupRecordSerializer(record).data,
+                         status=status.HTTP_201_CREATED if record.status == 'success' else status.HTTP_502_BAD_GATEWAY)
+
+
+class BackupDownloadView(APIView):
+    """Platform-super-user-only: a short-lived signed URL for one backup file."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        record = BackupRecord.objects.filter(pk=pk, status='success').first()
+        if not record or not record.file_path:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from .backup_storage import signed_backup_url
+        url = signed_backup_url(record.file_path)
+        if not url:
+            return Response({'detail': 'Could not generate a download link.'}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response({'url': url})
