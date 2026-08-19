@@ -289,6 +289,11 @@ class Payout(models.Model):
     due_date = models.DateField()
     amount_due = EncryptedDecimalField(max_digits=14, decimal_places=2)
     status = models.CharField(max_length=10, choices=PAYOUT_STATUS_CHOICES, default='pending')
+    # The amount actually disbursed, set when marked paid — may differ from
+    # amount_due (rounding, a partial payment, a negotiated adjustment).
+    # Falls back to amount_due when null (paid before this field existed, or
+    # marked paid without an override).
+    paid_amount = EncryptedDecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     paid_date = models.DateField(null=True, blank=True)
     paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     notes = EncryptedTextField(blank=True)

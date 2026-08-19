@@ -1,5 +1,5 @@
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
 from django.db.models import Q
 from rest_framework.views import APIView
@@ -378,6 +378,7 @@ class InvestorLedgerView(APIView):
             'date': str(investor.investment_date),
             'label': f'Investment — {investor.scheme.name}',
             'amount': str(investor.amount_invested),
+            'paid_amount': None,
             'status': 'completed',
             'paid_date': str(investor.investment_date),
             'notes': '',
@@ -385,19 +386,23 @@ class InvestorLedgerView(APIView):
         total_due = Decimal('0')
         total_paid = Decimal('0')
         for p in investor.payouts.all():
+            actual_paid = p.paid_amount if p.paid_amount is not None else p.amount_due
             entries.append({
                 'type': p.payout_type,
                 'payout_id': p.id,
                 'date': str(p.due_date),
                 'label': payout_labels.get(p.payout_type, p.payout_type),
                 'amount': str(p.amount_due),
+                # Only set once actually paid — may differ from `amount` (the
+                # originally scheduled figure) if it was overridden on mark-paid.
+                'paid_amount': str(actual_paid) if p.status == 'paid' else None,
                 'status': p.status,
                 'paid_date': str(p.paid_date) if p.paid_date else None,
                 'notes': p.notes,
             })
             total_due += p.amount_due
             if p.status == 'paid':
-                total_paid += p.amount_due
+                total_paid += actual_paid
         entries.sort(key=lambda e: e['date'])
 
         summary = {
@@ -501,10 +506,23 @@ class PayoutMarkPaidView(APIView):
         ).filter(pk=pk).first()
         if not payout:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Optional override of the actually-disbursed amount (rounding, a partial
+        # payment, a negotiated adjustment) — falls back to the scheduled amount.
+        amount = request.data.get('amount')
+        if amount not in (None, ''):
+            try:
+                payout.paid_amount = Decimal(str(amount))
+            except (InvalidOperation, ValueError, TypeError):
+                return Response({'detail': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            payout.paid_amount = payout.amount_due
+        notes = request.data.get('notes')
+        if notes is not None:
+            payout.notes = notes
         payout.status = 'paid'
         payout.paid_date = date.today()
         payout.paid_by = request.user
-        payout.save(update_fields=['status', 'paid_date', 'paid_by', 'updated_at'])
+        payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
         return Response(PayoutSerializer(payout).data)
 
 
