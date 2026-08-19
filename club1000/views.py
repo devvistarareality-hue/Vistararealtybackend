@@ -11,7 +11,10 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
-from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory, REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT
+from .models import (
+    Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
+    REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
+)
 from .serializers import (
     SchemeSerializer, InvestorListSerializer,
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
@@ -349,6 +352,65 @@ class InvestorDetailView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         ser.save()
         return Response(ser.data)
+
+
+class InvestorLedgerView(APIView):
+    """Full money-movement history for one investor, in one chronological
+    timeline: the investment itself plus every scheduled payout (interest,
+    maturity, premature redemption) — paid or still pending. Everything the
+    client has put in and everything owed/paid back to them."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        qs = _company_filtered(Investor.objects.select_related('scheme', 'added_by'), request)
+        if not is_club1000_manager(request.user):
+            qs = qs.filter(added_by=request.user)
+        investor = qs.filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        payout_labels = dict(PAYOUT_TYPE_CHOICES)
+        entries = [{
+            'type': 'investment',
+            'payout_id': None,
+            'date': str(investor.investment_date),
+            'label': f'Investment — {investor.scheme.name}',
+            'amount': str(investor.amount_invested),
+            'status': 'completed',
+            'paid_date': str(investor.investment_date),
+            'notes': '',
+        }]
+        total_due = Decimal('0')
+        total_paid = Decimal('0')
+        for p in investor.payouts.all():
+            entries.append({
+                'type': p.payout_type,
+                'payout_id': p.id,
+                'date': str(p.due_date),
+                'label': payout_labels.get(p.payout_type, p.payout_type),
+                'amount': str(p.amount_due),
+                'status': p.status,
+                'paid_date': str(p.paid_date) if p.paid_date else None,
+                'notes': p.notes,
+            })
+            total_due += p.amount_due
+            if p.status == 'paid':
+                total_paid += p.amount_due
+        entries.sort(key=lambda e: e['date'])
+
+        summary = {
+            'total_invested': str(investor.amount_invested),
+            'total_payout_due': str(total_due),
+            'total_paid': str(total_paid),
+            'total_pending': str(total_due - total_paid),
+        }
+        return Response({
+            'investor': InvestorListSerializer(investor).data,
+            'summary': summary,
+            'entries': entries,
+        })
 
 
 class InvestorRedeemView(APIView):
