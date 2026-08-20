@@ -4,7 +4,7 @@ from datetime import timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Count
+from django.db.models import Q, Count, OuterRef, Subquery
 from django.utils import timezone
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -401,6 +401,7 @@ class StatsView(APIView):
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
         sv_warm_count = sv_scoped.filter(outcome='warm').count()
         sv_cold_count = sv_scoped.filter(outcome='cold').count()
+        sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
 
         # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
         sql_hist = LeadStatusHistory.objects.filter(
@@ -442,6 +443,7 @@ class StatsView(APIView):
             'sv_hot_count':  sv_hot_count,
             'sv_warm_count': sv_warm_count,
             'sv_cold_count': sv_cold_count,
+            'sv_not_interested_count': sv_not_interested_count,
             'closures':           closures,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
@@ -598,6 +600,14 @@ class LeadListView(APIView):
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
         )
+
+        # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
+        # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
+        # just the generic stage, without overwriting stm_status itself.
+        latest_completed_sv_outcome = SiteVisit.objects.filter(
+            lead=OuterRef('pk'), status='completed',
+        ).order_by('-visited_at').values('outcome')[:1]
+        qs = qs.annotate(sv_outcome=Subquery(latest_completed_sv_outcome))
 
         # Telecallers / STMs only see leads assigned to them.
         qs = scope_leads_to_role(qs, request.user, request=request)
@@ -1313,10 +1323,17 @@ class SiteVisitListView(APIView):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
         sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
+        # A visit can be created already-completed (the sv_done fallback when no
+        # scheduled visit exists yet) — label it as such, with the outcome, rather
+        # than always saying "Scheduled" regardless of its actual status.
+        if sv.status == 'completed':
+            label = f'Completed · {sv.get_outcome_display()}' if sv.outcome else 'Completed'
+        else:
+            label = f'Scheduled · {sched}' if sched else 'Scheduled'
         LeadStatusHistory.objects.create(
             lead=sv.lead, changed_by=request.user, field_changed='site_visit',
-            old_value='', new_value=(f'Scheduled · {sched}' if sched else 'Scheduled')[:100],
-            remarks='Site visit scheduled',
+            old_value='', new_value=label[:100],
+            remarks='Site visit scheduled' if sv.status != 'completed' else 'Site visit completed',
         )
         from notifications import notify
         for who in (sv.stm, sv.referred_by_telecaller):
@@ -1352,9 +1369,15 @@ class SiteVisitDetailView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
         if sv.status != old_status:
+            # Include the outcome in the logged transition — "Completed · Hot" —
+            # so the lead's history timeline shows what came of the visit, not
+            # just that it happened.
+            new_value = sv.get_status_display()
+            if sv.status == 'completed' and sv.outcome:
+                new_value = f'Completed · {sv.get_outcome_display()}'
             LeadStatusHistory.objects.create(
                 lead=sv.lead, changed_by=request.user, field_changed='site_visit',
-                old_value=old_status, new_value=sv.get_status_display(),
+                old_value=old_status, new_value=new_value,
                 remarks='Site visit updated',
             )
             if sv.status == 'completed':

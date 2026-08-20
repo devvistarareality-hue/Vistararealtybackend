@@ -160,6 +160,12 @@ class LeadListSerializer(serializers.ModelSerializer):
     source_name = serializers.CharField(source='source.name', read_only=True, default=None)
     telecaller_name = serializers.CharField(source='telecaller.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
+    # Only present when the queryset was annotated with it (LeadListView) — falls
+    # back to None elsewhere (e.g. StatsView's recent_leads) rather than erroring.
+    sv_outcome = serializers.SerializerMethodField()
+
+    def get_sv_outcome(self, obj):
+        return getattr(obj, 'sv_outcome', None) or None
 
     class Meta:
         model = Lead
@@ -168,7 +174,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'project', 'project_name', 'source', 'source_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
-            'stm', 'stm_name', 'stm_status', 'stm_assigned_at',
+            'stm', 'stm_name', 'stm_status', 'sv_outcome', 'stm_assigned_at',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]
