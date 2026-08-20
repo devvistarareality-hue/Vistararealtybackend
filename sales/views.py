@@ -398,8 +398,9 @@ class StatsView(APIView):
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
         # Post-visit outcome breakdown of the same completed-visits window above.
-        sv_interested_count     = sv_scoped.filter(outcome='interested').count()
-        sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
+        sv_hot_count  = sv_scoped.filter(outcome='hot').count()
+        sv_warm_count = sv_scoped.filter(outcome='warm').count()
+        sv_cold_count = sv_scoped.filter(outcome='cold').count()
 
         # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
         sql_hist = LeadStatusHistory.objects.filter(
@@ -438,8 +439,9 @@ class StatsView(APIView):
             'stm_cold_count':         stm_cold_count,
             'stm_sv_scheduled_count': stm_sv_scheduled_count,
             'sv_done':            sv_done,
-            'sv_interested_count':     sv_interested_count,
-            'sv_not_interested_count': sv_not_interested_count,
+            'sv_hot_count':  sv_hot_count,
+            'sv_warm_count': sv_warm_count,
+            'sv_cold_count': sv_cold_count,
             'closures':           closures,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,

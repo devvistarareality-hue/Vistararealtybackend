@@ -54,8 +54,9 @@ SV_STATUS = [
 ]
 
 SV_OUTCOME = [
-    ('interested', 'Interested'),
-    ('not_interested', 'Not Interested'),
+    ('hot', 'Hot'),
+    ('warm', 'Warm'),
+    ('cold', 'Cold'),
 ]
 
 CLOSURE_STATUS = [
