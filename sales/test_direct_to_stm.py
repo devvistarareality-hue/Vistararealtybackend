@@ -1,4 +1,8 @@
-"""A project with no telecalling team routes new leads straight to an STM."""
+"""A project with no telecaller assigned routes new leads straight to an STM.
+
+The rule is derived from the assignments, not a setting: assign a telecaller and
+the project rejoins the telecaller flow by itself.
+"""
 from datetime import date
 
 from django.core.cache import cache
@@ -19,9 +23,9 @@ class SkipTelecaller(TestCase):
         self.src = LeadSource.objects.create(company=self.co, name='meta')
         # one project with a telecalling team, one without
         self.normal = Project.objects.create(company=self.co, name='Normal')
-        self.direct = Project.objects.create(company=self.co, name='Direct',
-                                             skip_telecaller=True)
-        self.tc = self._member('tc@x.com', 'TC1', 'TELECALLER', [self.normal, self.direct])
+        self.direct = Project.objects.create(company=self.co, name='Direct')
+        # the telecaller covers only 'normal'; 'direct' has nobody from telecalling
+        self.tc = self._member('tc@x.com', 'TC1', 'TELECALLER', [self.normal])
         self.stm = self._member('stm@x.com', 'ST1', 'STM', [self.normal, self.direct])
 
     def _member(self, email, code, desig, projects):
@@ -86,5 +90,35 @@ class SkipTelecaller(TestCase):
         self.assertEqual(lead.stm_id, self.stm.id)
         self.assertEqual(lead.status, 'warm_transferred', 'existing status must not be rewritten')
 
-    def test_flag_defaults_off(self):
-        self.assertFalse(Project.objects.create(company=self.co, name='New').skip_telecaller)
+    def test_assigning_a_telecaller_returns_the_project_to_the_telecaller_flow(self):
+        UserProjectAssignment.objects.create(user=self.tc, project=self.direct)
+        lead = self._lead(self.direct, 'now-covered')
+        _run_distribution(self.co, 'telecaller')
+        lead.refresh_from_db()
+        self.assertEqual(lead.telecaller_id, self.tc.id, 'a covered project must use the telecaller')
+        self.assertIsNone(lead.stm_id)
+
+    def test_removing_the_last_telecaller_sends_the_project_direct_again(self):
+        UserProjectAssignment.objects.filter(user=self.tc, project=self.normal).delete()
+        lead = self._lead(self.normal, 'uncovered')
+        _run_distribution(self.co, 'telecaller')
+        lead.refresh_from_db()
+        self.assertEqual(lead.stm_id, self.stm.id)
+        self.assertIsNone(lead.telecaller_id)
+
+    def test_an_inactive_telecaller_does_not_count_as_cover(self):
+        UserProjectAssignment.objects.create(user=self.tc, project=self.direct)
+        self.tc.is_active = False
+        self.tc.save(update_fields=['is_active'])
+        lead = self._lead(self.direct, 'inactive-tc')
+        _run_distribution(self.co, 'telecaller')
+        lead.refresh_from_db()
+        self.assertEqual(lead.stm_id, self.stm.id)
+
+    def test_a_lead_with_no_project_is_still_left_alone(self):
+        lead = self._lead(None, 'no-project')
+        _run_distribution(self.co, 'telecaller')
+        lead.refresh_from_db()
+        self.assertIsNone(lead.stm_id)
+        self.assertIsNone(lead.telecaller_id)
+        self.assertEqual(lead.status, 'new')

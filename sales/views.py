@@ -1769,19 +1769,36 @@ def _window_state(company, dist_type):
     return 'open'
 
 
+def _telecaller_project_ids(company):
+    """Projects that actually have a telecaller on them.
+
+    A project with nobody from telecalling assigned has no telecaller stage, so its
+    leads go straight to an STM. Derived from the assignments rather than a setting
+    someone has to remember to flip: assign a telecaller and the project rejoins the
+    telecaller flow by itself; remove the last one and it leaves.
+    """
+    return set(
+        UserProjectAssignment.objects.filter(
+            user__company=company,
+            user__is_active=True,
+            user__designation__iexact='TELECALLER',
+        ).values_list('project_id', flat=True)
+    )
+
+
 def _pending_direct_to_stm(company):
-    """New leads for projects that have no telecaller stage."""
+    """New leads whose project has no telecaller assigned to it."""
     return Lead.objects.filter(
         company=company, status='new',
         telecaller__isnull=True, stm__isnull=True,
-        project__skip_telecaller=True,
-    )
+        project__isnull=False,
+    ).exclude(project_id__in=_telecaller_project_ids(company))
 
 
 def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
     """Distribute, then hand telecaller-less projects straight to an STM.
 
-    A project marked skip_telecaller has no telecalling team, so its new leads must
+    A project with no telecaller assigned has no telecalling stage, so its leads must
     reach an STM. That has to happen even when the telecaller pass returned early --
     window closed, nobody marked available -- because those leads never needed a
     telecaller in the first place.
@@ -1858,19 +1875,20 @@ def _distribute(company, dist_type, triggered_by=None, gate='full'):
             # "unassigned" and got swept into telecaller distribution the next time
             # ANY unrelated lead-create triggered this company-wide run — handing an
             # STM's own lead to a telecaller entirely by accident.
-            # A project with no telecaller stage is handled by the STM pass instead;
-            # leaving these here would just park them as "skipped" forever.
+            # Only projects that have a telecaller assigned. The rest are handled by
+            # the STM pass below; leaving them here would park them as "skipped".
             qs = (company_leads
-                  .filter(telecaller__isnull=True, stm__isnull=True, status='new')
-                  .exclude(project__skip_telecaller=True)
+                  .filter(telecaller__isnull=True, stm__isnull=True, status='new',
+                          project_id__in=_telecaller_project_ids(company))
                   .select_for_update(skip_locked=True).order_by('created_at'))
         else:
-            # Warm-transferred leads, plus new leads of projects that skip the
-            # telecaller stage entirely.
+            # Warm-transferred leads, plus new leads whose project has no telecaller
+            # assigned to it at all.
             qs = (company_leads
                   .filter(Q(status='warm_transferred', stm__isnull=True)
-                          | Q(status='new', stm__isnull=True, telecaller__isnull=True,
-                              project__skip_telecaller=True))
+                          | (Q(status='new', stm__isnull=True, telecaller__isnull=True,
+                               project__isnull=False)
+                             & ~Q(project_id__in=_telecaller_project_ids(company))))
                   .select_for_update(skip_locked=True).order_by('created_at'))
 
         leads = list(qs)
