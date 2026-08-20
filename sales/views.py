@@ -351,10 +351,40 @@ class StatsView(APIView):
         callback_count      = _status_transition_count('telecaller_status', 'callback')
         not_reachable_count = _status_transition_count('telecaller_status', 'not_reachable')
         cold_count          = _status_transition_count('telecaller_status', 'cold')
+
+        # STM-pipeline hot/warm/cold: a lead that got a site-visit outcome of Hot
+        # still sits at stm_status='sv_done' (the outcome doesn't overwrite it —
+        # see SiteVisitDetailView), so it counts toward Hot here too, dated by
+        # when that visit was completed rather than a stm_status transition.
+        _latest_sv_for_lead = SiteVisit.objects.filter(
+            lead=OuterRef('pk'), status='completed',
+        ).order_by('-visited_at')
+
+        def _sv_outcome_lead_ids(value):
+            qs = leads_scope.filter(stm_status='sv_done').annotate(
+                _sv_outcome=Subquery(_latest_sv_for_lead.values('outcome')[:1]),
+                _sv_visited=Subquery(_latest_sv_for_lead.values('visited_at')[:1]),
+            ).filter(_sv_outcome=value)
+            if date_from:
+                qs = qs.filter(_sv_visited__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(_sv_visited__date__lte=date_to)
+            return set(qs.values_list('id', flat=True))
+
+        def _effective_stm_count(value):
+            direct_hist = LeadStatusHistory.objects.filter(
+                lead__in=leads_scope, field_changed='stm_status', new_value=value)
+            if date_from:
+                direct_hist = direct_hist.filter(created_at__date__gte=date_from)
+            if date_to:
+                direct_hist = direct_hist.filter(created_at__date__lte=date_to)
+            direct_ids = set(direct_hist.values_list('lead_id', flat=True))
+            return len(direct_ids | _sv_outcome_lead_ids(value))
+
         # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
-        stm_hot_count           = _status_transition_count('stm_status', 'hot')
-        stm_warm_count          = _status_transition_count('stm_status', 'warm')
-        stm_cold_count          = _status_transition_count('stm_status', 'cold')
+        stm_hot_count           = _effective_stm_count('hot')
+        stm_warm_count          = _effective_stm_count('warm')
+        stm_cold_count          = _effective_stm_count('cold')
         stm_sv_scheduled_count  = _status_transition_count('stm_status', 'sv_scheduled')
         # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
         # no-show or cancelled visit is not one. Counting every row made the tile read
@@ -403,14 +433,10 @@ class StatsView(APIView):
         sv_cold_count = sv_scoped.filter(outcome='cold').count()
         sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
 
-        # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
-        sql_hist = LeadStatusHistory.objects.filter(
-            lead__in=leads_scope, field_changed='stm_status', new_value='warm')
-        if date_from:
-            sql_hist = sql_hist.filter(created_at__date__gte=date_from)
-        if date_to:
-            sql_hist = sql_hist.filter(created_at__date__lte=date_to)
-        sql_count = sql_hist.values('lead').distinct().count()
+        # SQL funnel: distinct leads that are effectively warm (stm_status → warm,
+        # or still sv_done with a Warm visit outcome) in the window — same
+        # definition as stm_warm_count above.
+        sql_count = stm_warm_count
 
         # Avg closure timeline: mean days from lead arrival (created_at) to closure_date.
         _diffs = [
@@ -639,8 +665,19 @@ class LeadListView(APIView):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('telecaller_status'):
             qs = qs.filter(telecaller_status=request.query_params['telecaller_status'])
-        if request.query_params.get('stm_status'):
-            qs = qs.filter(stm_status=request.query_params['stm_status'])
+        stm_status_filter = request.query_params.get('stm_status')
+        if stm_status_filter:
+            if stm_status_filter in ('hot', 'warm', 'cold'):
+                # A lead still sitting at "sv done" whose visit outcome was Hot
+                # counts as Hot too — the outcome doesn't overwrite stm_status,
+                # but it should still surface here alongside leads reclassified
+                # to hot/warm/cold directly.
+                qs = qs.filter(
+                    Q(stm_status=stm_status_filter)
+                    | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
+                )
+            else:
+                qs = qs.filter(stm_status=stm_status_filter)
         project_id = request.query_params.get('project_id')
         if project_id == 'none':
             qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
