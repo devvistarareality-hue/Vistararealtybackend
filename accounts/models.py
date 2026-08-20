@@ -1,6 +1,7 @@
 import uuid
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
+from sales.fields import EncryptedTextField
 from companies.models import Company
 
 
@@ -25,7 +26,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     user_code    = models.CharField(max_length=20, blank=True)
     name         = models.CharField(max_length=100, blank=True)
     email        = models.EmailField(unique=True)
-    phone        = models.CharField(max_length=20, blank=True)
+    phone        = EncryptedTextField(blank=True)
     role         = models.CharField(max_length=100, blank=True)
     department   = models.CharField(max_length=100, blank=True)
     designation  = models.CharField(max_length=100, blank=True)

@@ -55,6 +55,28 @@ class EncryptedTextField(models.TextField):
         return f.encrypt(value.encode()).decode()
 
 
+def phone_blind_index(phone):
+    """Deterministic, searchable fingerprint of a phone number.
+
+    Fernet is non-deterministic, so an encrypted phone column cannot be looked up.
+    This HMAC of the last ten digits can: same number -> same key, and the key
+    reveals nothing without FIELD_ENCRYPTION_KEY. Last ten digits so that
+    '+919876543210', '919876543210' and '9876543210' all match, which is exactly
+    what the old phone__endswith duplicate check relied on.
+
+    Returns '' when there is no key or no digits, so rows stay consistent rather
+    than half-populated before the key is provisioned.
+    """
+    digits = ''.join(c for c in str(phone or '') if c.isdigit())[-10:]
+    if not digits:
+        return ''
+    key = os.getenv('FIELD_ENCRYPTION_KEY', '').strip()
+    if not key:
+        return ''
+    import hashlib, hmac
+    return hmac.new(key.encode(), digits.encode(), hashlib.sha256).hexdigest()
+
+
 def _to_decimal(value):
     if value is None or value == '':
         return None

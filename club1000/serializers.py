@@ -163,10 +163,10 @@ class PayoutSerializer(serializers.ModelSerializer):
         model = Payout
         fields = [
             'id', 'investor', 'investor_name', 'scheme_name', 'payout_type', 'due_date',
-            'amount_due', 'status', 'paid_date', 'paid_by', 'notes', 'created_at', 'updated_at',
+            'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due',
-                             'paid_date', 'paid_by', 'created_at', 'updated_at']
+                             'paid_amount', 'paid_date', 'paid_by', 'created_at', 'updated_at']
 
 
 class ReferralRewardSerializer(serializers.ModelSerializer):

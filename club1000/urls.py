@@ -10,6 +10,7 @@ urlpatterns = [
     path('investors/next-loi-no/',    views.InvestorNextLoiNoView.as_view()),
     path('investors/',                views.InvestorListCreateView.as_view()),
     path('investors/<int:pk>/',       views.InvestorDetailView.as_view()),
+    path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),
     path('investors/<int:pk>/redeem/', views.InvestorRedeemView.as_view()),
     path('investors/<int:pk>/action/', views.InvestorActionView.as_view()),
     path('investors/<int:pk>/revise/', views.InvestorReviseView.as_view()),

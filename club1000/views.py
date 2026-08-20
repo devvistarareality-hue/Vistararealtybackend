@@ -1,5 +1,5 @@
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
 from django.db.models import Q
 from rest_framework.views import APIView
@@ -9,8 +9,12 @@ from rest_framework.permissions import IsAuthenticated
 
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
+from sales.fields import phone_blind_index
 from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
-from .models import Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory, REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT
+from .models import (
+    Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
+    REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
+)
 from .serializers import (
     SchemeSerializer, InvestorListSerializer,
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
@@ -210,10 +214,18 @@ class InvestorListCreateView(APIView):
             qs = qs.exclude(approval_status='rejected')
         search = request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(
-                Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search)
-                | Q(loi_no__icontains=search)
-            )
+            # name/phone/email are encrypted, so SQL can't match them. A full
+            # ten-digit number uses the blind index; anything else is matched in
+            # Python over the already-scoped rows and fed back as an id filter.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [pk for pk, nm, ph, em in qs.values_list('id', 'name', 'phone', 'email')
+                        if needle in (nm or '').lower() or needle in (ph or '').lower()
+                        or needle in (em or '').lower()]
+                qs = qs.filter(Q(id__in=hits) | Q(loi_no__icontains=search))
         return Response(InvestorListSerializer(qs.order_by('-created_at'), many=True).data)
 
     def post(self, request):
@@ -342,6 +354,70 @@ class InvestorDetailView(APIView):
         return Response(ser.data)
 
 
+class InvestorLedgerView(APIView):
+    """Full money-movement history for one investor, in one chronological
+    timeline: the investment itself plus every scheduled payout (interest,
+    maturity, premature redemption) — paid or still pending. Everything the
+    client has put in and everything owed/paid back to them."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        qs = _company_filtered(Investor.objects.select_related('scheme', 'added_by'), request)
+        if not is_club1000_manager(request.user):
+            qs = qs.filter(added_by=request.user)
+        investor = qs.filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        payout_labels = dict(PAYOUT_TYPE_CHOICES)
+        entries = [{
+            'type': 'investment',
+            'payout_id': None,
+            'date': str(investor.investment_date),
+            'label': f'Investment — {investor.scheme.name}',
+            'amount': str(investor.amount_invested),
+            'paid_amount': None,
+            'status': 'completed',
+            'paid_date': str(investor.investment_date),
+            'notes': '',
+        }]
+        total_due = Decimal('0')
+        total_paid = Decimal('0')
+        for p in investor.payouts.all():
+            actual_paid = p.paid_amount if p.paid_amount is not None else p.amount_due
+            entries.append({
+                'type': p.payout_type,
+                'payout_id': p.id,
+                'date': str(p.due_date),
+                'label': payout_labels.get(p.payout_type, p.payout_type),
+                'amount': str(p.amount_due),
+                # Only set once actually paid — may differ from `amount` (the
+                # originally scheduled figure) if it was overridden on mark-paid.
+                'paid_amount': str(actual_paid) if p.status == 'paid' else None,
+                'status': p.status,
+                'paid_date': str(p.paid_date) if p.paid_date else None,
+                'notes': p.notes,
+            })
+            total_due += p.amount_due
+            if p.status == 'paid':
+                total_paid += actual_paid
+        entries.sort(key=lambda e: e['date'])
+
+        summary = {
+            'total_invested': str(investor.amount_invested),
+            'total_payout_due': str(total_due),
+            'total_paid': str(total_paid),
+            'total_pending': str(total_due - total_paid),
+        }
+        return Response({
+            'investor': InvestorListSerializer(investor).data,
+            'summary': summary,
+            'entries': entries,
+        })
+
+
 class InvestorRedeemView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -430,10 +506,23 @@ class PayoutMarkPaidView(APIView):
         ).filter(pk=pk).first()
         if not payout:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Optional override of the actually-disbursed amount (rounding, a partial
+        # payment, a negotiated adjustment) — falls back to the scheduled amount.
+        amount = request.data.get('amount')
+        if amount not in (None, ''):
+            try:
+                payout.paid_amount = Decimal(str(amount))
+            except (InvalidOperation, ValueError, TypeError):
+                return Response({'detail': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            payout.paid_amount = payout.amount_due
+        notes = request.data.get('notes')
+        if notes is not None:
+            payout.notes = notes
         payout.status = 'paid'
         payout.paid_date = date.today()
         payout.paid_by = request.user
-        payout.save(update_fields=['status', 'paid_date', 'paid_by', 'updated_at'])
+        payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
         return Response(PayoutSerializer(payout).data)
 
 
@@ -500,7 +589,18 @@ class LeadListCreateView(APIView):
             qs = qs.filter(created_at__date__lte=request.query_params['date_to'])
         search = request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search))
+            # Same as the investor list above: encrypted columns can't be matched
+            # in SQL, so exact phone goes through the blind index and everything
+            # else is matched in Python over the scoped rows.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [pk for pk, nm, ph, em in qs.values_list('id', 'name', 'phone', 'email')
+                        if needle in (nm or '').lower() or needle in (ph or '').lower()
+                        or needle in (em or '').lower()]
+                qs = qs.filter(id__in=hits)
         return Response(LeadListSerializer(qs, many=True).data)
 
     def post(self, request):

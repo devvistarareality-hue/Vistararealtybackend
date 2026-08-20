@@ -13,6 +13,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from companies.models import Company
 from accounts.models import User
+from sales.fields import phone_blind_index
 from sales.models import Lead, Project, Plot, LeadSource
 
 
@@ -137,7 +138,10 @@ class TenantIsolationTests(APITestCase):
             'leads': [{'name': 'Imp1', 'phone': '+919222222222'}],
         }, format='json')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(Lead.objects.get(name='Imp1').company_id, self.A.id)
+        # name is encrypted, so look the row up by its blind index instead.
+        imported = Lead.objects.get(phone_key=phone_blind_index('9222222222'))
+        self.assertEqual(imported.name, 'Imp1')
+        self.assertEqual(imported.company_id, self.A.id)
 
     # ── Platform admins see everything ───────────────────────────────────
     def test_staff_superadmin_sees_all_companies(self):
@@ -167,8 +171,8 @@ class DistributionIsolationTests(APITestCase):
         projA = Project.objects.create(company=A, name='PA')
         UserProjectAssignment.objects.create(user=tc_a, project=projA)
         # Unassigned 'new' leads in BOTH companies
-        Lead.objects.create(company=A, name='A1', phone='+919000000001', status='new', project=projA)
-        Lead.objects.create(company=B, name='B1', phone='+919000000002', status='new')
+        lead_a = Lead.objects.create(company=A, name='A1', phone='+919000000001', status='new', project=projA)
+        lead_b = Lead.objects.create(company=B, name='B1', phone='+919000000002', status='new')
         # tc_a signs in today (checked_in_at is required — distribution only counts
         # availability within the 12h window).
         UserAvailability.objects.create(user=tc_a, date=timezone.localdate(),
@@ -179,8 +183,9 @@ class DistributionIsolationTests(APITestCase):
         self.assertEqual(res.status_code, 200)
 
         # Only company A's lead got assigned; B's stays unassigned + 'new'
-        a_lead = Lead.objects.get(name='A1')
-        b_lead = Lead.objects.get(name='B1')
+        # names are encrypted — fetch by pk captured at creation time
+        a_lead = Lead.objects.get(pk=lead_a.pk)
+        b_lead = Lead.objects.get(pk=lead_b.pk)
         self.assertEqual(a_lead.telecaller_id, tc_a.id)
         self.assertIsNone(b_lead.telecaller_id)
         self.assertEqual(b_lead.status, 'new')
@@ -442,8 +447,8 @@ class LOIAccessTests(APITestCase):
 
     def test_only_owner_stm_or_admin_can_fetch_url(self):
         from sales.models import Booking
-        coA = Company.objects.create(code='AAA', name='A')
-        coB = Company.objects.create(code='BBB', name='B')
+        coA = Company.objects.create(code='AAA', name='A', loi_enabled=True)
+        coB = Company.objects.create(code='BBB', name='B', loi_enabled=True)
         stm       = User.objects.create(email='s@a.com',  company=coA, role='Sales', user_code='S1', designation='STM')
         other_stm = User.objects.create(email='s2@a.com', company=coA, role='Sales', user_code='S2', designation='STM')
         admin     = User.objects.create(email='ad@a.com', company=coA, role='Admin', user_code='AD')

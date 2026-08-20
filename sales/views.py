@@ -4,7 +4,7 @@ from datetime import timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Count
+from django.db.models import Q, Count, OuterRef, Subquery
 from django.utils import timezone
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
+from sales.fields import phone_blind_index
 
 
 def _resolve_company(request):
@@ -327,28 +328,81 @@ class StatsView(APIView):
             new_leads=Count('id', filter=Q(status='new')),
             leads_today=Count('id', filter=Q(created_at__date=today)),
             called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
-            hot_count=Count('id', filter=Q(telecaller_status='hot')),
-            warm_count=Count('id', filter=Q(telecaller_status='warm')),
-            callback_count=Count('id', filter=Q(telecaller_status='callback')),
-            not_reachable_count=Count('id', filter=Q(telecaller_status='not_reachable')),
-            cold_count=Count('id', filter=Q(telecaller_status='cold')),
-            # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
-            stm_hot_count=Count('id', filter=Q(stm_status='hot')),
-            stm_warm_count=Count('id', filter=Q(stm_status='warm')),
-            stm_cold_count=Count('id', filter=Q(stm_status='cold')),
-            stm_sv_scheduled_count=Count('id', filter=Q(stm_status='sv_scheduled')),
         )
+
+        # Status-bucket counts (hot/warm/callback/not_reachable/cold, and the STM
+        # equivalents) are counted by the date the lead's status actually CHANGED
+        # to that value (LeadStatusHistory), not by created_at. A lead received on
+        # an earlier date but marked warm today must land in "today"'s warm count —
+        # counting against the created_at-filtered leads_qs hid it entirely. Same
+        # fix already applied to sql_count below and to StatsTrendView's per-day
+        # warm/hot/cold rows; this brings the stat-card tiles in line with those.
+        def _status_transition_count(field, value):
+            qs = LeadStatusHistory.objects.filter(
+                lead__in=leads_scope, field_changed=field, new_value=value)
+            if date_from:
+                qs = qs.filter(created_at__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(created_at__date__lte=date_to)
+            return qs.values('lead').distinct().count()
+
+        hot_count           = _status_transition_count('telecaller_status', 'hot')
+        warm_count          = _status_transition_count('telecaller_status', 'warm')
+        callback_count      = _status_transition_count('telecaller_status', 'callback')
+        not_reachable_count = _status_transition_count('telecaller_status', 'not_reachable')
+        cold_count          = _status_transition_count('telecaller_status', 'cold')
+
+        # STM-pipeline hot/warm/cold: a lead that got a site-visit outcome of Hot
+        # still sits at stm_status='sv_done' (the outcome doesn't overwrite it —
+        # see SiteVisitDetailView), so it counts toward Hot here too, dated by
+        # when that visit was completed rather than a stm_status transition.
+        _latest_sv_for_lead = SiteVisit.objects.filter(
+            lead=OuterRef('pk'), status='completed',
+        ).order_by('-visited_at')
+
+        def _sv_outcome_lead_ids(value):
+            qs = leads_scope.filter(stm_status='sv_done').annotate(
+                _sv_outcome=Subquery(_latest_sv_for_lead.values('outcome')[:1]),
+                _sv_visited=Subquery(_latest_sv_for_lead.values('visited_at')[:1]),
+            ).filter(_sv_outcome=value)
+            if date_from:
+                qs = qs.filter(_sv_visited__date__gte=date_from)
+            if date_to:
+                qs = qs.filter(_sv_visited__date__lte=date_to)
+            return set(qs.values_list('id', flat=True))
+
+        def _effective_stm_count(value):
+            direct_hist = LeadStatusHistory.objects.filter(
+                lead__in=leads_scope, field_changed='stm_status', new_value=value)
+            if date_from:
+                direct_hist = direct_hist.filter(created_at__date__gte=date_from)
+            if date_to:
+                direct_hist = direct_hist.filter(created_at__date__lte=date_to)
+            direct_ids = set(direct_hist.values_list('lead_id', flat=True))
+            return len(direct_ids | _sv_outcome_lead_ids(value))
+
+        # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
+        stm_hot_count           = _effective_stm_count('hot')
+        stm_warm_count          = _effective_stm_count('warm')
+        stm_cold_count          = _effective_stm_count('cold')
+        stm_sv_scheduled_count  = _status_transition_count('stm_status', 'sv_scheduled')
+        # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
+        # no-show or cancelled visit is not one. Counting every row made the tile read
+        # 48 where only 26 had been done. Dated by when the visit happened, not when
+        # the row was created, so a date range means "visited in this period" the same
+        # way Closures means "closed in this period".
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
+        sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
             cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         if date_from:
-            sv_qs = sv_qs.filter(created_at__date__gte=date_from)
+            sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
         if date_to:
-            sv_qs = sv_qs.filter(created_at__date__lte=date_to)
+            sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
@@ -367,20 +421,22 @@ class StatsView(APIView):
         followup_call_count = fu_qs.count()
 
         cl_scoped = cl_qs.filter(**cl_filter)
+        sv_scoped = sv_qs.filter(**sv_filter)
         sv_done, closures, active_projects = (
-            sv_qs.filter(**sv_filter).count(),
+            sv_scoped.count(),
             cl_scoped.count(),
             scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
         )
+        # Post-visit outcome breakdown of the same completed-visits window above.
+        sv_hot_count  = sv_scoped.filter(outcome='hot').count()
+        sv_warm_count = sv_scoped.filter(outcome='warm').count()
+        sv_cold_count = sv_scoped.filter(outcome='cold').count()
+        sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
 
-        # SQL funnel: distinct leads that BECAME warm (stm_status → warm) in the window.
-        sql_hist = LeadStatusHistory.objects.filter(
-            lead__in=leads_scope, field_changed='stm_status', new_value='warm')
-        if date_from:
-            sql_hist = sql_hist.filter(created_at__date__gte=date_from)
-        if date_to:
-            sql_hist = sql_hist.filter(created_at__date__lte=date_to)
-        sql_count = sql_hist.values('lead').distinct().count()
+        # SQL funnel: distinct leads that are effectively warm (stm_status → warm,
+        # or still sv_done with a Warm visit outcome) in the window — same
+        # definition as stm_warm_count above.
+        sql_count = stm_warm_count
 
         # Avg closure timeline: mean days from lead arrival (created_at) to closure_date.
         _diffs = [
@@ -400,16 +456,20 @@ class StatsView(APIView):
             'followup_call_count': followup_call_count,
             # Every call made in the window: new leads worked plus follow-up calls.
             'total_called_count': agg['called_count'] + followup_call_count,
-            'hot_count':          agg['hot_count'],
-            'warm_count':         agg['warm_count'],
-            'callback_count':     agg['callback_count'],
-            'not_reachable_count':agg['not_reachable_count'],
-            'cold_count':         agg['cold_count'],
-            'stm_hot_count':          agg['stm_hot_count'],
-            'stm_warm_count':         agg['stm_warm_count'],
-            'stm_cold_count':         agg['stm_cold_count'],
-            'stm_sv_scheduled_count': agg['stm_sv_scheduled_count'],
+            'hot_count':          hot_count,
+            'warm_count':         warm_count,
+            'callback_count':     callback_count,
+            'not_reachable_count':not_reachable_count,
+            'cold_count':         cold_count,
+            'stm_hot_count':          stm_hot_count,
+            'stm_warm_count':         stm_warm_count,
+            'stm_cold_count':         stm_cold_count,
+            'stm_sv_scheduled_count': stm_sv_scheduled_count,
             'sv_done':            sv_done,
+            'sv_hot_count':  sv_hot_count,
+            'sv_warm_count': sv_warm_count,
+            'sv_cold_count': sv_cold_count,
+            'sv_not_interested_count': sv_not_interested_count,
             'closures':           closures,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
@@ -567,20 +627,57 @@ class LeadListView(APIView):
             'preferred_location', 'budget_min', 'budget_max',
         )
 
+        # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
+        # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
+        # just the generic stage, without overwriting stm_status itself.
+        latest_completed_sv_outcome = SiteVisit.objects.filter(
+            lead=OuterRef('pk'), status='completed',
+        ).order_by('-visited_at').values('outcome')[:1]
+        qs = qs.annotate(sv_outcome=Subquery(latest_completed_sv_outcome))
+
         # Telecallers / STMs only see leads assigned to them.
         qs = scope_leads_to_role(qs, request.user, request=request)
 
         # Filters
         search = request.query_params.get('search', '').strip()
         if search:
-            qs = qs.filter(Q(name__icontains=search) | Q(phone__icontains=search) | Q(email__icontains=search))
+            # name/phone/email are encrypted, so the database can't match on them.
+            # A full 10-digit number goes through the blind index (indexed, exact).
+            # Anything else -- a partial number, a name fragment -- is matched in
+            # Python over the already company/role-scoped rows, then fed back as an
+            # id filter so every downstream filter, sort and page still works.
+            # Measured at ~8us per decrypted value; a 11k-lead company costs ~250ms
+            # and only on an explicit search.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [
+                    pk for pk, nm, ph, em in qs.values_list('id', 'name', 'phone', 'email')
+                    if needle in (nm or '').lower()
+                    or needle in (ph or '').lower()
+                    or needle in (em or '').lower()
+                ]
+                qs = qs.filter(id__in=hits)
 
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('telecaller_status'):
             qs = qs.filter(telecaller_status=request.query_params['telecaller_status'])
-        if request.query_params.get('stm_status'):
-            qs = qs.filter(stm_status=request.query_params['stm_status'])
+        stm_status_filter = request.query_params.get('stm_status')
+        if stm_status_filter:
+            if stm_status_filter in ('hot', 'warm', 'cold'):
+                # A lead still sitting at "sv done" whose visit outcome was Hot
+                # counts as Hot too — the outcome doesn't overwrite stm_status,
+                # but it should still surface here alongside leads reclassified
+                # to hot/warm/cold directly.
+                qs = qs.filter(
+                    Q(stm_status=stm_status_filter)
+                    | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
+                )
+            else:
+                qs = qs.filter(stm_status=stm_status_filter)
         project_id = request.query_params.get('project_id')
         if project_id == 'none':
             qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
@@ -670,7 +767,7 @@ class LeadListView(APIView):
         clean = ''.join(c for c in phone if c.isdigit())[-10:]
         dup_qs = (
             scope_leads_to_role(scope_to_company(Lead.objects.all(), request.user), request.user)
-            .filter(phone__endswith=clean)
+            .filter(phone_key=phone_blind_index(clean))
             if clean else Lead.objects.none()
         )
         existing = dup_qs.first()
@@ -1244,9 +1341,13 @@ class SiteVisitListView(APIView):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
         # Platform admin viewing a specific company (?company_id) — honour the filter.
+        # A site visit has no company of its own; it belongs to its lead's company, the
+        # same path scope_to_company uses above. Filtering company_id directly raised
+        # FieldError, so this endpoint 500'd for any platform admin with a company
+        # selected — which is what left My Conversions showing 0 site visits.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
-            qs = qs.filter(company_id=cid)
+            qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         return Response(SiteVisitSerializer(qs, many=True).data)
@@ -1259,10 +1360,17 @@ class SiteVisitListView(APIView):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
         sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
+        # A visit can be created already-completed (the sv_done fallback when no
+        # scheduled visit exists yet) — label it as such, with the outcome, rather
+        # than always saying "Scheduled" regardless of its actual status.
+        if sv.status == 'completed':
+            label = f'Completed · {sv.get_outcome_display()}' if sv.outcome else 'Completed'
+        else:
+            label = f'Scheduled · {sched}' if sched else 'Scheduled'
         LeadStatusHistory.objects.create(
             lead=sv.lead, changed_by=request.user, field_changed='site_visit',
-            old_value='', new_value=(f'Scheduled · {sched}' if sched else 'Scheduled')[:100],
-            remarks='Site visit scheduled',
+            old_value='', new_value=label[:100],
+            remarks='Site visit scheduled' if sv.status != 'completed' else 'Site visit completed',
         )
         from notifications import notify
         for who in (sv.stm, sv.referred_by_telecaller):
@@ -1282,14 +1390,31 @@ class SiteVisitDetailView(APIView):
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         old_status = sv.status
+        # Marking a visit Done must record what came of it — an outcome and remarks,
+        # not just a status flip — so the pipeline can tell an interested walk-in
+        # from a dead one. Checked against the merged (existing + incoming) values so
+        # a client that already set these on an earlier PATCH isn't forced to resend.
+        if request.data.get('status') == 'completed' and old_status != 'completed':
+            new_outcome = request.data.get('outcome', sv.outcome)
+            new_remarks = request.data.get('remarks', sv.remarks)
+            if not new_outcome or not str(new_remarks or '').strip():
+                return Response(
+                    {'detail': 'Outcome and remarks are required to mark a site visit as done.'},
+                    status=status.HTTP_400_BAD_REQUEST)
         ser = SiteVisitSerializer(sv, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
         if sv.status != old_status:
+            # Include the outcome in the logged transition — "Completed · Hot" —
+            # so the lead's history timeline shows what came of the visit, not
+            # just that it happened.
+            new_value = sv.get_status_display()
+            if sv.status == 'completed' and sv.outcome:
+                new_value = f'Completed · {sv.get_outcome_display()}'
             LeadStatusHistory.objects.create(
                 lead=sv.lead, changed_by=request.user, field_changed='site_visit',
-                old_value=old_status, new_value=sv.get_status_display(),
+                old_value=old_status, new_value=new_value,
                 remarks='Site visit updated',
             )
             if sv.status == 'completed':
@@ -1740,7 +1865,56 @@ def _window_state(company, dist_type):
     return 'open'
 
 
+def _telecaller_project_ids(company):
+    """Projects that actually have a telecaller on them.
+
+    A project with nobody from telecalling assigned has no telecaller stage, so its
+    leads go straight to an STM. Derived from the assignments rather than a setting
+    someone has to remember to flip: assign a telecaller and the project rejoins the
+    telecaller flow by itself; remove the last one and it leaves.
+    """
+    return set(
+        UserProjectAssignment.objects.filter(
+            user__company=company,
+            user__is_active=True,
+            user__designation__iexact='TELECALLER',
+        ).values_list('project_id', flat=True)
+    )
+
+
+def _pending_direct_to_stm(company):
+    """New leads whose project has no telecaller assigned to it."""
+    return Lead.objects.filter(
+        company=company, status='new',
+        telecaller__isnull=True, stm__isnull=True,
+        project__isnull=False,
+    ).exclude(project_id__in=_telecaller_project_ids(company))
+
+
 def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
+    """Distribute, then hand telecaller-less projects straight to an STM.
+
+    A project with no telecaller assigned has no telecalling stage, so its leads must
+    reach an STM. That has to happen even when the telecaller pass returned early --
+    window closed, nobody marked available -- because those leads never needed a
+    telecaller in the first place.
+    """
+    result = _distribute(company, dist_type, triggered_by, gate)
+    if dist_type != 'telecaller' or not _pending_direct_to_stm(company).exists():
+        return result
+
+    direct = _distribute(company, 'stm', triggered_by, gate)
+    merged = dict(result)
+    merged['distributed'] = result.get('distributed', 0) + direct.get('distributed', 0)
+    merged['assignments'] = {**result.get('assignments', {}), **direct.get('assignments', {})}
+    if direct.get('distributed'):
+        merged.pop('message', None)
+    elif direct.get('message'):
+        merged['message'] = ' '.join(filter(None, [result.get('message'), direct['message']]))
+    return merged
+
+
+def _distribute(company, dist_type, triggered_by=None, gate='full'):
     """Weighted, project-aware, window-gated assignment of the current unassigned
     bucket to available telecallers/STMs. Reusable by both the manual Distribute
     button and the automatic triggers (lead created / marked available / warm).
@@ -1797,9 +1971,21 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
             # "unassigned" and got swept into telecaller distribution the next time
             # ANY unrelated lead-create triggered this company-wide run — handing an
             # STM's own lead to a telecaller entirely by accident.
-            qs = company_leads.filter(telecaller__isnull=True, stm__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
+            # Only projects that have a telecaller assigned. The rest are handled by
+            # the STM pass below; leaving them here would park them as "skipped".
+            qs = (company_leads
+                  .filter(telecaller__isnull=True, stm__isnull=True, status='new',
+                          project_id__in=_telecaller_project_ids(company))
+                  .select_for_update(skip_locked=True).order_by('created_at'))
         else:
-            qs = company_leads.filter(status='warm_transferred', stm__isnull=True).select_for_update(skip_locked=True).order_by('created_at')
+            # Warm-transferred leads, plus new leads whose project has no telecaller
+            # assigned to it at all.
+            qs = (company_leads
+                  .filter(Q(status='warm_transferred', stm__isnull=True)
+                          | (Q(status='new', stm__isnull=True, telecaller__isnull=True,
+                               project__isnull=False)
+                             & ~Q(project_id__in=_telecaller_project_ids(company))))
+                  .select_for_update(skip_locked=True).order_by('created_at'))
 
         leads = list(qs)
         if not leads:
@@ -1864,6 +2050,10 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
                 )
             else:
                 Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+                # A lead that skipped the telecaller stage arrives still 'new';
+                # mark it assigned. Not 'warm_transferred' — nobody transferred it,
+                # and that status feeds the warm/SQL funnel.
+                Lead.objects.filter(pk__in=pks, status='new').update(status='assigned')
             for pk in pks:
                 history_rows.append(LeadStatusHistory(
                     lead_id=pk, changed_by=triggered_by,
@@ -2161,10 +2351,8 @@ class BulkImportLeadsView(APIView):
 
         # Build existing dup set (last-10-digits) scoped to this company — O(n) once.
         company_leads = scope_to_company(Lead.objects.all(), request.user)
-        existing_keys = {
-            ''.join(c for c in (p or '') if c.isdigit())[-10:]
-            for p in company_leads.values_list('phone', flat=True)
-        }
+        # Read the blind index rather than decrypting every stored phone.
+        existing_keys = set(company_leads.values_list('phone_key', flat=True))
         existing_keys.discard('')
 
         to_create = []   # Lead objects
@@ -2178,7 +2366,9 @@ class BulkImportLeadsView(APIView):
                 continue
 
             clean = ''.join(c for c in phone if c.isdigit())[-10:]
-            is_dup = bool(clean) and clean in existing_keys
+            # existing_keys holds blind-index hashes, so hash before comparing.
+            clean_key = phone_blind_index(clean) if clean else ''
+            is_dup = bool(clean_key) and clean_key in existing_keys
 
             rproj = proj_by_name.get(str(row.get('project', '')).strip().lower()) or project_id or None
             rsrc  = src_by_name.get(str(row.get('source', '')).strip().lower()) or source_id or None
@@ -2241,6 +2431,9 @@ class BulkImportLeadsView(APIView):
                 company=company,
                 name=name,
                 phone=phone,
+                # bulk_create skips save(), so set the lookup key here or these rows
+                # would be invisible to duplicate detection and phone search.
+                phone_key=clean_key,
                 alt_phone=str(row.get('alt_phone', '')).strip(),
                 email=str(row.get('email', '')).strip(),
                 project_id=rproj,
@@ -2281,8 +2474,8 @@ class BulkImportLeadsView(APIView):
                 duplicates += 1
             else:
                 imported += 1
-                if clean:
-                    existing_keys.add(clean)  # catch in-batch duplicates too
+                if clean_key:
+                    existing_keys.add(clean_key)  # catch in-batch duplicates too
             # Only a genuinely untouched lead (no telecaller AND no STM) should be swept
             # into telecaller auto-distribution — mirrors the single-lead-create check
             # above (`not lead.telecaller_id and not lead.stm_id`). A row that names an
@@ -2690,6 +2883,11 @@ class MyTeamView(APIView):
 #  Booking  (native plot booking — replaces the GAS web app for Vistara)
 # ──────────────────────────────────────────────
 
+def _loi_enabled(company):
+    """LOI / EOI documents are a per-company entitlement, not a platform feature."""
+    return bool(getattr(company, 'loi_enabled', False))
+
+
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
     import re
@@ -2912,6 +3110,11 @@ class BookingListCreateView(APIView):
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
         lf = data.get('loi_file')
+        if isinstance(lf, dict) and lf.get('data') and not _loi_enabled(company):
+            return Response(
+                {'detail': 'LOI / EOI documents are not enabled for this company.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if isinstance(lf, dict) and lf.get('data'):
             import base64
             from django.core.files.base import ContentFile
@@ -3017,7 +3220,7 @@ class BookingDraftView(APIView):
         # real submit path, kept for forward compatibility even though drafts don't
         # require it.
         lf = data.get('loi_file')
-        if isinstance(lf, dict) and lf.get('data'):
+        if isinstance(lf, dict) and lf.get('data') and _loi_enabled(booking.company):
             max_b64_len = int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3)
             if len(lf['data']) <= max_b64_len:
                 import base64
@@ -3351,6 +3554,11 @@ class BookingLOIUrlView(APIView):
         b = scope_to_company(Booking.objects.all(), request.user).filter(pk=pk).first()
         if not b or not b.loi_document:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not _loi_enabled(b.company):
+            return Response(
+                {'detail': 'LOI / EOI documents are not enabled for this company.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         if not (is_admin_or_manager(request.user) or b.stm_id == request.user.id):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         from sales.supabase_storage import create_signed_url
@@ -3544,7 +3752,7 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
     # Duplicate detection using last 10 digits, scoped to this company
     clean = ''.join(c for c in phone if c.isdigit())[-10:]
     existing = (
-        Lead.objects.filter(company=company, phone__endswith=clean).first()
+        Lead.objects.filter(company=company, phone_key=phone_blind_index(clean)).first()
         if clean else None
     )
     if existing:
@@ -3601,6 +3809,27 @@ class MetaWebhookView(APIView):
                         return cfg
         return configs[0] if configs else None
 
+    @staticmethod
+    def _signature_ok(request, app_secret):
+        """Verify Meta's X-Hub-Signature-256 over the raw request body.
+
+        Meta signs every delivery with HMAC-SHA256 keyed on the app secret. Without
+        this the endpoint is an open door: anyone who learns a page id could post a
+        payload and make the ERP call the Graph API with that page's token.
+
+        A config with no app_secret is not rejected -- that would silently drop real
+        leads for a tenant mid-setup -- but it is logged so the gap is visible.
+        """
+        if not app_secret:
+            logger.warning('Meta webhook: no app_secret configured — delivery accepted unverified')
+            return True
+        header = request.headers.get('X-Hub-Signature-256', '')
+        if not header.startswith('sha256='):
+            return False
+        import hashlib, hmac
+        expected = hmac.new(app_secret.encode(), request.body, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, header[len('sha256='):])
+
     def post(self, request):
         """Receive lead notification from Meta."""
         try:
@@ -3610,6 +3839,9 @@ class MetaWebhookView(APIView):
             for entry in data.get('entry', []):
                 config = self._config_for_page(entry.get('id'))
                 if not config:
+                    continue
+                if not self._signature_ok(request, config.app_secret):
+                    logger.warning('Meta webhook: bad signature for page %s — ignored', entry.get('id'))
                     continue
                 for change in entry.get('changes', []):
                     if change.get('field') == 'leadgen':
@@ -3710,6 +3942,8 @@ class MetaWebhookConfigView(APIView):
         return Response({
             'verify_token':         config.verify_token,
             'page_access_token':    config.page_access_token,
+            # Whether a secret is stored, never the secret itself.
+            'app_secret_set':       bool(config.app_secret),
             'default_project_id':   config.default_project_id,
             'is_active':            config.is_active,
             'total_leads_received': config.total_leads_received,
@@ -3757,9 +3991,16 @@ class MetaWebhookConfigView(APIView):
             if pid and not _project_in_scope(request, pid):
                 return Response({'detail': 'Invalid project for your company.'}, status=400)
             config.page_access_token = pat
+            # Optional but strongly recommended: without it deliveries can't be
+            # verified. Only overwrite when a value is supplied, so saving other
+            # settings doesn't wipe a secret already stored.
+            secret = str(request.data.get('app_secret', '') or '').strip()
+            if secret:
+                config.app_secret = secret
             config.default_project_id = pid if pid else None
             config.is_active = bool(pat)
-            config.save(update_fields=['page_access_token', 'default_project_id', 'is_active'])
+            config.save(update_fields=['page_access_token', 'app_secret',
+                                       'default_project_id', 'is_active'])
             # Subscribe app to all accessible pages' leadgen events
             subscribed, failed, pages_data = [], [], []
             if pat:
@@ -3826,7 +4067,8 @@ def _backfill_form_mapping(company, form_id, project, page_access_token=None):
                 # +919510188522 has its 10-digit core preceded by the '1' of +91, so a
                 # \D boundary never matches. Last-10 endswith matches the same number.
                 n += Lead.objects.filter(
-                    company=company, project__isnull=True, phone__endswith=digits
+                    company=company, project__isnull=True,
+                    phone_key=phone_blind_index(digits),
                 ).update(project=project, meta_form_id=fid)
         except Exception:
             logger.exception('Meta backfill failed for form_id=%s', fid)

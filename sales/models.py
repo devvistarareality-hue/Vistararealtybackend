@@ -1,7 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from accounts.models import User
-from .fields import EncryptedTextField, EncryptedDecimalField
+from .fields import EncryptedTextField, EncryptedDecimalField, phone_blind_index
 
 
 LEAD_STATUS = [
@@ -51,6 +51,13 @@ SV_STATUS = [
     ('completed', 'Completed'),
     ('cancelled', 'Cancelled'),
     ('no_show', 'No Show'),
+]
+
+SV_OUTCOME = [
+    ('hot', 'Hot'),
+    ('warm', 'Warm'),
+    ('cold', 'Cold'),
+    ('not_interested', 'Not Interested'),
 ]
 
 CLOSURE_STATUS = [
@@ -121,13 +128,17 @@ class Project(models.Model):
     # (no real floors) and an unmapped block raises a block-prefixed EOI instead of
     # falling back to a flat unit list.
     block_industrial = models.BooleanField(default=False)
+    # Some projects render a bespoke LOI layout. Keyed off this rather than the
+    # project's name, so renaming a project can't silently change its paperwork.
+    LOI_VARIANTS = [('', 'Standard'), ('tundav', 'Tundav'), ('kalrav3', 'Kalrav 3')]
+    loi_variant = models.CharField(max_length=30, choices=LOI_VARIANTS, blank=True, default='')
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
-    approver_email = models.EmailField(max_length=254, blank=True, default='')
+    approver_email = EncryptedTextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     updated_at = models.DateTimeField(auto_now=True)
@@ -167,7 +178,7 @@ class Plot(models.Model):
     cluster_type = models.CharField(max_length=100, blank=True)
     facing = models.CharField(max_length=50, blank=True)
     price = models.CharField(max_length=100, blank=True)
-    notes = models.TextField(blank=True)
+    notes = EncryptedTextField(blank=True)
     # ── Tower projects (Pratishtha-style: G+13, units stacked per floor) ──
     # Plotted schemes leave `floor` NULL; a tower sets 0 for ground, 1.. upward, so
     # units can be grouped and shown against that floor's plan.
@@ -210,17 +221,21 @@ class Lead(models.Model):
         'companies.Company', on_delete=models.CASCADE,
         related_name='leads', null=True, blank=True,
     )
-    name = models.CharField(max_length=200)
-    phone = models.CharField(max_length=20)
-    alt_phone = models.CharField(max_length=20, blank=True)
-    email = models.EmailField(blank=True)
+    name = EncryptedTextField()
+    phone = EncryptedTextField()
+    # Searchable fingerprint of `phone` — an encrypted column can't be looked up,
+    # so duplicate detection and phone search go through this instead. Kept in step
+    # with `phone` by save() and, for bulk paths, by the caller.
+    phone_key = models.CharField(max_length=64, blank=True, db_index=True)
+    alt_phone = EncryptedTextField(blank=True)
+    email = EncryptedTextField(blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
     source = models.ForeignKey(LeadSource, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
 
     # Meta Ads attribution
     meta_campaign_name = models.CharField(max_length=200, blank=True)
-    meta_adset_name    = models.CharField(max_length=200, blank=True)
-    meta_ad_name       = models.CharField(max_length=200, blank=True)
+    meta_adset_name    = EncryptedTextField(blank=True)
+    meta_ad_name       = EncryptedTextField(blank=True)
     # The Meta Lead Ads form this lead came from — drives form→project routing and
     # lets a later mapping retroactively backfill the project.
     meta_form_id       = models.CharField(max_length=100, blank=True, db_index=True)
@@ -233,7 +248,7 @@ class Lead(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='tc_leads'
     )
     telecaller_status = models.CharField(max_length=30, choices=TC_STATUS, blank=True)
-    telecaller_remarks = models.TextField(blank=True)
+    telecaller_remarks = EncryptedTextField(blank=True)
     telecaller_assigned_at = models.DateTimeField(null=True, blank=True)
 
     # STM assignment
@@ -241,7 +256,7 @@ class Lead(models.Model):
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='stm_leads'
     )
     stm_status = models.CharField(max_length=30, choices=STM_STATUS, blank=True)
-    stm_remarks = models.TextField(blank=True)
+    stm_remarks = EncryptedTextField(blank=True)
     stm_assigned_at = models.DateTimeField(null=True, blank=True)
 
     # Requirement
@@ -252,7 +267,7 @@ class Lead(models.Model):
 
     # Structured requirement (Location / Purpose / Budget bucket)
     city = models.CharField(max_length=120, blank=True)
-    address = models.TextField(blank=True)
+    address = EncryptedTextField(blank=True)
     purpose = models.JSONField(default=list, blank=True)   # multi-select: investment/end_use/other
     budget_bucket = models.CharField(max_length=20, choices=BUDGET_BUCKETS, blank=True)
 
@@ -285,6 +300,18 @@ class Lead(models.Model):
             models.Index(fields=['stm', 'stm_status', '-created_at'], name='lead_stm_status_created_idx'),
         ]
 
+    def save(self, *args, **kwargs):
+        # Derive the lookup key from the plaintext attribute before the field
+        # encrypts it on write. bulk_create/bulk_update skip save(), so those
+        # callers set phone_key themselves (see the CSV import).
+        self.phone_key = phone_blind_index(self.phone)
+        if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+            uf = set(kwargs['update_fields'])
+            if 'phone' in uf:
+                uf.add('phone_key')
+                kwargs['update_fields'] = list(uf)
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f'{self.name} – {self.phone}'
 
@@ -295,7 +322,7 @@ class LeadStatusHistory(models.Model):
     field_changed = models.CharField(max_length=50)
     old_value = models.CharField(max_length=100, blank=True)
     new_value = models.CharField(max_length=100, blank=True)
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -309,7 +336,7 @@ class FollowUp(models.Model):
     scheduled_at = models.DateTimeField()
     completed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=FOLLOWUP_STATUS, default='pending')
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     outcome = models.TextField(blank=True)
     # Phase-2 scheduled reminders: set once each so the cron never double-notifies.
     reminder_sent_at = models.DateTimeField(null=True, blank=True)   # assignee nudged (overdue)
@@ -336,13 +363,16 @@ class SiteVisit(models.Model):
     scheduled_at = models.DateTimeField(null=True, blank=True)
     visited_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=SV_STATUS, default='scheduled')
+    # Post-visit outcome — set alongside remarks the moment a visit is marked Done,
+    # so the pipeline can tell an interested walk-in from a dead one at a glance.
+    outcome = models.CharField(max_length=20, choices=SV_OUTCOME, blank=True)
     stm = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='site_visits'
     )
     referred_by_telecaller = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, related_name='referred_site_visits'
     )
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     # Phase-2 scheduled reminders: set once each so the cron never double-notifies.
     reminder_sent_at = models.DateTimeField(null=True, blank=True)   # STM/TC nudged (overdue)
     escalated_at = models.DateTimeField(null=True, blank=True)       # manager escalated
@@ -370,10 +400,10 @@ class Booking(models.Model):
     stm       = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
 
     # Client
-    client_name = models.CharField(max_length=200, blank=True)
+    client_name = EncryptedTextField(blank=True)
     gender      = models.CharField(max_length=10, blank=True)
-    phone       = models.CharField(max_length=20, blank=True)
-    address     = models.TextField(blank=True)
+    phone       = EncryptedTextField(blank=True)
+    address     = EncryptedTextField(blank=True)
     source      = models.CharField(max_length=100, blank=True)
 
     # Plot / type
@@ -432,12 +462,12 @@ class Booking(models.Model):
     extra_terms    = models.JSONField(default=list, blank=True)
 
     booking_date = models.DateField(null=True, blank=True)
-    cp_name      = models.CharField(max_length=200, blank=True)
+    cp_name      = EncryptedTextField(blank=True)
     # Kiosk self-booking: `stm` is the kiosk account, not the salesperson who assisted,
     # so the staff member types their name here. Preferred over stm.name wherever a
     # booking's STM is displayed. Named to avoid clashing with the serializer's
     # existing stm_name (which reads stm.name).
-    manual_stm_name = models.CharField(max_length=200, blank=True)
+    manual_stm_name = EncryptedTextField(blank=True)
     # max_length must be generous: the GAS-style path is Project/Plot <no> - <Client>/R<rev>_LOI_...pdf
     # and long project+client names exceed the FileField default of 100 (silently failed the DB save).
     loi_document = models.FileField(upload_to='', null=True, blank=True, max_length=300)  # path set explicitly (project/plot/rev)
@@ -467,8 +497,8 @@ class Closure(models.Model):
     )
     lead = models.ForeignKey(Lead, on_delete=models.SET_NULL, null=True, blank=True, related_name='closures')
     # Snapshot of the client at closure time — survives the lead being deleted.
-    client_name = models.CharField(max_length=200, blank=True)
-    client_phone = models.CharField(max_length=20, blank=True)
+    client_name = EncryptedTextField(blank=True)
+    client_phone = EncryptedTextField(blank=True)
     site_visit = models.ForeignKey(SiteVisit, on_delete=models.SET_NULL, null=True, blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True)
     stm = models.ForeignKey(
@@ -483,7 +513,7 @@ class Closure(models.Model):
     unit_type = models.CharField(max_length=50, blank=True)
     booking_amount = EncryptedDecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     total_amount = EncryptedDecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
-    remarks = models.TextField(blank=True)
+    remarks = EncryptedTextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -605,6 +635,10 @@ class MetaWebhookConfig(models.Model):
     # Encrypted at rest (Fernet). Long-lived FB Page token = full page API access.
     # verify_token stays plaintext — it's used in an equality lookup and is low-value.
     page_access_token = EncryptedTextField(blank=True)
+    # Meta signs every webhook POST with HMAC-SHA256 of the raw body, keyed on the
+    # app secret. Without it the endpoint accepts anything the internet sends.
+    # Encrypted for the same reason as the page token.
+    app_secret = EncryptedTextField(blank=True)
     default_project = models.ForeignKey(
         Project, on_delete=models.SET_NULL, null=True, blank=True
     )

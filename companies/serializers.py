@@ -9,7 +9,7 @@ class CompanyVerifySerializer(serializers.Serializer):
 class CompanySerializer(serializers.ModelSerializer):
     class Meta:
         model  = Company
-        fields = ['code', 'name', 'logo_url']
+        fields = ['code', 'name', 'logo_url', 'loi_enabled']
 
 
 class CompanyAdminSerializer(serializers.ModelSerializer):

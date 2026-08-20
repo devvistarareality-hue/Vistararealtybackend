@@ -22,7 +22,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'allow_unit_switch', 'booking_approvers',
-            'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans',
+            'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
@@ -160,6 +160,12 @@ class LeadListSerializer(serializers.ModelSerializer):
     source_name = serializers.CharField(source='source.name', read_only=True, default=None)
     telecaller_name = serializers.CharField(source='telecaller.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
+    # Only present when the queryset was annotated with it (LeadListView) — falls
+    # back to None elsewhere (e.g. StatsView's recent_leads) rather than erroring.
+    sv_outcome = serializers.SerializerMethodField()
+
+    def get_sv_outcome(self, obj):
+        return getattr(obj, 'sv_outcome', None) or None
 
     class Meta:
         model = Lead
@@ -168,7 +174,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'project', 'project_name', 'source', 'source_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
-            'stm', 'stm_name', 'stm_status', 'stm_assigned_at',
+            'stm', 'stm_name', 'stm_status', 'sv_outcome', 'stm_assigned_at',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]
@@ -240,7 +246,15 @@ class SiteVisitSerializer(serializers.ModelSerializer):
     lead_phone = serializers.CharField(source='lead.phone', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
-    referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
+    # The telecaller behind the visit: the one recorded on the visit, falling back to
+    # the lead's own telecaller. Only some visits carry the field themselves, but the
+    # lead nearly always knows who worked it.
+    referred_by_telecaller_name = serializers.SerializerMethodField()
+
+    def get_referred_by_telecaller_name(self, obj):
+        if obj.referred_by_telecaller_id:
+            return obj.referred_by_telecaller.name
+        return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
 
     class Meta:
         model = SiteVisit
@@ -255,7 +269,15 @@ class ClosureSerializer(serializers.ModelSerializer):
     lead_phone = serializers.SerializerMethodField()
     project_name = serializers.CharField(source='project.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
-    referred_by_telecaller_name = serializers.CharField(source='referred_by_telecaller.name', read_only=True, default=None)
+    # As on SiteVisit: the closure's own telecaller, else the lead's. A closure recorded
+    # from the booking flow never sets its own, so without the fallback this is always
+    # blank. The lead can be gone (trial reset), hence the guard.
+    referred_by_telecaller_name = serializers.SerializerMethodField()
+
+    def get_referred_by_telecaller_name(self, obj):
+        if obj.referred_by_telecaller_id:
+            return obj.referred_by_telecaller.name
+        return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
 
     class Meta:
         model = Closure
