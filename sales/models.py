@@ -131,6 +131,13 @@ class Project(models.Model):
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
+    # Some projects have no telecalling team at all. With this on, a new lead for the
+    # project skips the telecaller stage entirely and is distributed straight to an
+    # available STM — both on lead creation and in the scheduled runs.
+    skip_telecaller = models.BooleanField(
+        default=False,
+        help_text='No telecaller stage: assign new leads for this project directly to an STM.',
+    )
     approver_email = EncryptedTextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
