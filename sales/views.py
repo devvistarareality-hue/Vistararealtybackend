@@ -1865,7 +1865,56 @@ def _window_state(company, dist_type):
     return 'open'
 
 
+def _telecaller_project_ids(company):
+    """Projects that actually have a telecaller on them.
+
+    A project with nobody from telecalling assigned has no telecaller stage, so its
+    leads go straight to an STM. Derived from the assignments rather than a setting
+    someone has to remember to flip: assign a telecaller and the project rejoins the
+    telecaller flow by itself; remove the last one and it leaves.
+    """
+    return set(
+        UserProjectAssignment.objects.filter(
+            user__company=company,
+            user__is_active=True,
+            user__designation__iexact='TELECALLER',
+        ).values_list('project_id', flat=True)
+    )
+
+
+def _pending_direct_to_stm(company):
+    """New leads whose project has no telecaller assigned to it."""
+    return Lead.objects.filter(
+        company=company, status='new',
+        telecaller__isnull=True, stm__isnull=True,
+        project__isnull=False,
+    ).exclude(project_id__in=_telecaller_project_ids(company))
+
+
 def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
+    """Distribute, then hand telecaller-less projects straight to an STM.
+
+    A project with no telecaller assigned has no telecalling stage, so its leads must
+    reach an STM. That has to happen even when the telecaller pass returned early --
+    window closed, nobody marked available -- because those leads never needed a
+    telecaller in the first place.
+    """
+    result = _distribute(company, dist_type, triggered_by, gate)
+    if dist_type != 'telecaller' or not _pending_direct_to_stm(company).exists():
+        return result
+
+    direct = _distribute(company, 'stm', triggered_by, gate)
+    merged = dict(result)
+    merged['distributed'] = result.get('distributed', 0) + direct.get('distributed', 0)
+    merged['assignments'] = {**result.get('assignments', {}), **direct.get('assignments', {})}
+    if direct.get('distributed'):
+        merged.pop('message', None)
+    elif direct.get('message'):
+        merged['message'] = ' '.join(filter(None, [result.get('message'), direct['message']]))
+    return merged
+
+
+def _distribute(company, dist_type, triggered_by=None, gate='full'):
     """Weighted, project-aware, window-gated assignment of the current unassigned
     bucket to available telecallers/STMs. Reusable by both the manual Distribute
     button and the automatic triggers (lead created / marked available / warm).
@@ -1922,9 +1971,21 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
             # "unassigned" and got swept into telecaller distribution the next time
             # ANY unrelated lead-create triggered this company-wide run — handing an
             # STM's own lead to a telecaller entirely by accident.
-            qs = company_leads.filter(telecaller__isnull=True, stm__isnull=True, status='new').select_for_update(skip_locked=True).order_by('created_at')
+            # Only projects that have a telecaller assigned. The rest are handled by
+            # the STM pass below; leaving them here would park them as "skipped".
+            qs = (company_leads
+                  .filter(telecaller__isnull=True, stm__isnull=True, status='new',
+                          project_id__in=_telecaller_project_ids(company))
+                  .select_for_update(skip_locked=True).order_by('created_at'))
         else:
-            qs = company_leads.filter(status='warm_transferred', stm__isnull=True).select_for_update(skip_locked=True).order_by('created_at')
+            # Warm-transferred leads, plus new leads whose project has no telecaller
+            # assigned to it at all.
+            qs = (company_leads
+                  .filter(Q(status='warm_transferred', stm__isnull=True)
+                          | (Q(status='new', stm__isnull=True, telecaller__isnull=True,
+                               project__isnull=False)
+                             & ~Q(project_id__in=_telecaller_project_ids(company))))
+                  .select_for_update(skip_locked=True).order_by('created_at'))
 
         leads = list(qs)
         if not leads:
@@ -1989,6 +2050,10 @@ def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
                 )
             else:
                 Lead.objects.filter(pk__in=pks).update(stm_id=uid, stm_assigned_at=now)
+                # A lead that skipped the telecaller stage arrives still 'new';
+                # mark it assigned. Not 'warm_transferred' — nobody transferred it,
+                # and that status feeds the warm/SQL funnel.
+                Lead.objects.filter(pk__in=pks, status='new').update(status='assigned')
             for pk in pks:
                 history_rows.append(LeadStatusHistory(
                     lead_id=pk, changed_by=triggered_by,
