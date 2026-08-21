@@ -77,6 +77,23 @@ def phone_blind_index(phone):
     return hmac.new(key.encode(), digits.encode(), hashlib.sha256).hexdigest()
 
 
+def text_blind_index(value):
+    """Deterministic fingerprint of a text value, for columns that must stay lookupable.
+
+    Same shape as phone_blind_index but for free text — lowercased and stripped first,
+    so 'A@B.com' and ' a@b.com ' match. Used for User.email, which is encrypted yet
+    still has to be unique and findable by Django's get_by_natural_key.
+    """
+    v = str(value or '').strip().lower()
+    if not v:
+        return ''
+    key = os.getenv('FIELD_ENCRYPTION_KEY', '').strip()
+    if not key:
+        return ''
+    import hashlib, hmac
+    return hmac.new(key.encode(), v.encode(), hashlib.sha256).hexdigest()
+
+
 def _to_decimal(value):
     if value is None or value == '':
         return None
@@ -137,3 +154,17 @@ class EncryptedDecimalField(models.DecimalField):
     def get_db_prep_save(self, value, connection):
         # Bypass DecimalField numeric adaptation — store ciphertext text.
         return self.get_prep_value(value)
+
+
+def sorted_by_name(rows, reverse=False):
+    """Order people by name in Python.
+
+    `name` is encrypted, so ORDER BY sorts ciphertext — i.e. arbitrarily. Sorting
+    here keeps team lists, dropdowns and the org chart in the order users expect.
+    Accepts model instances or .values() dicts, and returns a list: callers must not
+    chain further queryset operations after this.
+    """
+    def key(r):
+        n = r.get('name') if isinstance(r, dict) else getattr(r, 'name', '')
+        return (n or '').strip().lower()
+    return sorted(rows, key=key, reverse=reverse)

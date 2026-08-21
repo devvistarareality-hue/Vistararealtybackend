@@ -41,7 +41,7 @@ TARGETS = [
     (MetaWebhookConfig, ['page_access_token', 'app_secret']),
     # Every other module, same rule: only fields nothing looks up by value.
     (Company,           ['address', 'phone', 'email']),
-    (User,              ['phone']),
+    (User,              ['phone', 'email']),
     (C1Lead,            ['name', 'phone', 'alt_phone', 'email',
                          'reference_name', 'reference_phone', 'remarks']),
     (Investor,          ['name', 'phone', 'email', 'pan', 'notes',
@@ -54,6 +54,8 @@ TARGETS = [
 
 # Models carrying a phone blind index that must be recomputed from the plaintext.
 KEYED = (Lead, C1Lead, Investor)
+# User carries an email blind index rather than a phone one.
+EMAIL_KEYED = (User,)
 
 BATCH = 500
 
@@ -112,7 +114,10 @@ class Command(BaseCommand):
                 # A read gives plaintext whether the column holds plaintext or
                 # ciphertext; re-saving is what writes ciphertext back.
                 vals = [getattr(obj, f) for f in fields]
-                if model in KEYED:
+                if model in EMAIL_KEYED:
+                    from sales.fields import text_blind_index
+                    obj.email_key = text_blind_index(obj.email) or None
+                elif model in KEYED:
                     # Derive the lookup key from the decrypted attribute. Rows written
                     # before the column existed have none, and bulk paths may lag.
                     obj.phone_key = phone_blind_index(obj.phone)
@@ -122,12 +127,14 @@ class Command(BaseCommand):
                 n_vals += sum(1 for v in vals if v)
                 buf.append(obj)
                 if not dry and len(buf) >= batch:
-                    cols = fields + (['phone_key'] if model in KEYED else [])
+                    cols = fields + (['phone_key'] if model in KEYED else
+                                 ['email_key'] if model in EMAIL_KEYED else [])
                     with transaction.atomic():
                         model.objects.bulk_update(buf, cols)
                     buf = []
             if not dry and buf:
-                cols = fields + (['phone_key'] if model in KEYED else [])
+                cols = fields + (['phone_key'] if model in KEYED else
+                                 ['email_key'] if model in EMAIL_KEYED else [])
                 with transaction.atomic():
                     model.objects.bulk_update(buf, cols)
             total_rows += n_rows
