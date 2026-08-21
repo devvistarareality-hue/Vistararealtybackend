@@ -243,6 +243,36 @@ def _availability_active(avail, user=None):
     return now_ist.time() < signout            # auto-expires at sign-out
 
 
+def manager_project_ids(user):
+    """Projects a manager is confined to, or None if they are not project-scoped.
+
+    A Manager (or Director / General Manager) who has projects assigned sees leads,
+    site visits and closures for those projects only, instead of the whole company.
+
+    Assignment is the opt-in: a manager with no project assigned keeps company-wide
+    visibility, so introducing this does not blank out anyone's screens — you scope a
+    manager by assigning them projects. Admins and platform staff are never scoped.
+
+    Bookings deliberately do not use this: a manager may book a plot on any project.
+    """
+    if is_platform_admin(user) or getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin':
+        return None
+    if not is_manager_role(user):
+        return None
+    pids = list(
+        UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True)
+    )
+    return pids or None
+
+
+def scope_leads_to_project(qs, user, lead_prefix=''):
+    """Narrow a lead-side queryset to the manager's assigned projects, if any."""
+    pids = manager_project_ids(user)
+    if pids is None:
+        return qs
+    return qs.filter(**{f'{lead_prefix}project__in': pids})
+
+
 def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
     STM or telecaller) by themselves or by anyone reporting to them, transitively.
@@ -266,7 +296,8 @@ def scope_leads_to_role(qs, user, lead_prefix='', request=None):
             Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
         )
     if _sees_all_company(user, request):
-        return qs
+        # A manager assigned to specific projects sees only those projects' leads.
+        return scope_leads_to_project(qs, user, lead_prefix)
     ids = _visible_user_ids(user)
     own_filter = Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
     if 'Sales' in (getattr(user, 'manager_modules', None) or []):
@@ -1304,6 +1335,9 @@ class FollowUpListView(APIView):
         )
         if not _sees_all_company(request.user, request):
             qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
+        else:
+            # A follow-up has no project of its own — scope through its lead.
+            qs = scope_leads_to_project(qs, request.user, 'lead__')
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(lead__company_id=request.query_params['company_id'])
         if request.query_params.get('lead_id'):
@@ -1353,6 +1387,9 @@ class SiteVisitListView(APIView):
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        else:
+            # A manager assigned to specific projects sees only those projects' visits.
+            qs = scope_leads_to_project(qs, request.user)
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         # A site visit has no company of its own; it belongs to its lead's company, the
         # same path scope_to_company uses above. Filtering company_id directly raised
@@ -1452,6 +1489,9 @@ class ClosureListView(APIView):
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        else:
+            # A manager assigned to specific projects sees only those projects' closures.
+            qs = scope_leads_to_project(qs, request.user)
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
