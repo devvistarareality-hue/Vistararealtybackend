@@ -162,10 +162,13 @@ def _approver_project_ids(user, company):
 
 
 def _can_approve_project(user, project, company):
-    """Whether `user` holds approver authority over `project`'s bookings. Two cases:
-    someone named on any project is confined to those projects (a project they don't
-    approve is off limits even if it names nobody), and someone named nowhere is
-    blocked from projects that do name approvers. Real admins are exempt.
+    """Whether `user` is a configured approver for `project`'s bookings.
+
+    Only the managers named on the project may approve it — being a manager is not
+    itself authority to approve. A project that names nobody is approvable only by a
+    real admin, rather than by everyone: the previous rule returned True whenever the
+    list was empty, which let any manager approve bookings for the projects that had
+    not been configured yet.
 
     Shared by approve/reject and cancel so the two cannot drift apart — cancel undoes
     an approval, frees the plots and deletes the signed LOI, so it needs at least the
@@ -174,11 +177,7 @@ def _can_approve_project(user, project, company):
     if _is_hard_admin(user):
         return True
     project_id = getattr(project, 'id', project)
-    approver_project_ids = _approver_project_ids(user, company)
-    if approver_project_ids:
-        return project_id in approver_project_ids
-    named = (getattr(project, 'booking_approvers', None) or []) if not isinstance(project, int) else []
-    return not (named and user.id not in named)
+    return project_id in _approver_project_ids(user, company)
 
 
 def can_assign_leads(user):
