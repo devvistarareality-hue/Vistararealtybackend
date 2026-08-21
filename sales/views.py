@@ -1,4 +1,6 @@
 import logging
+import os
+import hmac
 import secrets
 from datetime import timedelta
 import requests as http_requests
@@ -43,8 +45,21 @@ from .serializers import (
 PAGE_SIZE = 25
 
 
+# The staff hierarchy, most senior first. Everything at or above Manager carries
+# Manager's authority — a Director who could do less than the Manager reporting to
+# them would be a permissions bug, so these are compared as a set rather than
+# spelled out at each call site.
+ROLE_HIERARCHY = ['Director', 'General Manager', 'Manager', 'Employee', 'Intern']
+MANAGER_ROLES = ('Admin', 'Director', 'General Manager', 'Manager')
+
+
+def is_manager_role(user):
+    """True for Manager and anything senior to it (not Admin/staff — see below)."""
+    return getattr(user, 'role', '') in ('Director', 'General Manager', 'Manager')
+
+
 def is_admin_or_manager(user):
-    return user.role in ('Admin', 'Manager') or user.is_staff
+    return user.role in MANAGER_ROLES or user.is_staff
 
 
 def has_sales_access(user):
@@ -101,7 +116,7 @@ def _sees_all_company(user, request=None, include_manager_role=True):
     — they already return True unconditionally below."""
     if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
         return True
-    if include_manager_role and getattr(user, 'role', '') == 'Manager':
+    if include_manager_role and is_manager_role(user):
         return True
     if (request is not None and request.query_params.get('admin_view') == '1'
             and 'Sales' in (getattr(user, 'admin_modules', None) or [])):
@@ -149,10 +164,13 @@ def _approver_project_ids(user, company):
 
 
 def _can_approve_project(user, project, company):
-    """Whether `user` holds approver authority over `project`'s bookings. Two cases:
-    someone named on any project is confined to those projects (a project they don't
-    approve is off limits even if it names nobody), and someone named nowhere is
-    blocked from projects that do name approvers. Real admins are exempt.
+    """Whether `user` is a configured approver for `project`'s bookings.
+
+    Only the managers named on the project may approve it — being a manager is not
+    itself authority to approve. A project that names nobody is approvable only by a
+    real admin, rather than by everyone: the previous rule returned True whenever the
+    list was empty, which let any manager approve bookings for the projects that had
+    not been configured yet.
 
     Shared by approve/reject and cancel so the two cannot drift apart — cancel undoes
     an approval, frees the plots and deletes the signed LOI, so it needs at least the
@@ -161,11 +179,7 @@ def _can_approve_project(user, project, company):
     if _is_hard_admin(user):
         return True
     project_id = getattr(project, 'id', project)
-    approver_project_ids = _approver_project_ids(user, company)
-    if approver_project_ids:
-        return project_id in approver_project_ids
-    named = (getattr(project, 'booking_approvers', None) or []) if not isinstance(project, int) else []
-    return not (named and user.id not in named)
+    return project_id in _approver_project_ids(user, company)
 
 
 def can_assign_leads(user):
@@ -230,6 +244,43 @@ def _availability_active(avail, user=None):
     return now_ist.time() < signout            # auto-expires at sign-out
 
 
+# Only Manager is confined to assigned projects. Director and General Manager sit
+# above the project line and always see the whole company, so they are never scoped
+# and are never offered a project assignment.
+PROJECT_SCOPED_ROLES = ('Manager',)
+
+
+def manager_project_ids(user):
+    """Projects a Manager is confined to, or None if they are not project-scoped.
+
+    A Manager who has projects assigned sees leads, site visits and closures for
+    those projects only, instead of the whole company.
+
+    Assignment is the opt-in: a Manager with no project assigned keeps company-wide
+    visibility, so introducing this does not blank out anyone's screens — you scope a
+    manager by assigning them projects. Admins, platform staff, Directors and General
+    Managers are never scoped.
+
+    Bookings deliberately do not use this: a manager may book a plot on any project.
+    """
+    if is_platform_admin(user) or getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin':
+        return None
+    if getattr(user, 'role', '') not in PROJECT_SCOPED_ROLES:
+        return None
+    pids = list(
+        UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True)
+    )
+    return pids or None
+
+
+def scope_leads_to_project(qs, user, lead_prefix=''):
+    """Narrow a lead-side queryset to the manager's assigned projects, if any."""
+    pids = manager_project_ids(user)
+    if pids is None:
+        return qs
+    return qs.filter(**{f'{lead_prefix}project__in': pids})
+
+
 def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
     STM or telecaller) by themselves or by anyone reporting to them, transitively.
@@ -253,7 +304,8 @@ def scope_leads_to_role(qs, user, lead_prefix='', request=None):
             Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
         )
     if _sees_all_company(user, request):
-        return qs
+        # A manager assigned to specific projects sees only those projects' leads.
+        return scope_leads_to_project(qs, user, lead_prefix)
     ids = _visible_user_ids(user)
     own_filter = Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
     if 'Sales' in (getattr(user, 'manager_modules', None) or []):
@@ -1291,6 +1343,9 @@ class FollowUpListView(APIView):
         )
         if not _sees_all_company(request.user, request):
             qs = qs.filter(assigned_to__in=_visible_user_ids(request.user))
+        else:
+            # A follow-up has no project of its own — scope through its lead.
+            qs = scope_leads_to_project(qs, request.user, 'lead__')
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(lead__company_id=request.query_params['company_id'])
         if request.query_params.get('lead_id'):
@@ -1340,6 +1395,9 @@ class SiteVisitListView(APIView):
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        else:
+            # A manager assigned to specific projects sees only those projects' visits.
+            qs = scope_leads_to_project(qs, request.user)
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         # A site visit has no company of its own; it belongs to its lead's company, the
         # same path scope_to_company uses above. Filtering company_id directly raised
@@ -1439,6 +1497,9 @@ class ClosureListView(APIView):
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        else:
+            # A manager assigned to specific projects sees only those projects' closures.
+            qs = scope_leads_to_project(qs, request.user)
         # Platform admin viewing a specific company (?company_id) — honour the filter.
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
@@ -1629,7 +1690,8 @@ class DistributionSettingsView(APIView):
         company = _resolve_company(request)
         s = self._get_or_create(company)
         managers = list(
-            User.objects.filter(company=company, is_active=True, role='Manager')
+            User.objects.filter(company=company, is_active=True, role__in=MANAGER_ROLES)
+            .exclude(role='Admin')
             .order_by('name').values('id', 'name', 'designation')
         )
         return Response({
@@ -2827,7 +2889,7 @@ class MyTeamView(APIView):
                 .filter(
                     Q(reporting_manager__isnull=False)
                     | Q(subordinates__isnull=False)
-                    | Q(role='Manager')
+                    | Q(role__in=MANAGER_ROLES)
                 )
                 .distinct().select_related('reporting_manager').order_by('name')
             )
@@ -2994,6 +3056,25 @@ class BookingListCreateView(APIView):
                     status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
 
+        # A booking against a project that HAS plots mapped must name one. Without
+        # this the API accepted a booking with no plot, so nothing was reserved and
+        # the unit map kept showing the unit as available — and because the display
+        # falls back to the area, an 80,000 sq.ft parcel rendered as "Unit 80000".
+        #
+        # EOIs are exempt by design: they are raised before a unit is chosen. A
+        # project with no plots mapped is left alone too — land sold by area (the
+        # industrial projects) has no unit list to choose from, and refusing would
+        # stop those sales outright.
+        if not data.get('eoi'):
+            proj_id = data.get('project')
+            has_plot = bool(data.get('plot')) or bool(
+                [x for x in (data.get('plot_ids') or []) if str(x).isdigit()])
+            if proj_id and not has_plot and Plot.objects.filter(project_id=proj_id).exists():
+                return Response(
+                    {'detail': 'Select a unit for this booking — this project has units mapped.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         # Guard against duplicate submissions: a plot shouldn't have more than one
         # active (pending/approved) booking at a time. Traced real production
         # duplicates (same client/plot/amount, 10-30s apart) to a user resubmitting
@@ -3068,8 +3149,24 @@ class BookingListCreateView(APIView):
         ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
         ser.is_valid(raise_exception=True)
         if prior:
-            extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure, plot=prior.plot,
+            extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure,
+                         revision_of=prior,
                          approval_status='REVISION R%d PENDING' % (prior.revision_no + 1))
+            # A revision inherits from its parent only what it does not supply itself.
+            # `plot` used to be inherited unconditionally, which overwrote a unit the
+            # revision had just chosen — and when the parent was an EOI holding no
+            # plot, it overwrote that choice with nothing. Carrying the unit and area
+            # across matters just as much: without them a revision of an EOI on a
+            # project with no plots mapped came out blank and displayed its area as
+            # though it were a plot number.
+            chose_plot = bool(data.get('plot')) or bool(
+                [x for x in (data.get('plot_ids') or []) if str(x).isdigit()])
+            if not chose_plot:
+                extra['plot'] = prior.plot
+                if not str(data.get('plot_numbers') or '').strip() and prior.plot_numbers:
+                    extra['plot_numbers'] = prior.plot_numbers
+            if not str(data.get('area') or '').strip() and prior.area:
+                extra['area'] = prior.area
         else:
             extra = dict(revision_no=0, approval_status='PENDING')
         booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='pending', **extra)
@@ -3105,6 +3202,18 @@ class BookingListCreateView(APIView):
                 eoi_block = data.get('eoi_block') if getattr(booking.project, 'block_industrial', False) else None
                 booking.plot_numbers = _next_eoi_no(company, booking.project_id,
                                                      prefer=(data.get('eoi_no') or ''), block=eoi_block)
+            booking.save(update_fields=['plot_numbers'])
+
+        # A booking on a project with no units mapped, submitted without a unit and
+        # without the EOI flag, would otherwise carry no identity at all — the list
+        # then falls back to its area, which is how "80,000 sq.ft" once rendered as
+        # "Unit 80000". There is no other identity available on such a project, so it
+        # is numbered as the EOI it effectively is. Projects that DO have units are
+        # already refused above unless one is named.
+        if (not data.get('eoi') and not booking.plot_numbers and not booking.plot_id
+                and booking.project_id
+                and not Plot.objects.filter(project_id=booking.project_id).exists()):
+            booking.plot_numbers = _next_eoi_no(company, booking.project_id)
             booking.save(update_fields=['plot_numbers'])
 
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
@@ -3144,6 +3253,12 @@ class BookingListCreateView(APIView):
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
+        # Accounts & Finance follow the money from the moment it is submitted, not
+        # only once it clears — a revised LOI changes the figure they are tracking.
+        _notify_accounts_booking(
+            company, booking, 'booking_approval',
+            'Booking revised — approval pending' if booking.revision_no else 'New booking — approval pending',
+            'awaiting approval')
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -3286,21 +3401,63 @@ def _drop_superseded_revisions(qs):
     revision leaves the original approved as well — so both were listed and the project
     totals counted the deal twice. Only the latest revision should stand.
 
-    The client posts `revision_of` but it has never been persisted, so there is no
-    parent link to follow: a chain is identified by (project, phone, unit), and only
-    where a revision actually exists. Two ordinary bookings that happen to share those
-    fields are left alone, as are rejected rows — a cancelled booking belongs in the
-    Rejected tab, not folded into a live chain. Ties on revision_no fall to the newest
-    row, which happens where a booking was revised twice from the same parent.
+    `revision_of` is the authoritative link and is followed first. It has only been
+    recorded since the field was added, so two older facts still stand in for it, and
+    neither works alone:
+
+      * they share a closure — which survives an EOI being converted to an LOI, where
+        the unit is renumbered from "EOI-2" to a real plot number; but
+      * a revision is issued its own closure, so a plain revise leaves the closures
+        different while the unit stays the same.
+
+    So rows are connected if they share EITHER a closure OR a (project, phone, unit),
+    and the connections are followed transitively — a chain that was revised twice and
+    then converted still resolves to one deal.
+
+    A group is only collapsed when it actually contains a revision, so two ordinary
+    bookings that happen to share a key are left alone; rejected rows are excluded,
+    belonging in the Rejected tab rather than folded into a live chain. Ties on
+    revision_no fall to the newest row, which happens where a booking was revised twice
+    from the same parent.
     """
-    rows = list(qs.values('id', 'project_id', 'phone', 'plot_numbers',
-                          'plot__number', 'area', 'revision_no', 'status'))
+    rows = [r for r in qs.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
+                                 'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
+            if r['status'] != 'rejected']
+
+    parent = {r['id']: r['id'] for r in rows}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    present = {r['id'] for r in rows}
+    seen = {}
+    for r in rows:
+        # The recorded parent, where there is one — exact, no inference needed.
+        if r['revision_of_id'] and r['revision_of_id'] in present:
+            union(r['revision_of_id'], r['id'])
+        keys = []
+        if r['closure_id']:
+            keys.append(('closure', r['closure_id']))
+        unit = (r['plot_numbers'] or r['plot__number'] or r['area'] or '').strip()
+        if unit:
+            keys.append(('unit', r['project_id'], (r['phone'] or '').strip(), unit))
+        for k in keys:
+            if k in seen:
+                union(seen[k], r['id'])
+            else:
+                seen[k] = r['id']
+
     groups = {}
     for r in rows:
-        if r['status'] == 'rejected':
-            continue
-        unit = (r['plot_numbers'] or r['plot__number'] or r['area'] or '').strip()
-        groups.setdefault((r['project_id'], (r['phone'] or '').strip(), unit), []).append(r)
+        groups.setdefault(find(r['id']), []).append(r)
     drop = set()
     for g in groups.values():
         if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
@@ -3363,7 +3520,7 @@ def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount
         if not recipients:
             recipients = list(
                 User.objects.filter(company=company, is_active=True)
-                .filter(Q(role='Manager') | Q(is_staff=True))
+                .filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True))
             )
         seen = set()
         for u in recipients:
@@ -3395,7 +3552,7 @@ def _notify_booking_approvers(company, booking, submitter):
         #    approve.
         if not recipients:
             recipients = list(User.objects.filter(company=company, is_active=True)
-                              .filter(Q(role='Manager') | Q(role='Admin') | Q(is_staff=True)))
+                              .filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True)))
         # Never notify the person who submitted it; de-dup.
         sub_id = getattr(submitter, 'id', None)
         recipients = [u for u in recipients if u and u.id != sub_id]
@@ -3418,6 +3575,14 @@ def _notify_booking_approvers(company, booking, submitter):
             return
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        # The rep who sold the unit should hear about it even when someone else
+        # submitted the revision on their behalf. A revision is saved with the
+        # submitter as its stm, so the original rep is the one on the parent booking.
+        owner = booking.stm
+        if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
+            owner = booking.revision_of.stm
+        if owner and owner.id != sub_id and owner.id not in {u.id for u in recipients}:
+            recipients = recipients + [owner]
         title = 'Booking approval needed%s' % rev
         msg = '%s · %s Unit %s · ₹%s — by %s' % (
             booking.client_name or '—', booking.project.name if booking.project_id else '',
@@ -3430,6 +3595,21 @@ def _notify_booking_approvers(company, booking, submitter):
                 notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
     except Exception:
         pass
+
+
+def _notify_accounts_booking(company, booking, ntype, title, suffix):
+    """Tell the Accounts & Finance managers about a booking event."""
+    unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+    rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+    _notify_accounts_managers(
+        company, ntype, '%s%s' % (title, rev),
+        '%s · %s Unit %s · Rs %s — %s' % (
+            booking.client_name or 'Booking',
+            booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0), suffix,
+        ),
+        {'booking_id': booking.id},
+    )
 
 
 def _notify_accounts_managers(company, ntype, title, body, data=None):
@@ -3537,6 +3717,7 @@ class BookingActionView(APIView):
             _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
             _rev = (' (R%d)' % b.revision_no) if is_rev else ''
             if b.stm:
+                _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
                 notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
                        f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
         else:
@@ -4274,6 +4455,23 @@ class SalesDataResetView(APIView):
             return Response({'detail': 'Admin only.'}, status=status.HTTP_403_FORBIDDEN)
         if (request.data.get('confirm') or '') != 'DELETE':
             return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        # A second gate the app itself does not hold: the reset key lives in the
+        # server environment, so a signed-in admin — or anyone who takes over an
+        # admin session — still cannot wipe the company's data without it.
+        #
+        # Fails closed on purpose. If DATA_RESET_KEY is unset the reset is refused
+        # outright rather than silently falling back to the DELETE box, because a
+        # missing key must never mean "no protection" on something irreversible.
+        expected = (os.getenv('DATA_RESET_KEY') or '').strip()
+        if not expected:
+            return Response(
+                {'detail': 'Data reset is disabled: no DATA_RESET_KEY is configured on the server.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        supplied = str(request.data.get('reset_key') or '').strip()
+        if not hmac.compare_digest(supplied, expected):
+            logger.warning('Data reset refused: bad key from user %s', getattr(request.user, 'id', None))
+            return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
         co = _resolve_company(request)
         before = self._counts(co)
         with_attendance = bool(request.data.get('with_attendance'))

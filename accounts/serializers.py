@@ -146,7 +146,9 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'is_active', 'reporting_manager_id']
 
     def validate_email(self, value):
-        if User.objects.filter(email=value).exclude(pk=self.instance.pk).exists():
+        # email is encrypted; uniqueness lives on the blind index.
+        from sales.fields import text_blind_index
+        if User.objects.filter(email_key=text_blind_index(value)).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError('A user with this email already exists.')
         return value
 

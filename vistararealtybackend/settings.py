@@ -248,3 +248,8 @@ if _sentry_dsn:
     except Exception:
         pass
 
+
+# auth.E003 requires USERNAME_FIELD to be unique. User.email is encrypted, so a
+# unique constraint on the column would be meaningless (Fernet is
+# non-deterministic); uniqueness lives on User.email_key instead.
+SILENCED_SYSTEM_CHECKS = ['auth.E003']
