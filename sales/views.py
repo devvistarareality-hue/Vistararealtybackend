@@ -3346,21 +3346,57 @@ def _drop_superseded_revisions(qs):
     revision leaves the original approved as well — so both were listed and the project
     totals counted the deal twice. Only the latest revision should stand.
 
-    The client posts `revision_of` but it has never been persisted, so there is no
-    parent link to follow: a chain is identified by (project, phone, unit), and only
-    where a revision actually exists. Two ordinary bookings that happen to share those
-    fields are left alone, as are rejected rows — a cancelled booking belongs in the
-    Rejected tab, not folded into a live chain. Ties on revision_no fall to the newest
-    row, which happens where a booking was revised twice from the same parent.
+    Two facts link a revision to its parent, and neither works alone:
+
+      * they share a closure — which survives an EOI being converted to an LOI, where
+        the unit is renumbered from "EOI-2" to a real plot number; but
+      * a revision is issued its own closure, so a plain revise leaves the closures
+        different while the unit stays the same.
+
+    So rows are connected if they share EITHER a closure OR a (project, phone, unit),
+    and the connections are followed transitively — a chain that was revised twice and
+    then converted still resolves to one deal.
+
+    A group is only collapsed when it actually contains a revision, so two ordinary
+    bookings that happen to share a key are left alone; rejected rows are excluded,
+    belonging in the Rejected tab rather than folded into a live chain. Ties on
+    revision_no fall to the newest row, which happens where a booking was revised twice
+    from the same parent.
     """
-    rows = list(qs.values('id', 'project_id', 'phone', 'plot_numbers',
-                          'plot__number', 'area', 'revision_no', 'status'))
+    rows = [r for r in qs.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
+                                 'area', 'revision_no', 'status', 'closure_id')
+            if r['status'] != 'rejected']
+
+    parent = {r['id']: r['id'] for r in rows}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    seen = {}
+    for r in rows:
+        keys = []
+        if r['closure_id']:
+            keys.append(('closure', r['closure_id']))
+        unit = (r['plot_numbers'] or r['plot__number'] or r['area'] or '').strip()
+        if unit:
+            keys.append(('unit', r['project_id'], (r['phone'] or '').strip(), unit))
+        for k in keys:
+            if k in seen:
+                union(seen[k], r['id'])
+            else:
+                seen[k] = r['id']
+
     groups = {}
     for r in rows:
-        if r['status'] == 'rejected':
-            continue
-        unit = (r['plot_numbers'] or r['plot__number'] or r['area'] or '').strip()
-        groups.setdefault((r['project_id'], (r['phone'] or '').strip(), unit), []).append(r)
+        groups.setdefault(find(r['id']), []).append(r)
     drop = set()
     for g in groups.values():
         if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
