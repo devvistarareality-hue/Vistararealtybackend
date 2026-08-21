@@ -83,11 +83,19 @@ class ManagerProjectScope(TestCase):
         names = sorted(r['name'] for r in self._get(LeadListView, self.admin, '/x/?page=1'))
         self.assertEqual(names, ['Alpha Lead', 'Beta Lead'])
 
-    def test_director_and_gm_are_scoped_the_same_way(self):
+    def test_director_and_gm_are_never_project_scoped(self):
+        """They sit above the project line and always see the whole company —
+        even if someone assigns them a project."""
         for role in ('Director', 'General Manager'):
             u = self._user(f'{role}@x.com', role[:2].upper() + '9', role)
             UserProjectAssignment.objects.create(user=u, project=self.beta)
-            self.assertEqual(manager_project_ids(u), [self.beta.id], role)
+            self.assertIsNone(manager_project_ids(u), f'{role} must not be scoped')
+            names = sorted(r['name'] for r in self._get(LeadListView, u, '/x/?page=1'))
+            self.assertEqual(names, ['Alpha Lead', 'Beta Lead'], role)
+
+    def test_only_manager_is_project_scoped(self):
+        from sales.views import PROJECT_SCOPED_ROLES
+        self.assertEqual(PROJECT_SCOPED_ROLES, ('Manager',))
 
     # ── bookings stay open ───────────────────────────────────────────────────
     def test_project_scoping_does_not_change_booking_visibility(self):
@@ -116,3 +124,35 @@ class ManagerProjectScope(TestCase):
         res = BookingListCreateView.as_view()(req)
         self.assertIn(res.status_code, (200, 201),
                       f'booking another project must be allowed, got {res.status_code} {res.data}')
+
+
+class AssigningProjectsToAManager(ManagerProjectScope):
+    """The admin flow: assign via the endpoint, and the manager's view narrows."""
+
+    def test_assign_endpoint_accepts_a_manager_and_scoping_follows(self):
+        from sales.views import UserProjectAssignmentView
+
+        # before: unscoped manager sees both projects' leads
+        before = sorted(r['name'] for r in self._get(LeadListView, self.unscoped, '/x/?page=1'))
+        self.assertEqual(before, ['Alpha Lead', 'Beta Lead'])
+
+        req = APIRequestFactory().post('/x/', {'user_id': self.unscoped.id,
+                                               'project_ids': [self.beta.id]}, format='json')
+        force_authenticate(req, user=self.admin)
+        res = UserProjectAssignmentView.as_view()(req)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['project_ids'], [self.beta.id])
+
+        after = [r['name'] for r in self._get(LeadListView, self.unscoped, '/x/?page=1')]
+        self.assertEqual(after, ['Beta Lead'], 'assignment should confine the manager')
+
+    def test_clearing_the_assignment_restores_full_visibility(self):
+        from sales.views import UserProjectAssignmentView
+        for ids, expected in (([self.alpha.id], ['Alpha Lead']),
+                              ([], ['Alpha Lead', 'Beta Lead'])):
+            req = APIRequestFactory().post('/x/', {'user_id': self.unscoped.id,
+                                                   'project_ids': ids}, format='json')
+            force_authenticate(req, user=self.admin)
+            self.assertEqual(UserProjectAssignmentView.as_view()(req).status_code, 200)
+            got = sorted(r['name'] for r in self._get(LeadListView, self.unscoped, '/x/?page=1'))
+            self.assertEqual(got, expected, f'with project_ids={ids}')

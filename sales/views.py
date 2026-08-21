@@ -243,21 +243,28 @@ def _availability_active(avail, user=None):
     return now_ist.time() < signout            # auto-expires at sign-out
 
 
+# Only Manager is confined to assigned projects. Director and General Manager sit
+# above the project line and always see the whole company, so they are never scoped
+# and are never offered a project assignment.
+PROJECT_SCOPED_ROLES = ('Manager',)
+
+
 def manager_project_ids(user):
-    """Projects a manager is confined to, or None if they are not project-scoped.
+    """Projects a Manager is confined to, or None if they are not project-scoped.
 
-    A Manager (or Director / General Manager) who has projects assigned sees leads,
-    site visits and closures for those projects only, instead of the whole company.
+    A Manager who has projects assigned sees leads, site visits and closures for
+    those projects only, instead of the whole company.
 
-    Assignment is the opt-in: a manager with no project assigned keeps company-wide
+    Assignment is the opt-in: a Manager with no project assigned keeps company-wide
     visibility, so introducing this does not blank out anyone's screens — you scope a
-    manager by assigning them projects. Admins and platform staff are never scoped.
+    manager by assigning them projects. Admins, platform staff, Directors and General
+    Managers are never scoped.
 
     Bookings deliberately do not use this: a manager may book a plot on any project.
     """
     if is_platform_admin(user) or getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin':
         return None
-    if not is_manager_role(user):
+    if getattr(user, 'role', '') not in PROJECT_SCOPED_ROLES:
         return None
     pids = list(
         UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True)
