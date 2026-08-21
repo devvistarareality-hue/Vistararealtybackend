@@ -475,6 +475,11 @@ class Booking(models.Model):
     status          = models.CharField(max_length=20, choices=STATUS, default='pending')
     approval_status = models.CharField(max_length=40, blank=True)
     revision_no     = models.IntegerField(default=0)
+    # The booking this one revises. The client has always posted `revision_of` but it
+    # was never stored, leaving revision chains to be inferred from closure/unit —
+    # which broke when an EOI was converted to an LOI and the unit was renumbered.
+    revision_of = models.ForeignKey('self', null=True, blank=True,
+                                    on_delete=models.SET_NULL, related_name='revisions')
     pending_revision = models.JSONField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)

@@ -3147,8 +3147,24 @@ class BookingListCreateView(APIView):
         ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
         ser.is_valid(raise_exception=True)
         if prior:
-            extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure, plot=prior.plot,
+            extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure,
+                         revision_of=prior,
                          approval_status='REVISION R%d PENDING' % (prior.revision_no + 1))
+            # A revision inherits from its parent only what it does not supply itself.
+            # `plot` used to be inherited unconditionally, which overwrote a unit the
+            # revision had just chosen — and when the parent was an EOI holding no
+            # plot, it overwrote that choice with nothing. Carrying the unit and area
+            # across matters just as much: without them a revision of an EOI on a
+            # project with no plots mapped came out blank and displayed its area as
+            # though it were a plot number.
+            chose_plot = bool(data.get('plot')) or bool(
+                [x for x in (data.get('plot_ids') or []) if str(x).isdigit()])
+            if not chose_plot:
+                extra['plot'] = prior.plot
+                if not str(data.get('plot_numbers') or '').strip() and prior.plot_numbers:
+                    extra['plot_numbers'] = prior.plot_numbers
+            if not str(data.get('area') or '').strip() and prior.area:
+                extra['area'] = prior.area
         else:
             extra = dict(revision_no=0, approval_status='PENDING')
         booking = ser.save(company=company, stm=request.user, lead_id=lead_id, status='pending', **extra)
@@ -3365,7 +3381,9 @@ def _drop_superseded_revisions(qs):
     revision leaves the original approved as well — so both were listed and the project
     totals counted the deal twice. Only the latest revision should stand.
 
-    Two facts link a revision to its parent, and neither works alone:
+    `revision_of` is the authoritative link and is followed first. It has only been
+    recorded since the field was added, so two older facts still stand in for it, and
+    neither works alone:
 
       * they share a closure — which survives an EOI being converted to an LOI, where
         the unit is renumbered from "EOI-2" to a real plot number; but
@@ -3383,7 +3401,7 @@ def _drop_superseded_revisions(qs):
     from the same parent.
     """
     rows = [r for r in qs.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
-                                 'area', 'revision_no', 'status', 'closure_id')
+                                 'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
             if r['status'] != 'rejected']
 
     parent = {r['id']: r['id'] for r in rows}
@@ -3399,8 +3417,12 @@ def _drop_superseded_revisions(qs):
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
 
+    present = {r['id'] for r in rows}
     seen = {}
     for r in rows:
+        # The recorded parent, where there is one — exact, no inference needed.
+        if r['revision_of_id'] and r['revision_of_id'] in present:
+            union(r['revision_of_id'], r['id'])
         keys = []
         if r['closure_id']:
             keys.append(('closure', r['closure_id']))

@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from accounts.models import User
 from companies.models import Company
-from sales.models import Booking, Closure, Lead, Project
+from sales.models import Booking, Closure, Lead, Plot, Project
 from sales.views import _drop_superseded_revisions
 
 
@@ -80,3 +80,72 @@ class RevisionChains(TestCase):
         kept = self._kept()
         self.assertIn(live.id, kept)
         self.assertIn(rej.id, kept, 'a rejected row belongs in the Rejected tab, untouched')
+
+
+class RevisionInheritsItsParent(TestCase):
+    """A revision must never lose the unit it is a revision of."""
+
+    def setUp(self):
+        from sales.views import BookingListCreateView
+        self.View = BookingListCreateView
+        self.co = Company.objects.create(code='RI', name='RI Co')
+        self.u = User.objects.create(name='S', email='s2@x.com', phone='9000000002',
+                                     user_code='S2', role='Admin', company=self.co)
+        # a project with no units mapped — the case the earlier guard cannot cover
+        self.area_project = Project.objects.create(company=self.co, name='By Area',
+                                                   formula_set='industrial')
+
+    def _post(self, payload):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        req = APIRequestFactory().post('/x/', payload, format='json')
+        force_authenticate(req, user=self.u)
+        return self.View.as_view()(req)
+
+    def test_revising_an_eoi_keeps_the_eoi_number(self):
+        """The exact defect: the revision came out blank and showed its area."""
+        eoi = Booking.objects.create(company=self.co, project=self.area_project,
+                                     stm=self.u, client_name='C', phone='9825387696',
+                                     plot_numbers='EOI-2', area='80000', status='sold',
+                                     approval_status='APPROVED')
+        res = self._post({'project': self.area_project.id, 'revision_of': eoi.id,
+                          'client_name': 'C', 'phone': '9825387696'})
+        self.assertIn(res.status_code, (200, 201), res.data)
+        rev = Booking.objects.get(pk=res.data['id'])
+        self.assertEqual(rev.plot_numbers, 'EOI-2', 'the revision lost its EOI number')
+        self.assertEqual(rev.area, '80000')
+        self.assertEqual(rev.revision_no, 1)
+
+    def test_the_parent_link_is_recorded(self):
+        eoi = Booking.objects.create(company=self.co, project=self.area_project,
+                                     stm=self.u, client_name='C', phone='9000000009',
+                                     plot_numbers='EOI-9', area='5000', status='sold')
+        res = self._post({'project': self.area_project.id, 'revision_of': eoi.id,
+                          'client_name': 'C', 'phone': '9000000009'})
+        rev = Booking.objects.get(pk=res.data['id'])
+        self.assertEqual(rev.revision_of_id, eoi.id)
+
+    def test_an_explicit_unit_still_wins_over_the_inherited_one(self):
+        """Converting to a real unit must not be overridden by inheritance."""
+        p = Project.objects.create(company=self.co, name='Mapped')
+        plot = Plot.objects.create(project=p, number='A-7')
+        eoi = Booking.objects.create(company=self.co, project=p, stm=self.u,
+                                     client_name='C', phone='9000000010',
+                                     plot_numbers='EOI-3', area='585', status='sold')
+        res = self._post({'project': p.id, 'revision_of': eoi.id, 'plot': plot.id,
+                          'client_name': 'C', 'phone': '9000000010'})
+        rev = Booking.objects.get(pk=res.data['id'])
+        self.assertEqual(rev.plot_numbers, 'A-7', 'the chosen unit should win')
+        self.assertEqual(rev.revision_of_id, eoi.id)
+
+    def test_chain_collapses_via_the_recorded_link_even_when_the_unit_changes(self):
+        p = Project.objects.create(company=self.co, name='Mapped2')
+        plot = Plot.objects.create(project=p, number='B-4')
+        eoi = Booking.objects.create(company=self.co, project=p, stm=self.u,
+                                     client_name='C', phone='9000000011',
+                                     plot_numbers='EOI-5', area='585', status='sold',
+                                     approval_status='APPROVED')
+        res = self._post({'project': p.id, 'revision_of': eoi.id, 'plot': plot.id,
+                          'client_name': 'C', 'phone': '9000000011'})
+        rev_id = res.data['id']
+        kept = {b.id for b in _drop_superseded_revisions(Booking.objects.filter(project=p))}
+        self.assertEqual(kept, {rev_id}, 'the superseded EOI should drop out')
