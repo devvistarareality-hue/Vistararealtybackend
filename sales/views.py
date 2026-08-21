@@ -43,8 +43,21 @@ from .serializers import (
 PAGE_SIZE = 25
 
 
+# The staff hierarchy, most senior first. Everything at or above Manager carries
+# Manager's authority — a Director who could do less than the Manager reporting to
+# them would be a permissions bug, so these are compared as a set rather than
+# spelled out at each call site.
+ROLE_HIERARCHY = ['Director', 'General Manager', 'Manager', 'Employee', 'Intern']
+MANAGER_ROLES = ('Admin', 'Director', 'General Manager', 'Manager')
+
+
+def is_manager_role(user):
+    """True for Manager and anything senior to it (not Admin/staff — see below)."""
+    return getattr(user, 'role', '') in ('Director', 'General Manager', 'Manager')
+
+
 def is_admin_or_manager(user):
-    return user.role in ('Admin', 'Manager') or user.is_staff
+    return user.role in MANAGER_ROLES or user.is_staff
 
 
 def has_sales_access(user):
@@ -101,7 +114,7 @@ def _sees_all_company(user, request=None, include_manager_role=True):
     — they already return True unconditionally below."""
     if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
         return True
-    if include_manager_role and getattr(user, 'role', '') == 'Manager':
+    if include_manager_role and is_manager_role(user):
         return True
     if (request is not None and request.query_params.get('admin_view') == '1'
             and 'Sales' in (getattr(user, 'admin_modules', None) or [])):
@@ -1629,7 +1642,8 @@ class DistributionSettingsView(APIView):
         company = _resolve_company(request)
         s = self._get_or_create(company)
         managers = list(
-            User.objects.filter(company=company, is_active=True, role='Manager')
+            User.objects.filter(company=company, is_active=True, role__in=MANAGER_ROLES)
+            .exclude(role='Admin')
             .order_by('name').values('id', 'name', 'designation')
         )
         return Response({
@@ -2827,7 +2841,7 @@ class MyTeamView(APIView):
                 .filter(
                     Q(reporting_manager__isnull=False)
                     | Q(subordinates__isnull=False)
-                    | Q(role='Manager')
+                    | Q(role__in=MANAGER_ROLES)
                 )
                 .distinct().select_related('reporting_manager').order_by('name')
             )
@@ -3363,7 +3377,7 @@ def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount
         if not recipients:
             recipients = list(
                 User.objects.filter(company=company, is_active=True)
-                .filter(Q(role='Manager') | Q(is_staff=True))
+                .filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True))
             )
         seen = set()
         for u in recipients:
@@ -3395,7 +3409,7 @@ def _notify_booking_approvers(company, booking, submitter):
         #    approve.
         if not recipients:
             recipients = list(User.objects.filter(company=company, is_active=True)
-                              .filter(Q(role='Manager') | Q(role='Admin') | Q(is_staff=True)))
+                              .filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True)))
         # Never notify the person who submitted it; de-dup.
         sub_id = getattr(submitter, 'id', None)
         recipients = [u for u in recipients if u and u.id != sub_id]

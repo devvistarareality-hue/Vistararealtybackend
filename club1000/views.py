@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
+from sales.views import MANAGER_ROLES
 from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
 from .models import (
     Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
@@ -850,7 +851,7 @@ def _notify_investor_approvers(company, investor, submitter):
             recipients = reporting_chain(submitter)
         # 3) Last resort: every manager/admin in the company (so it's never silent).
         if not recipients:
-            recipients = list(User.objects.filter(company=company, is_active=True).filter(Q(role='Manager') | Q(is_staff=True)))
+            recipients = list(User.objects.filter(company=company, is_active=True).filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True)))
         sub_id = getattr(submitter, 'id', None)
         recipients = [u for u in recipients if u and u.id != sub_id]
         if not recipients:
