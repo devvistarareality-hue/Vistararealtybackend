@@ -3054,6 +3054,25 @@ class BookingListCreateView(APIView):
                     status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
 
+        # A booking against a project that HAS plots mapped must name one. Without
+        # this the API accepted a booking with no plot, so nothing was reserved and
+        # the unit map kept showing the unit as available — and because the display
+        # falls back to the area, an 80,000 sq.ft parcel rendered as "Unit 80000".
+        #
+        # EOIs are exempt by design: they are raised before a unit is chosen. A
+        # project with no plots mapped is left alone too — land sold by area (the
+        # industrial projects) has no unit list to choose from, and refusing would
+        # stop those sales outright.
+        if not data.get('eoi'):
+            proj_id = data.get('project')
+            has_plot = bool(data.get('plot')) or bool(
+                [x for x in (data.get('plot_ids') or []) if str(x).isdigit()])
+            if proj_id and not has_plot and Plot.objects.filter(project_id=proj_id).exists():
+                return Response(
+                    {'detail': 'Select a unit for this booking — this project has units mapped.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         # Guard against duplicate submissions: a plot shouldn't have more than one
         # active (pending/approved) booking at a time. Traced real production
         # duplicates (same client/plot/amount, 10-30s apart) to a user resubmitting
