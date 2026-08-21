@@ -3239,6 +3239,12 @@ class BookingListCreateView(APIView):
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
+        # Accounts & Finance follow the money from the moment it is submitted, not
+        # only once it clears — a revised LOI changes the figure they are tracking.
+        _notify_accounts_booking(
+            company, booking, 'booking_approval',
+            'Booking revised — approval pending' if booking.revision_no else 'New booking — approval pending',
+            'awaiting approval')
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -3555,6 +3561,14 @@ def _notify_booking_approvers(company, booking, submitter):
             return
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        # The rep who sold the unit should hear about it even when someone else
+        # submitted the revision on their behalf. A revision is saved with the
+        # submitter as its stm, so the original rep is the one on the parent booking.
+        owner = booking.stm
+        if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
+            owner = booking.revision_of.stm
+        if owner and owner.id != sub_id and owner.id not in {u.id for u in recipients}:
+            recipients = recipients + [owner]
         title = 'Booking approval needed%s' % rev
         msg = '%s · %s Unit %s · ₹%s — by %s' % (
             booking.client_name or '—', booking.project.name if booking.project_id else '',
@@ -3567,6 +3581,21 @@ def _notify_booking_approvers(company, booking, submitter):
                 notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
     except Exception:
         pass
+
+
+def _notify_accounts_booking(company, booking, ntype, title, suffix):
+    """Tell the Accounts & Finance managers about a booking event."""
+    unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+    rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+    _notify_accounts_managers(
+        company, ntype, '%s%s' % (title, rev),
+        '%s · %s Unit %s · Rs %s — %s' % (
+            booking.client_name or 'Booking',
+            booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0), suffix,
+        ),
+        {'booking_id': booking.id},
+    )
 
 
 def _notify_accounts_managers(company, ntype, title, body, data=None):
@@ -3674,6 +3703,7 @@ class BookingActionView(APIView):
             _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
             _rev = (' (R%d)' % b.revision_no) if is_rev else ''
             if b.stm:
+                _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
                 notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
                        f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
         else:
