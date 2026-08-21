@@ -1,4 +1,6 @@
 import logging
+import os
+import hmac
 import secrets
 from datetime import timedelta
 import requests as http_requests
@@ -4453,6 +4455,23 @@ class SalesDataResetView(APIView):
             return Response({'detail': 'Admin only.'}, status=status.HTTP_403_FORBIDDEN)
         if (request.data.get('confirm') or '') != 'DELETE':
             return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        # A second gate the app itself does not hold: the reset key lives in the
+        # server environment, so a signed-in admin — or anyone who takes over an
+        # admin session — still cannot wipe the company's data without it.
+        #
+        # Fails closed on purpose. If DATA_RESET_KEY is unset the reset is refused
+        # outright rather than silently falling back to the DELETE box, because a
+        # missing key must never mean "no protection" on something irreversible.
+        expected = (os.getenv('DATA_RESET_KEY') or '').strip()
+        if not expected:
+            return Response(
+                {'detail': 'Data reset is disabled: no DATA_RESET_KEY is configured on the server.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        supplied = str(request.data.get('reset_key') or '').strip()
+        if not hmac.compare_digest(supplied, expected):
+            logger.warning('Data reset refused: bad key from user %s', getattr(request.user, 'id', None))
+            return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
         co = _resolve_company(request)
         before = self._counts(co)
         with_attendance = bool(request.data.get('with_attendance'))

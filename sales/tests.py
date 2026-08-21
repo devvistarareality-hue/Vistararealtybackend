@@ -735,9 +735,16 @@ class MultiPlotBookingTests(APITestCase):
         self.assertTrue(Closure.objects.filter(lead=lead, unit_no='10, 11').exists())
 
 
+RESET_KEY = 'test-reset-key'
+
+
+@mock.patch.dict('os.environ', {'DATA_RESET_KEY': RESET_KEY})
 class DataResetTests(APITestCase):
     """Admin-only trial-data reset must wipe the caller's company data, reset its
-    plots, and NEVER touch another company's data."""
+    plots, and NEVER touch another company's data.
+
+    The reset key is supplied throughout: these tests cover what reset *deletes*,
+    while the gate itself is covered in test_data_reset_key.py."""
 
     def _seed(self, code):
         from datetime import date
@@ -761,7 +768,7 @@ class DataResetTests(APITestCase):
         # missing confirm -> 400
         self.assertEqual(self.client.post('/api/sales/admin/reset-trial-data/', {}, format='json').status_code, 400)
         # do it
-        res = self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE'}, format='json')
+        res = self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE', 'reset_key': RESET_KEY}, format='json')
         self.assertEqual(res.status_code, 200)
 
         # company A wiped + plot reset
@@ -784,7 +791,7 @@ class DataResetTests(APITestCase):
 
         auth(self.client, admin)
         res = self.client.post('/api/sales/admin/reset-trial-data/',
-                               {'confirm': 'DELETE', 'targets': ['leads']}, format='json')
+                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'targets': ['leads']}, format='json')
         self.assertEqual(res.status_code, 200)
 
         self.assertFalse(Lead.objects.filter(company=co).exists())
@@ -806,7 +813,7 @@ class DataResetTests(APITestCase):
 
         auth(self.client, admin)
         res = self.client.post('/api/sales/admin/reset-trial-data/',
-                               {'confirm': 'DELETE', 'targets': ['bookings']}, format='json')
+                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'targets': ['bookings']}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertFalse(Booking.objects.filter(company=co).exists())
         self.assertFalse(Closure.objects.filter(pk=c.pk).exists())
