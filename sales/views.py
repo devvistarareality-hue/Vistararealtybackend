@@ -3039,7 +3039,7 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        return Response(BookingSerializer(qs[:200], many=True).data)
+        return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):
         company = _resolve_company(request)
