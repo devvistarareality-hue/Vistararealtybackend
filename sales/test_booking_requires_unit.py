@@ -51,3 +51,59 @@ class BookingRequiresUnit(TestCase):
         res = self._post({'project': self.mapped.id, 'revision_of': 1,
                           'client_name': 'C', 'phone': '9000000000', 'area': '80000'})
         self.assertEqual(res.status_code, 400)
+
+
+class EveryBookingCarriesAnIdentity(TestCase):
+    """No submitted booking may end up with a blank unit label."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='ID', name='ID Co')
+        self.u = User.objects.create(name='S', email='s3@x.com', phone='9000000003',
+                                     user_code='S3', role='Admin', company=self.co)
+        self.area_project = Project.objects.create(company=self.co, name='By Area',
+                                                   formula_set='industrial')
+
+    def _post(self, payload):
+        req = APIRequestFactory().post('/x/', payload, format='json')
+        force_authenticate(req, user=self.u)
+        return BookingListCreateView.as_view()(req)
+
+    def test_plotless_submission_without_a_unit_gets_an_eoi_number(self):
+        res = self._post({'project': self.area_project.id, 'client_name': 'Surendra',
+                          'phone': '9000000000', 'area': '5000'})
+        self.assertIn(res.status_code, (200, 201), res.data)
+        b = Booking.objects.get(pk=res.data['id'])
+        self.assertTrue(b.plot_numbers, 'a booking must never be left with no identity')
+        self.assertTrue(b.plot_numbers.upper().startswith('EOI'))
+        self.assertEqual(b.area, '5000', 'the area is kept as well')
+
+    def test_the_assigned_number_never_collides(self):
+        """_next_eoi_no fills the lowest free code rather than always incrementing,
+        so the contract to test is that the result is free — not that it is n+1."""
+        for i in range(1, 6):
+            Booking.objects.create(company=self.co, project=self.area_project, stm=self.u,
+                                   client_name=f'A{i}', plot_numbers=f'EOI-{i}',
+                                   area='2500', status='sold')
+        res = self._post({'project': self.area_project.id, 'client_name': 'B',
+                          'phone': '9000000001', 'area': '2500'})
+        b = Booking.objects.get(pk=res.data['id'])
+        self.assertNotIn(b.plot_numbers, {f'EOI-{i}' for i in range(1, 6)})
+        self.assertEqual(
+            Booking.objects.filter(project=self.area_project,
+                                   plot_numbers=b.plot_numbers).count(), 1,
+            'the code must be unique within the project')
+
+    def test_an_explicit_eoi_is_unaffected(self):
+        res = self._post({'project': self.area_project.id, 'eoi': True,
+                          'client_name': 'C', 'phone': '9000000002', 'area': '7500'})
+        b = Booking.objects.get(pk=res.data['id'])
+        self.assertTrue(b.plot_numbers.upper().startswith('EOI'))
+
+    def test_no_blank_label_can_reach_the_list(self):
+        for payload in (
+            {'project': self.area_project.id, 'client_name': 'X', 'phone': '9111111111', 'area': '5000'},
+            {'project': self.area_project.id, 'eoi': True, 'client_name': 'Y', 'phone': '9222222222'},
+        ):
+            self._post(payload)
+        blanks = Booking.objects.filter(plot_numbers='').exclude(status='draft').count()
+        self.assertEqual(blanks, 0)

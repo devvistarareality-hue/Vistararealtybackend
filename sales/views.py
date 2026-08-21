@@ -3202,6 +3202,18 @@ class BookingListCreateView(APIView):
                                                      prefer=(data.get('eoi_no') or ''), block=eoi_block)
             booking.save(update_fields=['plot_numbers'])
 
+        # A booking on a project with no units mapped, submitted without a unit and
+        # without the EOI flag, would otherwise carry no identity at all — the list
+        # then falls back to its area, which is how "80,000 sq.ft" once rendered as
+        # "Unit 80000". There is no other identity available on such a project, so it
+        # is numbered as the EOI it effectively is. Projects that DO have units are
+        # already refused above unless one is named.
+        if (not data.get('eoi') and not booking.plot_numbers and not booking.plot_id
+                and booking.project_id
+                and not Plot.objects.filter(project_id=booking.project_id).exists()):
+            booking.plot_numbers = _next_eoi_no(company, booking.project_id)
+            booking.save(update_fields=['plot_numbers'])
+
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
         lf = data.get('loi_file')
