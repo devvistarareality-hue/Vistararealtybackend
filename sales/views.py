@@ -693,6 +693,37 @@ class StatsTrendView(APIView):
         })
 
 
+def _leads_by_status_transition(leads_scope, field, value, date_from, date_to):
+    """Lead ids whose `field` changed to `value` within [date_from, date_to] —
+    mirrors StatsView's transition-count logic so a dashboard tile's date range
+    and a click-through list filter mean the same thing."""
+    hist = LeadStatusHistory.objects.filter(
+        lead__in=leads_scope, field_changed=field, new_value=value)
+    if date_from:
+        hist = hist.filter(created_at__date__gte=date_from)
+    if date_to:
+        hist = hist.filter(created_at__date__lte=date_to)
+    return set(hist.values_list('lead_id', flat=True))
+
+
+def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
+    """Lead ids still at stm_status='sv_done' whose latest completed visit outcome
+    matches `value`, dated by when that visit happened — mirrors StatsView's
+    sv-outcome union for the effective hot/warm/cold count."""
+    latest_sv = SiteVisit.objects.filter(
+        lead=OuterRef('pk'), status='completed',
+    ).order_by('-visited_at')
+    qs = leads_scope.filter(stm_status='sv_done').annotate(
+        _sv_outcome=Subquery(latest_sv.values('outcome')[:1]),
+        _sv_visited=Subquery(latest_sv.values('visited_at')[:1]),
+    ).filter(_sv_outcome=value)
+    if date_from:
+        qs = qs.filter(_sv_visited__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(_sv_visited__date__lte=date_to)
+    return set(qs.values_list('id', flat=True))
+
+
 class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -742,19 +773,49 @@ class LeadListView(APIView):
 
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('telecaller_status'):
-            qs = qs.filter(telecaller_status=request.query_params['telecaller_status'])
+        date_from_param = request.query_params.get('date_from')
+        date_to_param = request.query_params.get('date_to')
+        # A dashboard tile like "Warm/SQL" counts leads that BECAME that status
+        # within the selected date range (see StatsView), not leads currently
+        # sitting at that status — so its click-through must filter the same way,
+        # or a lead received earlier but marked warm today would be missing from
+        # one and present in the other. Only kicks in when a date range is
+        # actually given; a bare status filter (no date) still means "currently
+        # this status", which is its own useful, unrelated view.
+        skip_created_at_filter = False
+        telecaller_status_filter = request.query_params.get('telecaller_status')
+        TRANSITION_TC_STATUSES = {'hot', 'warm', 'callback', 'not_reachable', 'cold'}
+        if telecaller_status_filter:
+            if (date_from_param or date_to_param) and telecaller_status_filter in TRANSITION_TC_STATUSES:
+                ids = _leads_by_status_transition(
+                    qs, 'telecaller_status', telecaller_status_filter, date_from_param, date_to_param)
+                qs = qs.filter(id__in=ids)
+                skip_created_at_filter = True
+            else:
+                qs = qs.filter(telecaller_status=telecaller_status_filter)
         stm_status_filter = request.query_params.get('stm_status')
         if stm_status_filter:
             if stm_status_filter in ('hot', 'warm', 'cold'):
-                # A lead still sitting at "sv done" whose visit outcome was Hot
-                # counts as Hot too — the outcome doesn't overwrite stm_status,
-                # but it should still surface here alongside leads reclassified
-                # to hot/warm/cold directly.
-                qs = qs.filter(
-                    Q(stm_status=stm_status_filter)
-                    | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
-                )
+                if date_from_param or date_to_param:
+                    direct_ids = _leads_by_status_transition(
+                        qs, 'stm_status', stm_status_filter, date_from_param, date_to_param)
+                    sv_ids = _leads_by_sv_outcome(qs, stm_status_filter, date_from_param, date_to_param)
+                    qs = qs.filter(id__in=(direct_ids | sv_ids))
+                    skip_created_at_filter = True
+                else:
+                    # A lead still sitting at "sv done" whose visit outcome was Hot
+                    # counts as Hot too — the outcome doesn't overwrite stm_status,
+                    # but it should still surface here alongside leads reclassified
+                    # to hot/warm/cold directly.
+                    qs = qs.filter(
+                        Q(stm_status=stm_status_filter)
+                        | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
+                    )
+            elif stm_status_filter == 'sv_scheduled' and (date_from_param or date_to_param):
+                ids = _leads_by_status_transition(
+                    qs, 'stm_status', stm_status_filter, date_from_param, date_to_param)
+                qs = qs.filter(id__in=ids)
+                skip_created_at_filter = True
             else:
                 qs = qs.filter(stm_status=stm_status_filter)
         project_id = request.query_params.get('project_id')
@@ -770,10 +831,11 @@ class LeadListView(APIView):
             qs = qs.filter(stm_id=request.query_params['stm_id'])
         if request.query_params.get('is_duplicate') == 'true':
             qs = qs.filter(is_duplicate=True)
-        if request.query_params.get('date_from'):
-            qs = qs.filter(created_at__date__gte=request.query_params['date_from'])
-        if request.query_params.get('date_to'):
-            qs = qs.filter(created_at__date__lte=request.query_params['date_to'])
+        if not skip_created_at_filter:
+            if date_from_param:
+                qs = qs.filter(created_at__date__gte=date_from_param)
+            if date_to_param:
+                qs = qs.filter(created_at__date__lte=date_to_param)
         if request.query_params.get('campaign'):
             qs = qs.filter(meta_campaign_name__icontains=request.query_params['campaign'])
 
