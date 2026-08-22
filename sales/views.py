@@ -2,7 +2,7 @@ import logging
 import os
 import hmac
 import secrets
-from datetime import timedelta
+from datetime import datetime, time as dt_time, timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
@@ -3720,6 +3720,63 @@ def _notify_accounts_managers(company, ntype, title, body, data=None):
         logging.getLogger(__name__).exception('_notify_accounts_managers failed')
 
 
+def _ensure_lead_and_site_visit_for_booking(b):
+    """On a booking's first approval, guarantee it exists in the pipeline as a lead
+    with a completed site visit dated on the booking date.
+
+    Two flows land here. A closure recorded from a lead already has the lead but may
+    have no visit — a walk-in that booked without one ever being logged. A unit booked
+    directly has a lead created at submission time, but likewise no visit. Either way
+    the sale is real and the visit demonstrably happened, so the pipeline should say so
+    rather than showing a closure that came from nowhere.
+
+    Deliberately conservative:
+      - Never duplicates. A completed visit already on this lead for this project is
+        left exactly as it is, which is the normal Record-Closure-from-a-visit path.
+      - Only fabricates a lead when there is a name or phone to build one from.
+      - Attributes to the booking's STM, and to the lead's telecaller where there is
+        one, so the visit counts for the same people the closure does.
+    """
+    if not b.booking_date:
+        return None, None                     # nothing to date the visit by
+
+    lead_id = b.lead_id
+    if not lead_id:
+        name  = (b.client_name or '').strip()
+        phone = (b.phone or '').strip()
+        if not (name or phone):
+            return None, None                 # no identity to build a lead from
+        lead = Lead.objects.create(
+            company_id=b.company_id, name=name, phone=phone, status='closed',
+            project_id=b.project_id, stm=b.stm, stm_status='closed',
+        )
+        lead_id = lead.id
+        Booking.objects.filter(pk=b.pk).update(lead_id=lead_id)
+        b.lead_id = lead_id
+
+    existing = SiteVisit.objects.filter(
+        lead_id=lead_id, project_id=b.project_id, status='completed').first()
+    if existing:
+        return lead_id, None
+
+    # booking_date is a date; visits are timestamped, so anchor it at midday local
+    # time — a plain midnight can land on the previous day once rendered in another
+    # timezone, which would put the visit before the booking it came from.
+    visited = datetime.combine(b.booking_date, dt_time(12, 0))
+    if timezone.is_naive(visited):
+        visited = timezone.make_aware(visited, timezone.get_current_timezone())
+
+    tc_id = Lead.objects.filter(pk=lead_id).values_list('telecaller_id', flat=True).first()
+    sv = SiteVisit.objects.create(
+        lead_id=lead_id, project_id=b.project_id, stm=b.stm,
+        referred_by_telecaller_id=tc_id or None,
+        scheduled_at=visited, visited_at=visited,
+        status='completed', outcome='hot',
+        remarks='Recorded automatically from booking #%s on approval.' % b.pk,
+    )
+    return lead_id, sv.id
+
+
 class BookingActionView(APIView):
     """Approve / reject a pending booking (approver = admin or manager)."""
     permission_classes = [IsAuthenticated]
@@ -3771,6 +3828,15 @@ class BookingActionView(APIView):
                 )
                 b.closure = closure
                 b.save(update_fields=['status', 'approval_status', 'closure'])
+                # The sale is now real, so make sure the pipeline shows how it got
+                # here: a lead, and a completed site visit dated on the booking date.
+                try:
+                    _lid, _svid = _ensure_lead_and_site_visit_for_booking(b)
+                    if _svid and not closure.lead_id and _lid:
+                        Closure.objects.filter(pk=closure.pk).update(lead_id=_lid)
+                except Exception:
+                    # Never let this block an approval — the booking is what matters.
+                    logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
             # Notify the STM (approved) and — on a fresh closure — their manager chain.
             from notifications import notify, notify_many, reporting_chain
             _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
