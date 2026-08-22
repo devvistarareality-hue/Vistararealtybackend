@@ -465,12 +465,36 @@ class StatsView(APIView):
             fu_qs = fu_qs.filter(assigned_to__in=_visible_user_ids(request.user))
         if company_id and is_platform_admin(request.user):
             fu_qs = fu_qs.filter(lead__company_id=company_id)
-        fu_qs = fu_qs.filter(status='completed', completed_at__isnull=False)
+        fu_done = fu_qs.filter(status='completed', completed_at__isnull=False)
         if date_from:
-            fu_qs = fu_qs.filter(completed_at__date__gte=date_from)
+            fu_done = fu_done.filter(completed_at__date__gte=date_from)
         if date_to:
-            fu_qs = fu_qs.filter(completed_at__date__lte=date_to)
-        followup_call_count = fu_qs.count()
+            fu_done = fu_done.filter(completed_at__date__lte=date_to)
+        followup_call_count = fu_done.count()
+
+        # Still-open follow-ups, for the Pending / Overdue tiles. A pending row has
+        # no completed_at, so these are dated on scheduled_at instead: the range then
+        # reads as "due in this window" and the tiles agree with the Follow-Ups
+        # screen's own Pending/Overdue chips, which count the same way. Overdue is
+        # that same set narrowed to rows already past their slot.
+        fu_open = fu_qs.filter(status='pending')
+        if date_from:
+            fu_open = fu_open.filter(scheduled_at__date__gte=date_from)
+        if date_to:
+            fu_open = fu_open.filter(scheduled_at__date__lte=date_to)
+        followup_pending_count = fu_open.count()
+        followup_overdue_count = fu_open.filter(scheduled_at__lt=timezone.now()).count()
+
+        # "To Call" backlog: assigned leads this user has not actioned yet. Same rule
+        # as the All Leads "To Call" tab (work=pending), so the tile and that tab can
+        # never disagree. Both status columns are blank-not-null, so '' is the whole
+        # of "not yet worked".
+        if is_telecaller(request.user):
+            to_call_count = leads_qs.filter(telecaller_status='').count()
+        elif is_stm(request.user) or is_cp(request.user):
+            to_call_count = leads_qs.filter(stm_status='').count()
+        else:
+            to_call_count = leads_qs.filter(status='new').count()
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
@@ -505,7 +529,10 @@ class StatsView(APIView):
             'new_leads':          agg['new_leads'],
             'leads_today':        agg['leads_today'],
             'called_count':       agg['called_count'],
+            'to_call_count':      to_call_count,
             'followup_call_count': followup_call_count,
+            'followup_pending_count': followup_pending_count,
+            'followup_overdue_count': followup_overdue_count,
             # Every call made in the window: new leads worked plus follow-up calls.
             'total_called_count': agg['called_count'] + followup_call_count,
             'hot_count':          hot_count,
