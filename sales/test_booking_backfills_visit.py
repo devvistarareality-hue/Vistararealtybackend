@@ -132,3 +132,42 @@ class BookingBackfillsSiteVisitTests(APITestCase):
         b = self._approve(self._booking())
         sv = SiteVisit.objects.get(lead_id=b.lead_id)
         self.assertEqual(sv.lead.company_id, self.co.id)
+
+    # ── matching an existing client by number ────────────────────────────────
+    def test_a_booking_reuses_the_lead_that_already_has_that_number(self):
+        """The same client is one person. Booking without picking their lead must
+        attach to it, not create a second record of them."""
+        existing = Lead.objects.create(company=self.co, name='Ramesh K', phone='9876500001',
+                                       status='contacted', telecaller=self.tc)
+        b = self._approve(self._booking(client_name='Ramesh', phone='9876500001'))
+
+        self.assertEqual(b.lead_id, existing.id, 'should have matched the existing lead')
+        self.assertEqual(Lead.objects.filter(company=self.co).count(), 1, 'no duplicate lead')
+        existing.refresh_from_db()
+        self.assertEqual(existing.name, 'Ramesh K', 'existing history must not be overwritten')
+        self.assertEqual(existing.stm_id, self.stm.id, 'an unowned lead picks up the booking STM')
+        sv = SiteVisit.objects.get(lead_id=existing.id)
+        self.assertEqual(sv.referred_by_telecaller_id, self.tc.id)
+
+    def test_matching_ignores_country_code_and_spacing(self):
+        existing = Lead.objects.create(company=self.co, name='Meena', phone='+91 98765 00002',
+                                       status='new')
+        b = self._approve(self._booking(client_name='Meena', phone='9876500002'))
+        self.assertEqual(b.lead_id, existing.id)
+        self.assertEqual(Lead.objects.filter(company=self.co).count(), 1)
+
+    def test_a_number_from_another_company_is_never_matched(self):
+        other = Company.objects.create(code='OTH', name='Other Co')
+        Lead.objects.create(company=other, name='Theirs', phone='9876500001', status='new')
+        b = self._approve(self._booking(client_name='Ramesh', phone='9876500001'))
+        self.assertEqual(Lead.objects.filter(company=other).count(), 1)
+        self.assertEqual(Lead.objects.get(pk=b.lead_id).company_id, self.co.id)
+
+    def test_an_owned_lead_keeps_its_stm(self):
+        owner = User.objects.create(email='own@x.com', company=self.co, role='Sales',
+                                    user_code='S2', designation='STM')
+        existing = Lead.objects.create(company=self.co, name='Anil', phone='9876500003',
+                                       status='warm', stm=owner)
+        self._approve(self._booking(client_name='Anil', phone='9876500003'))
+        existing.refresh_from_db()
+        self.assertEqual(existing.stm_id, owner.id, 'must not steal an assigned lead')

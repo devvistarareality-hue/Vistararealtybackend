@@ -3746,11 +3746,30 @@ def _ensure_lead_and_site_visit_for_booking(b):
         phone = (b.phone or '').strip()
         if not (name or phone):
             return None, None                 # no identity to build a lead from
-        lead = Lead.objects.create(
-            company_id=b.company_id, name=name, phone=phone, status='closed',
-            project_id=b.project_id, stm=b.stm, stm_status='closed',
-        )
-        lead_id = lead.id
+        # Match on the number first. The same client often already exists as a lead —
+        # they were called, or they booked a second unit — and creating another record
+        # would split one person's history across two leads. Phone is encrypted, so the
+        # lookup goes through the blind index, which normalises to the last ten digits.
+        existing = None
+        key = phone_blind_index(phone) if phone else ''
+        if key:
+            existing = (Lead.objects.filter(company_id=b.company_id, phone_key=key)
+                        .order_by('id').first())
+        if existing:
+            lead_id = existing.id
+            # Attach the sale to them without overwriting a working history: only fill
+            # the STM in, and only when nobody is on it.
+            fields = {}
+            if not existing.stm_id and b.stm_id:
+                fields['stm_id'] = b.stm_id
+            if fields:
+                Lead.objects.filter(pk=lead_id).update(**fields)
+        else:
+            lead = Lead.objects.create(
+                company_id=b.company_id, name=name, phone=phone, status='closed',
+                project_id=b.project_id, stm=b.stm, stm_status='closed',
+            )
+            lead_id = lead.id
         Booking.objects.filter(pk=b.pk).update(lead_id=lead_id)
         b.lead_id = lead_id
 
