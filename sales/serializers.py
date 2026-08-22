@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
-    BackupSettings, BackupRecord,
+    BackupSettings, BackupRecord, LeadTransfer,
 )
 
 
@@ -314,3 +314,23 @@ class BackupRecordSerializer(serializers.ModelSerializer):
         model = BackupRecord
         fields = ['id', 'status', 'file_size_bytes', 'triggered_by_name', 'error_message',
                   'started_at', 'completed_at']
+
+
+class LeadTransferSerializer(serializers.ModelSerializer):
+    """Read shape for the approver queue and the requester's own list."""
+    lead_name     = serializers.CharField(source='lead.name', read_only=True)
+    lead_phone    = serializers.CharField(source='lead.phone', read_only=True)
+    project_name  = serializers.CharField(source='project.name', read_only=True)
+    from_stm_name = serializers.CharField(source='from_stm.name', read_only=True)
+    to_stm_name   = serializers.CharField(source='to_stm.name', read_only=True)
+    requested_by_name = serializers.CharField(source='requested_by.name', read_only=True)
+    decided_by_name   = serializers.CharField(source='decided_by.name', read_only=True)
+
+    class Meta:
+        model = LeadTransfer
+        fields = ['id', 'lead', 'lead_name', 'lead_phone', 'project', 'project_name',
+                  'from_stm', 'from_stm_name', 'to_stm', 'to_stm_name',
+                  'requested_by', 'requested_by_name', 'reason', 'status',
+                  'decided_by', 'decided_by_name', 'decided_at', 'decision_note',
+                  'created_at']
+        read_only_fields = ['status', 'decided_by', 'decided_at', 'from_stm', 'requested_by']

@@ -20,6 +20,8 @@ urlpatterns = [
     path('site-visits/<int:pk>/',      views.SiteVisitDetailView.as_view()),
     path('closures/',                  views.ClosureListView.as_view()),
     path('closures/<int:pk>/cancel/',  views.ClosureCancelView.as_view()),
+    path('lead-transfers/',            views.LeadTransferListCreateView.as_view()),
+    path('lead-transfers/<int:pk>/action/', views.LeadTransferActionView.as_view()),
     path('bookings/',                  views.BookingListCreateView.as_view()),
     path('bookings/all/',              views.BookingAllView.as_view()),
     path('bookings/next-eoi/',         views.BookingNextEOIView.as_view()),

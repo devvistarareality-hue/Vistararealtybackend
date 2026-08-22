@@ -32,14 +32,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, BackupSettings, BackupRecord,
+    UserProjectAssignment, Booking, BackupSettings, BackupRecord, LeadTransfer,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
-    BackupSettingsSerializer, BackupRecordSerializer,
+    BackupSettingsSerializer, BackupRecordSerializer, LeadTransferSerializer,
 )
 
 PAGE_SIZE = 25
@@ -4777,3 +4777,166 @@ class BackupDownloadView(APIView):
         if not url:
             return Response({'detail': 'Could not generate a download link.'}, status=status.HTTP_502_BAD_GATEWAY)
         return Response({'url': url})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lead transfer: one STM hands a lead to another, held for approval
+# ─────────────────────────────────────────────────────────────────────────────
+def _transfer_approver_ids(company, project_id):
+    """Who may sign off a transfer of a lead on this project.
+
+    The same people who approve that project's bookings — the list an admin sets in
+    Booking & Approvals. Deliberately not "any manager": a lead moving between reps
+    changes whose numbers it lands in, so it needs the same named authority a booking
+    does. A project with nobody named leaves only real admins, which is the same rule
+    _can_approve_project applies.
+    """
+    ids = set()
+    for p in Project.objects.filter(company=company).only('id', 'booking_approvers'):
+        if project_id and p.id != project_id:
+            continue
+        ids.update(p.booking_approvers or [])
+    return sorted(ids)
+
+
+class LeadTransferListCreateView(APIView):
+    """GET  — transfers this user can see (their own requests, plus the queue they approve).
+    POST — request a transfer of one of your leads to another STM."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _resolve_company(request)
+        qs = (LeadTransfer.objects.filter(company=company)
+              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by'))
+        if not _is_hard_admin(request.user):
+            approver_pids = _approver_project_ids(request.user, company)
+            qs = qs.filter(
+                Q(requested_by=request.user) | Q(from_stm=request.user) | Q(to_stm=request.user)
+                | Q(project_id__in=approver_pids)
+            )
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        return Response(LeadTransferSerializer(qs[:200], many=True).data)
+
+    def post(self, request):
+        company = _resolve_company(request)
+        lead_id = request.data.get('lead')
+        to_stm_id = request.data.get('to_stm')
+        if not lead_id or not to_stm_id:
+            return Response({'detail': 'Lead and destination STM are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        lead = Lead.objects.filter(pk=lead_id, company=company).first()
+        if not lead:
+            return Response({'detail': 'Lead not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Only the rep holding the lead may hand it on (admins may act for them).
+        if not _is_hard_admin(request.user) and lead.stm_id != request.user.id:
+            return Response({'detail': 'This lead is not assigned to you.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        if str(to_stm_id) == str(lead.stm_id):
+            return Response({'detail': 'That is already the assigned STM.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        to_stm = User.objects.filter(pk=to_stm_id, company=company, is_active=True).first()
+        if not to_stm:
+            return Response({'detail': 'Destination STM not found in your company.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if LeadTransfer.objects.filter(lead=lead, status='pending').exists():
+            return Response({'detail': 'A transfer for this lead is already awaiting approval.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        t = LeadTransfer.objects.create(
+            company=company, lead=lead, project_id=lead.project_id,
+            from_stm_id=lead.stm_id, to_stm=to_stm, requested_by=request.user,
+            reason=(request.data.get('reason') or '').strip(),
+        )
+        _notify_transfer_requested(t)
+        return Response(LeadTransferSerializer(t).data, status=status.HTTP_201_CREATED)
+
+
+class LeadTransferActionView(APIView):
+    """Approve or reject a pending transfer. Approval is what actually moves the lead."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        company = _resolve_company(request)
+        t = LeadTransfer.objects.filter(pk=pk, company=company).select_related('lead').first()
+        if not t:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        action = request.data.get('action')
+
+        # The requester may withdraw their own request; everything else needs an approver.
+        if action == 'cancel':
+            if t.requested_by_id != request.user.id and not _is_hard_admin(request.user):
+                return Response({'detail': 'Only the requester can withdraw this.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif not _can_approve_project(request.user, t.project_id, company):
+            return Response({'detail': 'You are not an approver for this project.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if t.status != 'pending':
+            return Response({'detail': 'This request has already been %s.' % t.status},
+                            status=status.HTTP_409_CONFLICT)
+        if action not in ('approve', 'reject', 'cancel'):
+            return Response({'detail': 'Unknown action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        note = (request.data.get('note') or '').strip()
+        if action == 'approve':
+            with transaction.atomic():
+                # Re-read under a lock: the lead may have moved since the request was
+                # raised, and the record should say what it actually moved from.
+                lead = Lead.objects.select_for_update().get(pk=t.lead_id)
+                t.from_stm_id = lead.stm_id
+                lead.stm_id = t.to_stm_id
+                lead.stm_assigned_at = timezone.now()
+                lead.save(update_fields=['stm', 'stm_assigned_at'])
+                t.status = 'approved'
+                t.decided_by = request.user
+                t.decided_at = timezone.now()
+                t.decision_note = note
+                t.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note',
+                                      'from_stm', 'updated_at'])
+        else:
+            t.status = 'rejected' if action == 'reject' else 'cancelled'
+            t.decided_by = request.user
+            t.decided_at = timezone.now()
+            t.decision_note = note
+            t.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note', 'updated_at'])
+
+        _notify_transfer_decided(t)
+        return Response(LeadTransferSerializer(t).data)
+
+
+def _notify_transfer_requested(t):
+    """Tell the approvers there is something to look at, and the receiving STM it is coming."""
+    try:
+        from notifications import notify, notify_many
+        who = User.objects.filter(id__in=_transfer_approver_ids(t.company, t.project_id))
+        body = '%s wants to transfer %s to %s' % (
+            getattr(t.requested_by, 'name', 'An STM') or 'An STM',
+            getattr(t.lead, 'name', 'a lead') or 'a lead',
+            getattr(t.to_stm, 'name', 'another STM') or 'another STM')
+        notify_many(who, 'lead_transfer_requested', 'Lead Transfer Request', body,
+                    data={'transfer': t.id, 'lead': t.lead_id})
+        if t.to_stm:
+            notify(t.to_stm, 'lead_transfer_requested', 'Lead Coming Your Way',
+                   '%s has asked to transfer %s to you — awaiting approval.' % (
+                       getattr(t.requested_by, 'name', 'An STM') or 'An STM',
+                       getattr(t.lead, 'name', 'a lead') or 'a lead'),
+                   data={'transfer': t.id, 'lead': t.lead_id})
+    except Exception:
+        logger.exception('Could not notify for lead transfer %s', t.pk)
+
+
+def _notify_transfer_decided(t):
+    """Tell both reps the outcome — the one losing the lead and the one gaining it."""
+    try:
+        from notifications import notify
+        verb = {'approved': 'approved', 'rejected': 'rejected', 'cancelled': 'withdrawn'}[t.status]
+        lead_name = getattr(t.lead, 'name', 'a lead') or 'a lead'
+        for person in {t.requested_by_id: t.requested_by, t.from_stm_id: t.from_stm,
+                       t.to_stm_id: t.to_stm}.values():
+            if person and person.id != t.decided_by_id:
+                notify(person, 'lead_transfer_%s' % t.status, 'Lead Transfer %s' % verb.title(),
+                       'The transfer of %s was %s.' % (lead_name, verb),
+                       data={'transfer': t.id, 'lead': t.lead_id})
+    except Exception:
+        logger.exception('Could not notify the outcome of lead transfer %s', t.pk)

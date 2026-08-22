@@ -690,3 +690,60 @@ class BackupRecord(models.Model):
 
     def __str__(self):
         return f'Backup #{self.id} ({self.status})'
+
+
+TRANSFER_STATUS = [
+    ('pending', 'Pending Approval'),
+    ('approved', 'Approved'),
+    ('rejected', 'Rejected'),
+    ('cancelled', 'Cancelled'),
+]
+
+
+class LeadTransfer(models.Model):
+    """One STM asking to hand a lead to another, held until an approver signs it off.
+
+    The handover is NOT applied when the request is made — the lead stays with the
+    current STM until approval, so a rep cannot move work off their own name (or onto
+    someone else's) unilaterally. Approval is by the project's configured booking
+    approvers, the same people and the same list that gate a booking on that project.
+
+    from_stm is recorded at request time rather than read off the lead at approval,
+    so the record still says who it came from even if the lead moves in between.
+    """
+    company   = models.ForeignKey('companies.Company', on_delete=models.CASCADE,
+                                  related_name='lead_transfers')
+    lead      = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='transfers')
+    project   = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='lead_transfers')
+    from_stm  = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='lead_transfers_out')
+    to_stm    = models.ForeignKey(User, on_delete=models.CASCADE, related_name='lead_transfers_in')
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='lead_transfers_requested')
+    reason    = EncryptedTextField(blank=True)
+    status    = models.CharField(max_length=12, choices=TRANSFER_STATUS, default='pending')
+    decided_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='lead_transfers_decided')
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = EncryptedTextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            # The approver queue: WHERE company=X AND status='pending' ORDER BY created_at.
+            models.Index(fields=['company', 'status', '-created_at'], name='leadxfer_co_status_idx'),
+            models.Index(fields=['lead'], name='leadxfer_lead_idx'),
+        ]
+        constraints = [
+            # One open request per lead. Without this two reps can both have a pending
+            # transfer for the same lead and whichever is approved second silently
+            # overwrites the first.
+            models.UniqueConstraint(fields=['lead'], condition=models.Q(status='pending'),
+                                    name='one_pending_transfer_per_lead'),
+        ]
+
+    def __str__(self):
+        return 'Transfer lead %s -> %s (%s)' % (self.lead_id, self.to_stm_id, self.status)
