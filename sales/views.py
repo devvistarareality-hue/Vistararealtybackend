@@ -32,14 +32,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, BackupSettings, BackupRecord,
+    UserProjectAssignment, Booking, BackupSettings, BackupRecord, ChannelPartner,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
-    BackupSettingsSerializer, BackupRecordSerializer,
+    BackupSettingsSerializer, BackupRecordSerializer, ChannelPartnerSerializer,
 )
 
 PAGE_SIZE = 25
@@ -60,6 +60,16 @@ def is_manager_role(user):
 
 def is_admin_or_manager(user):
     return user.role in MANAGER_ROLES or user.is_staff
+
+
+def _is_sales_admin(user):
+    """True/hard Admin, platform staff, or a Sales Admin-Modules user — the same
+    gate as Data Reset (see SalesDataResetView._is_admin), used for admin-only
+    company master data like Channel Partners."""
+    return bool(
+        getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin' or is_platform_admin(user)
+        or 'Sales' in (getattr(user, 'admin_modules', None) or [])
+    )
 
 
 def has_sales_access(user):
@@ -88,6 +98,15 @@ def is_cp(user):
     own leads (no Meta distribution). Scoped like an STM (by the lead's stm field)."""
     d = _designation(user)
     return 'cp executive' in d or 'channel partner' in d
+
+
+def is_cp_manager(user):
+    """A Manager whose designation starts with 'cp' (e.g. 'CP Cluster Head') —
+    gets into the Channel Partner module ONLY, not the rest of Sales. Their lead
+    visibility within it still comes from the existing Manager project-assignment
+    mechanism (manager_project_ids/scope_leads_to_project) — no CP-specific
+    scoping needed, it already applies to any Manager regardless of designation."""
+    return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
 
 
 # ── Hierarchy-based visibility ───────────────────────────────────────────────
@@ -351,6 +370,12 @@ class StatsView(APIView):
 
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
+
+        # Channel Partner leads have their own module and dashboard — the main
+        # Sales dashboard's counts never include them (see LeadListView for the
+        # matching All Leads behaviour).
+        if request.query_params.get('cp_only') != 'true':
+            leads_qs = leads_qs.filter(channel_partner__isnull=True)
 
         # Telecallers / STMs only see stats for leads assigned to them.
         leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
@@ -710,6 +735,14 @@ class LeadListView(APIView):
             'preferred_location', 'budget_min', 'budget_max',
         )
 
+        # Channel Partner leads are their own module — the main Sales "All Leads"
+        # never shows them, only the Channel Partner section itself does (via
+        # cp_only/channel_partner_id below). Keeps the two pools disjoint in both
+        # directions: a CP-sourced lead never lands in a regular Sales view, and a
+        # regular lead never leaks into the CP one.
+        if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')):
+            qs = qs.filter(channel_partner__isnull=True)
+
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
         # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
         # just the generic stage, without overwriting stm_status itself.
@@ -798,6 +831,12 @@ class LeadListView(APIView):
             qs = qs.filter(project_id=project_id)
         if request.query_params.get('source_id'):
             qs = qs.filter(source_id=request.query_params['source_id'])
+        if request.query_params.get('channel_partner_id'):
+            qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif request.query_params.get('cp_only') == 'true':
+            # The Channel Partner section's "CP Leads" tab — every lead referred
+            # by any channel partner, not just one specific partner's.
+            qs = qs.filter(channel_partner__isnull=False)
         if request.query_params.get('telecaller_id'):
             qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
         if request.query_params.get('stm_id'):
@@ -950,6 +989,13 @@ class LeadListView(APIView):
                 lead=lead, changed_by=request.user,
                 field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
             )
+        # A lead that starts directly in the STM pipeline (self-sourced by an STM/CP,
+        # or given an initial STM Status on the create form — e.g. a Channel Partner
+        # lead) has Overall mirror STM Status immediately, same as every later PATCH
+        # already does (see LeadDetailView.patch).
+        if lead.stm_status and lead.status != lead.stm_status:
+            lead.status = lead.stm_status
+            lead.save(update_fields=['status'])
         if lead.status == 'warm_transferred' and lead.stm_id is None:
             _run_distribution(lead.company, 'stm')
         # Auto-distribute to a telecaller only when the lead is still unassigned
@@ -1395,6 +1441,75 @@ class LeadSourceDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class ChannelPartnerListCreateView(APIView):
+    """Admin-only directory of external referral partners (CP Details) — distinct
+    from a 'CP Executive' employee, who manages the relationship with these."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        qs = scope_to_company(ChannelPartner.objects.all(), request.user).annotate(lead_count=Count('leads'))
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        if request.query_params.get('category'):
+            qs = qs.filter(category=request.query_params['category'])
+        search = request.query_params.get('search', '').strip()
+        if search:
+            # name/contact_no/firm_name — matched in Python like Lead's search,
+            # since name/contact_no are encrypted and can't be filtered in SQL.
+            needle = search.lower()
+            hits = [
+                pk for pk, nm, ph, firm in qs.values_list('id', 'name', 'contact_no', 'firm_name')
+                if needle in (nm or '').lower() or needle in (ph or '').lower() or needle in (firm or '').lower()
+            ]
+            qs = qs.filter(id__in=hits)
+        return Response(ChannelPartnerSerializer(qs, many=True).data)
+
+    def post(self, request):
+        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        ser = ChannelPartnerSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        cp = ser.save(company=_resolve_company(request), created_by=request.user)
+        # Optional backdate — "when did this partnership actually start" — same
+        # override-after-create trick as a Lead's lead_date (created_at is
+        # auto_now_add, so it can't be set via the serializer).
+        date_added = _imp_dt(request.data.get('date_added'))
+        if date_added:
+            cp.created_at = date_added
+            cp.save(update_fields=['created_at'])
+        return Response(ChannelPartnerSerializer(cp).data, status=status.HTTP_201_CREATED)
+
+
+class ChannelPartnerDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
+        except ChannelPartner.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        ser = ChannelPartnerSerializer(cp, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        ser.save()
+        return Response(ser.data)
+
+    def delete(self, request, pk):
+        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
+        except ChannelPartner.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        cp.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class FollowUpListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1414,6 +1529,8 @@ class FollowUpListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(lead__channel_partner__isnull=False)
         return Response(FollowUpSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1470,6 +1587,8 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(lead__channel_partner__isnull=False)
         return Response(SiteVisitSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1566,6 +1685,8 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(lead__channel_partner__isnull=False)
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1623,6 +1744,16 @@ class TelecallerListView(APIView):
             ).order_by('name')
             if not users.exists():
                 users = sales_qs
+        elif crm_role == 'cp_module':
+            # Everyone with access to the Channel Partner module — admins/staff/
+            # Sales Admin-Modules users, and CP-designation Managers (see
+            # is_cp_manager) — for the "who owns this CP lead" filter. Not a
+            # designation substring, so filtered in Python like the other
+            # cross-cutting permission checks in this file.
+            users = sorted(
+                (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                key=lambda u: u.name or '',
+            )
         else:
             users = sales_qs
 
@@ -3101,6 +3232,8 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(lead__channel_partner__isnull=False)
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):

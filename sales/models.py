@@ -215,6 +215,61 @@ BUDGET_BUCKETS = [
     ('gt_5cr', 'Above ₹5 Cr'),
 ]
 
+CP_CATEGORY = [
+    ('premium',  'Premium'),
+    ('normal',   'Normal'),
+    ('referral', 'Referral'),
+]
+
+CP_SEGMENT = [
+    ('residential', 'Residential'),
+    ('industrial', 'Industrial'),
+    ('both', 'Both'),
+]
+
+
+class ChannelPartner(models.Model):
+    """An external referral partner (broker/agent/firm) — distinct from a 'CP
+    Executive' employee, who manages the relationship with these but isn't one."""
+    company = models.ForeignKey(
+        'companies.Company', on_delete=models.CASCADE,
+        related_name='channel_partners',
+    )
+    name = EncryptedTextField()
+    contact_no = EncryptedTextField()
+    # Searchable fingerprint of `contact_no` — mirrors Lead.phone_key, since an
+    # encrypted column can't be looked up or deduped on directly.
+    contact_key = models.CharField(max_length=64, blank=True, db_index=True)
+    firm_name = models.CharField(max_length=150, blank=True)
+    category = models.CharField(max_length=10, choices=CP_CATEGORY, default='normal')
+    segment = models.CharField(max_length=15, choices=CP_SEGMENT, blank=True)
+    area = models.CharField(max_length=200, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='channel_partners_created',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Encrypted columns sort by ciphertext, not plaintext, so name can't be
+        # the DB-level ordering — newest first, same as Lead.
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['company'])]
+
+    def save(self, *args, **kwargs):
+        self.contact_key = phone_blind_index(self.contact_no)
+        if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+            uf = set(kwargs['update_fields'])
+            if 'contact_no' in uf:
+                uf.add('contact_key')
+                kwargs['update_fields'] = list(uf)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
 
 class Lead(models.Model):
     company = models.ForeignKey(
@@ -231,6 +286,9 @@ class Lead(models.Model):
     email = EncryptedTextField(blank=True)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
     source = models.ForeignKey(LeadSource, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads')
+    channel_partner = models.ForeignKey(
+        ChannelPartner, on_delete=models.SET_NULL, null=True, blank=True, related_name='leads',
+    )
 
     # Meta Ads attribution
     meta_campaign_name = models.CharField(max_length=200, blank=True)

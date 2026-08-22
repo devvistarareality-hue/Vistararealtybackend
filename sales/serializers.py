@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
-    BackupSettings, BackupRecord,
+    BackupSettings, BackupRecord, ChannelPartner,
 )
 
 
@@ -9,6 +9,18 @@ class LeadSourceSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeadSource
         fields = ['id', 'company_id', 'name', 'is_active', 'created_at']
+
+
+class ChannelPartnerSerializer(serializers.ModelSerializer):
+    lead_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = ChannelPartner
+        fields = [
+            'id', 'company_id', 'name', 'contact_no', 'firm_name', 'category', 'segment',
+            'area', 'is_active', 'created_by', 'created_at', 'updated_at', 'lead_count',
+        ]
+        read_only_fields = ['company_id', 'created_by', 'created_at', 'updated_at']
 
 
 class ProjectSerializer(serializers.ModelSerializer):
@@ -160,6 +172,7 @@ class LeadListSerializer(serializers.ModelSerializer):
     source_name = serializers.CharField(source='source.name', read_only=True, default=None)
     telecaller_name = serializers.CharField(source='telecaller.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
+    channel_partner_name = serializers.CharField(source='channel_partner.name', read_only=True, default=None)
     # Only present when the queryset was annotated with it (LeadListView) — falls
     # back to None elsewhere (e.g. StatsView's recent_leads) rather than erroring.
     sv_outcome = serializers.SerializerMethodField()
@@ -172,6 +185,7 @@ class LeadListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'company_id', 'name', 'phone', 'alt_phone', 'email',
             'project', 'project_name', 'source', 'source_name',
+            'channel_partner', 'channel_partner_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
             'stm', 'stm_name', 'stm_status', 'sv_outcome', 'stm_assigned_at',
@@ -185,6 +199,7 @@ class LeadDetailSerializer(serializers.ModelSerializer):
     source_name = serializers.CharField(source='source.name', read_only=True, default=None)
     telecaller_name = serializers.CharField(source='telecaller.name', read_only=True, default=None)
     stm_name = serializers.CharField(source='stm.name', read_only=True, default=None)
+    channel_partner_name = serializers.CharField(source='channel_partner.name', read_only=True, default=None)
 
     class Meta:
         model = Lead
@@ -197,7 +212,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'name', 'phone', 'alt_phone', 'email',
-            'project', 'source',
+            'project', 'source', 'channel_partner',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status',
             'city', 'address', 'purpose', 'budget_bucket',
@@ -214,7 +229,7 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
         model = Lead
         fields = [
             'name', 'phone', 'alt_phone', 'email',
-            'project', 'source', 'status',
+            'project', 'source', 'channel_partner', 'status',
             'telecaller', 'telecaller_status', 'telecaller_remarks', 'telecaller_assigned_at',
             'stm', 'stm_status', 'stm_remarks', 'stm_assigned_at',
             'budget_min', 'budget_max', 'requirement', 'preferred_location',
