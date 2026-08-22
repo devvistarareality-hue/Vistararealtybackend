@@ -79,8 +79,9 @@ class BookingBackfillsSiteVisitTests(APITestCase):
         self.assertEqual(sv.referred_by_telecaller_id, self.tc.id,
                          "the lead's telecaller should keep the credit")
 
-    def test_an_existing_completed_visit_is_left_alone(self):
-        """The normal Record-Closure-from-a-visit path: do not duplicate it."""
+    def test_a_visit_on_another_day_does_not_cover_this_booking(self):
+        """A repeat buyer visited once per unit. An older visit belongs to the other
+        sale, so this booking still gets its own — and the old one is untouched."""
         lead = Lead.objects.create(company=self.co, name='Sita', phone='9876500004',
                                    status='new', stm=self.stm)
         from django.utils import timezone
@@ -90,10 +91,41 @@ class BookingBackfillsSiteVisitTests(APITestCase):
             remarks='the real visit')
         self._approve(self._booking(lead=lead))
 
-        self.assertEqual(SiteVisit.objects.filter(lead=lead).count(), 1)
+        self.assertEqual(SiteVisit.objects.filter(lead=lead).count(), 2)
         original.refresh_from_db()
         self.assertEqual(original.remarks, 'the real visit')
         self.assertEqual(original.outcome, 'warm')
+        fresh = SiteVisit.objects.filter(lead=lead).exclude(pk=original.pk).get()
+        self.assertEqual(fresh.visited_at.date(), self.bdate)
+
+    def test_a_visit_already_on_the_booking_date_is_not_duplicated(self):
+        """Record Closure straight from today's visit: nothing to add."""
+        lead = Lead.objects.create(company=self.co, name='Sunil', phone='9876500009',
+                                   status='new', stm=self.stm)
+        from django.utils import timezone
+        from datetime import datetime, time as dt_time
+        at = timezone.make_aware(datetime.combine(self.bdate, dt_time(9, 30)),
+                                 timezone.get_current_timezone())
+        original = SiteVisit.objects.create(
+            lead=lead, project=self.proj, stm=self.stm, status='completed',
+            visited_at=at, outcome='warm', remarks='the real visit')
+        self._approve(self._booking(lead=lead))
+
+        self.assertEqual(SiteVisit.objects.filter(lead=lead).count(), 1)
+        original.refresh_from_db()
+        self.assertEqual(original.remarks, 'the real visit')
+
+    def test_two_bookings_on_different_days_get_a_visit_each(self):
+        lead = Lead.objects.create(company=self.co, name='Repeat', phone='9876500010',
+                                   status='new', stm=self.stm)
+        self._approve(self._booking(lead=lead))
+        second = self._booking(lead=lead)
+        second.booking_date = self.bdate + timedelta(days=14)
+        second.save(update_fields=['booking_date'])
+        self._approve(second)
+
+        dates = sorted(v.visited_at.date() for v in SiteVisit.objects.filter(lead=lead))
+        self.assertEqual(dates, [self.bdate, self.bdate + timedelta(days=14)])
 
     def test_a_scheduled_visit_does_not_count_as_done(self):
         """A visit that was booked but never marked done leaves the sale unexplained,

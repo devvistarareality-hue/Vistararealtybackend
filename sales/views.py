@@ -3773,9 +3773,15 @@ def _ensure_lead_and_site_visit_for_booking(b):
         Booking.objects.filter(pk=b.pk).update(lead_id=lead_id)
         b.lead_id = lead_id
 
-    existing = SiteVisit.objects.filter(
-        lead_id=lead_id, project_id=b.project_id, status='completed').first()
-    if existing:
+    # The guard is the booking DATE, not merely "this lead has been on a visit".
+    # A repeat buyer visited once per unit they bought, so a visit already logged on
+    # some other day belongs to the other sale and is left alone while this booking
+    # still gets its own. Only a visit already sitting on this booking's date means
+    # there is nothing to add.
+    already = SiteVisit.objects.filter(
+        lead_id=lead_id, project_id=b.project_id, status='completed',
+        visited_at__date=b.booking_date).exists()
+    if already:
         return lead_id, None
 
     # booking_date is a date; visits are timestamped, so anchor it at midday local
