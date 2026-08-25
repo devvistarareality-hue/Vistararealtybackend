@@ -2,7 +2,7 @@ import logging
 import os
 import hmac
 import secrets
-from datetime import timedelta
+from datetime import datetime, time as dt_time, timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
@@ -32,14 +32,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, BackupSettings, BackupRecord,
+    UserProjectAssignment, Booking, BackupSettings, BackupRecord, LeadTransfer, ChannelPartner,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
-    BackupSettingsSerializer, BackupRecordSerializer,
+    BackupSettingsSerializer, BackupRecordSerializer, LeadTransferSerializer, ChannelPartnerSerializer,
 )
 
 PAGE_SIZE = 25
@@ -60,6 +60,16 @@ def is_manager_role(user):
 
 def is_admin_or_manager(user):
     return user.role in MANAGER_ROLES or user.is_staff
+
+
+def _is_sales_admin(user):
+    """True/hard Admin, platform staff, or a Sales Admin-Modules user — the same
+    gate as Data Reset (see SalesDataResetView._is_admin), used for admin-only
+    company master data like Channel Partners."""
+    return bool(
+        getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin' or is_platform_admin(user)
+        or 'Sales' in (getattr(user, 'admin_modules', None) or [])
+    )
 
 
 def has_sales_access(user):
@@ -88,6 +98,35 @@ def is_cp(user):
     own leads (no Meta distribution). Scoped like an STM (by the lead's stm field)."""
     d = _designation(user)
     return 'cp executive' in d or 'channel partner' in d
+
+
+def is_cp_manager(user):
+    """A Manager whose designation starts with 'cp' (e.g. 'CP Cluster Head') —
+    gets into the Channel Partner module ONLY, not the rest of Sales. Their lead
+    visibility within it still comes from the existing Manager project-assignment
+    mechanism (manager_project_ids/scope_leads_to_project) — no CP-specific
+    scoping needed, it already applies to any Manager regardless of designation."""
+    return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
+
+
+def can_access_cp_module(user):
+    """Who can reach the Channel Partner module: true/hard admins always can
+    (see _is_hard_admin); a CP-designation Manager gets in via their
+    designation. Mirrors web's canAccessChannelPartner(user) — keep in sync."""
+    return bool(_is_hard_admin(user) or is_cp_manager(user))
+
+
+def cp_lead_q(prefix=''):
+    """A lead belongs to the Channel Partner module if EITHER it was added
+    through the CP module itself (channel_partner FK set) OR it was added
+    through the regular Sales flow with Source explicitly set to "Channel
+    Partner" (a plain LeadSource, no specific partner attached). `prefix`
+    lets callers scope a related model (e.g. 'lead__' for FollowUp/SiteVisit/
+    Closure/Booking, which don't have these fields directly)."""
+    return (
+        Q(**{f'{prefix}channel_partner__isnull': False}) |
+        Q(**{f'{prefix}source__name__iexact': 'Channel Partner'})
+    )
 
 
 # ── Hierarchy-based visibility ───────────────────────────────────────────────
@@ -180,6 +219,62 @@ def _can_approve_project(user, project, company):
         return True
     project_id = getattr(project, 'id', project)
     return project_id in _approver_project_ids(user, company)
+
+
+def _cp_approver_project_ids(user, company):
+    """Ids of projects where `user` is a configured CP booking approver — mirrors
+    _approver_project_ids but reads cp_booking_approvers, the separate list that
+    gates bookings whose lead came through a Channel Partner."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'cp_booking_approvers')
+        if user.id in (p.cp_booking_approvers or [])
+    ]
+
+
+def _can_approve_cp_project(user, project, company):
+    """Whether `user` is a configured CP approver for `project`'s Channel-Partner-
+    sourced bookings — mirrors _can_approve_project exactly, against the separate
+    cp_booking_approvers list."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _cp_approver_project_ids(user, company)
+
+
+def _is_cp_sourced(lead_id):
+    """Whether the given lead (if any) is Channel-Partner-referred — decides which
+    approver list (regular vs CP) gates a booking/closure tied to it. Uses the
+    same definition as cp_lead_q (channel_partner FK OR Source = "Channel
+    Partner") so a lead that shows up as CP in Leads/Dashboard also gets CP
+    approval routing once it's booked — they used to disagree."""
+    if not lead_id:
+        return False
+    return Lead.objects.filter(cp_lead_q(), id=lead_id).exists()
+
+
+def _is_cp_sourced_booking(lead_id, booking_source=None):
+    """Whether a booking counts as Channel-Partner-sourced for approval routing —
+    either its lead is CP-attributed (the structured directory), or its own
+    free-text Source field was set to "Channel Partner" (the older per-booking
+    selector on the booking form itself, unconnected to the ChannelPartner
+    directory but meant the same way: this deal came through a partner, so it
+    should route to the CP approvers, not the project's regular ones)."""
+    if (booking_source or '').strip().lower() == 'channel partner':
+        return True
+    return _is_cp_sourced(lead_id)
+
+
+def _can_approve_booking(user, project_id, project, lead_id, company, booking_source=None):
+    """Which approver list gates a booking or closure: a Channel-Partner-sourced
+    one is approved by the project's CP approvers, everything else by its regular
+    ones. No project at all → no approver-scoping check applies (matches the
+    original `if b.project_id and not _can_approve_project(...)` shape at every
+    call site this replaces)."""
+    if not project_id:
+        return True
+    if _is_cp_sourced_booking(lead_id, booking_source):
+        return _can_approve_cp_project(user, project, company)
+    return _can_approve_project(user, project, company)
 
 
 def can_assign_leads(user):
@@ -340,17 +435,28 @@ class StatsView(APIView):
         date_from  = request.query_params.get('date_from')
         date_to    = request.query_params.get('date_to')
 
-        # Include date range AND admin_view in cache key — otherwise a Sales Admin-
-        # Modules user's team-scoped dashboard and their Admin-section (full company)
-        # dashboard would collide on the same key and serve each other's stale data.
+        # Include date range, admin_view AND cp_only in cache key — otherwise a Sales
+        # Admin-Modules user's team-scoped dashboard and their Admin-section (full
+        # company) dashboard, or the regular Sales dashboard and the Channel Partner
+        # one, would collide on the same key and serve each other's stale data.
         admin_view = request.query_params.get('admin_view') == '1'
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}'
+        cp_only = request.query_params.get('cp_only') == 'true'
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
 
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
+
+        # Channel Partner leads have their own module and dashboard — the main
+        # Sales dashboard's counts never include them, and the CP dashboard's
+        # counts are ONLY them (see LeadListView for the matching All Leads
+        # behaviour, and cp_lead_q for what counts as a CP lead).
+        if cp_only:
+            leads_qs = leads_qs.filter(cp_lead_q())
+        else:
+            leads_qs = leads_qs.exclude(cp_lead_q())
 
         # Telecallers / STMs only see stats for leads assigned to them.
         leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
@@ -446,6 +552,16 @@ class StatsView(APIView):
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        # Same CP/non-CP split as leads_qs above — these are independent queries
+        # against SiteVisit/Closure, not derived from leads_qs, so they need the
+        # same cp_lead_q filter applied directly or the CP dashboard's Site
+        # Visits/Closures tiles would silently show the whole company's numbers.
+        if cp_only:
+            sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
+            cl_qs = cl_qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__'))
+            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__'))
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -465,19 +581,50 @@ class StatsView(APIView):
             fu_qs = fu_qs.filter(assigned_to__in=_visible_user_ids(request.user))
         if company_id and is_platform_admin(request.user):
             fu_qs = fu_qs.filter(lead__company_id=company_id)
-        fu_qs = fu_qs.filter(status='completed', completed_at__isnull=False)
+        fu_done = fu_qs.filter(status='completed', completed_at__isnull=False)
         if date_from:
-            fu_qs = fu_qs.filter(completed_at__date__gte=date_from)
+            fu_done = fu_done.filter(completed_at__date__gte=date_from)
         if date_to:
-            fu_qs = fu_qs.filter(completed_at__date__lte=date_to)
-        followup_call_count = fu_qs.count()
+            fu_done = fu_done.filter(completed_at__date__lte=date_to)
+        followup_call_count = fu_done.count()
+
+        # Still-open follow-ups, for the Pending / Overdue tiles. A pending row has
+        # no completed_at, so these are dated on scheduled_at instead: the range then
+        # reads as "due in this window" and the tiles agree with the Follow-Ups
+        # screen's own Pending/Overdue chips, which count the same way. Overdue is
+        # that same set narrowed to rows already past their slot.
+        fu_open = fu_qs.filter(status='pending')
+        if date_from:
+            fu_open = fu_open.filter(scheduled_at__date__gte=date_from)
+        if date_to:
+            fu_open = fu_open.filter(scheduled_at__date__lte=date_to)
+        followup_pending_count = fu_open.count()
+        followup_overdue_count = fu_open.filter(scheduled_at__lt=timezone.now()).count()
+
+        # "To Call" backlog: assigned leads this user has not actioned yet. Same rule
+        # as the All Leads "To Call" tab (work=pending), so the tile and that tab can
+        # never disagree. Both status columns are blank-not-null, so '' is the whole
+        # of "not yet worked".
+        if is_telecaller(request.user):
+            to_call_count = leads_qs.filter(telecaller_status='').count()
+        elif is_stm(request.user) or is_cp(request.user):
+            to_call_count = leads_qs.filter(stm_status='').count()
+        else:
+            to_call_count = leads_qs.filter(status='new').count()
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        active_projects_qs = scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter)
+        if cp_only:
+            # The CP dashboard's "Active Projects" means projects with actual CP
+            # activity, not every active project company-wide — leads_scope is
+            # already split to the CP pool above (cp_lead_q), not date-windowed
+            # so this stays a stable "currently active in CP" count.
+            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
         sv_done, closures, active_projects = (
             sv_scoped.count(),
             cl_scoped.count(),
-            scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
+            active_projects_qs.count(),
         )
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
@@ -505,7 +652,10 @@ class StatsView(APIView):
             'new_leads':          agg['new_leads'],
             'leads_today':        agg['leads_today'],
             'called_count':       agg['called_count'],
+            'to_call_count':      to_call_count,
             'followup_call_count': followup_call_count,
+            'followup_pending_count': followup_pending_count,
+            'followup_overdue_count': followup_overdue_count,
             # Every call made in the window: new leads worked plus follow-up calls.
             'total_called_count': agg['called_count'] + followup_call_count,
             'hot_count':          hot_count,
@@ -666,6 +816,37 @@ class StatsTrendView(APIView):
         })
 
 
+def _leads_by_status_transition(leads_scope, field, value, date_from, date_to):
+    """Lead ids whose `field` changed to `value` within [date_from, date_to] —
+    mirrors StatsView's transition-count logic so a dashboard tile's date range
+    and a click-through list filter mean the same thing."""
+    hist = LeadStatusHistory.objects.filter(
+        lead__in=leads_scope, field_changed=field, new_value=value)
+    if date_from:
+        hist = hist.filter(created_at__date__gte=date_from)
+    if date_to:
+        hist = hist.filter(created_at__date__lte=date_to)
+    return set(hist.values_list('lead_id', flat=True))
+
+
+def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
+    """Lead ids still at stm_status='sv_done' whose latest completed visit outcome
+    matches `value`, dated by when that visit happened — mirrors StatsView's
+    sv-outcome union for the effective hot/warm/cold count."""
+    latest_sv = SiteVisit.objects.filter(
+        lead=OuterRef('pk'), status='completed',
+    ).order_by('-visited_at')
+    qs = leads_scope.filter(stm_status='sv_done').annotate(
+        _sv_outcome=Subquery(latest_sv.values('outcome')[:1]),
+        _sv_visited=Subquery(latest_sv.values('visited_at')[:1]),
+    ).filter(_sv_outcome=value)
+    if date_from:
+        qs = qs.filter(_sv_visited__date__gte=date_from)
+    if date_to:
+        qs = qs.filter(_sv_visited__date__lte=date_to)
+    return set(qs.values_list('id', flat=True))
+
+
 class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -678,6 +859,15 @@ class LeadListView(APIView):
             'telecaller_remarks', 'stm_remarks', 'requirement',
             'preferred_location', 'budget_min', 'budget_max',
         )
+
+        # Channel Partner leads are their own module — the main Sales "All Leads"
+        # never shows them, only the Channel Partner section itself does (via
+        # cp_only/channel_partner_id below). Keeps the two pools disjoint in both
+        # directions: a CP-sourced lead never lands in a regular Sales view, and a
+        # regular lead never leaks into the CP one. See cp_lead_q for what counts
+        # as a CP lead (channel_partner FK set OR Source explicitly "Channel Partner").
+        if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')):
+            qs = qs.exclude(cp_lead_q())
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
         # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
@@ -715,19 +905,49 @@ class LeadListView(APIView):
 
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('telecaller_status'):
-            qs = qs.filter(telecaller_status=request.query_params['telecaller_status'])
+        date_from_param = request.query_params.get('date_from')
+        date_to_param = request.query_params.get('date_to')
+        # A dashboard tile like "Warm/SQL" counts leads that BECAME that status
+        # within the selected date range (see StatsView), not leads currently
+        # sitting at that status — so its click-through must filter the same way,
+        # or a lead received earlier but marked warm today would be missing from
+        # one and present in the other. Only kicks in when a date range is
+        # actually given; a bare status filter (no date) still means "currently
+        # this status", which is its own useful, unrelated view.
+        skip_created_at_filter = False
+        telecaller_status_filter = request.query_params.get('telecaller_status')
+        TRANSITION_TC_STATUSES = {'hot', 'warm', 'callback', 'not_reachable', 'cold'}
+        if telecaller_status_filter:
+            if (date_from_param or date_to_param) and telecaller_status_filter in TRANSITION_TC_STATUSES:
+                ids = _leads_by_status_transition(
+                    qs, 'telecaller_status', telecaller_status_filter, date_from_param, date_to_param)
+                qs = qs.filter(id__in=ids)
+                skip_created_at_filter = True
+            else:
+                qs = qs.filter(telecaller_status=telecaller_status_filter)
         stm_status_filter = request.query_params.get('stm_status')
         if stm_status_filter:
             if stm_status_filter in ('hot', 'warm', 'cold'):
-                # A lead still sitting at "sv done" whose visit outcome was Hot
-                # counts as Hot too — the outcome doesn't overwrite stm_status,
-                # but it should still surface here alongside leads reclassified
-                # to hot/warm/cold directly.
-                qs = qs.filter(
-                    Q(stm_status=stm_status_filter)
-                    | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
-                )
+                if date_from_param or date_to_param:
+                    direct_ids = _leads_by_status_transition(
+                        qs, 'stm_status', stm_status_filter, date_from_param, date_to_param)
+                    sv_ids = _leads_by_sv_outcome(qs, stm_status_filter, date_from_param, date_to_param)
+                    qs = qs.filter(id__in=(direct_ids | sv_ids))
+                    skip_created_at_filter = True
+                else:
+                    # A lead still sitting at "sv done" whose visit outcome was Hot
+                    # counts as Hot too — the outcome doesn't overwrite stm_status,
+                    # but it should still surface here alongside leads reclassified
+                    # to hot/warm/cold directly.
+                    qs = qs.filter(
+                        Q(stm_status=stm_status_filter)
+                        | Q(stm_status='sv_done', sv_outcome=stm_status_filter)
+                    )
+            elif stm_status_filter == 'sv_scheduled' and (date_from_param or date_to_param):
+                ids = _leads_by_status_transition(
+                    qs, 'stm_status', stm_status_filter, date_from_param, date_to_param)
+                qs = qs.filter(id__in=ids)
+                skip_created_at_filter = True
             else:
                 qs = qs.filter(stm_status=stm_status_filter)
         project_id = request.query_params.get('project_id')
@@ -737,16 +957,24 @@ class LeadListView(APIView):
             qs = qs.filter(project_id=project_id)
         if request.query_params.get('source_id'):
             qs = qs.filter(source_id=request.query_params['source_id'])
+        if request.query_params.get('channel_partner_id'):
+            qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif request.query_params.get('cp_only') == 'true':
+            # The Channel Partner section's "CP Leads" tab — every lead referred
+            # by any channel partner, OR added via the regular Sales flow with
+            # Source set to "Channel Partner" (see cp_lead_q).
+            qs = qs.filter(cp_lead_q())
         if request.query_params.get('telecaller_id'):
             qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
         if request.query_params.get('stm_id'):
             qs = qs.filter(stm_id=request.query_params['stm_id'])
         if request.query_params.get('is_duplicate') == 'true':
             qs = qs.filter(is_duplicate=True)
-        if request.query_params.get('date_from'):
-            qs = qs.filter(created_at__date__gte=request.query_params['date_from'])
-        if request.query_params.get('date_to'):
-            qs = qs.filter(created_at__date__lte=request.query_params['date_to'])
+        if not skip_created_at_filter:
+            if date_from_param:
+                qs = qs.filter(created_at__date__gte=date_from_param)
+            if date_to_param:
+                qs = qs.filter(created_at__date__lte=date_to_param)
         if request.query_params.get('campaign'):
             qs = qs.filter(meta_campaign_name__icontains=request.query_params['campaign'])
 
@@ -869,6 +1097,28 @@ class LeadListView(APIView):
             lead.save(update_fields=['created_at'])
 
         _record_lead_created(lead, by=request.user)
+        # A telecaller/STM/admin can set an initial TC/STM Status in the SAME request
+        # that creates the lead (e.g. a telecaller working a live WhatsApp chat calls
+        # it warm right away instead of adding it blank and PATCHing afterward). The
+        # PATCH handler logs every status transition to LeadStatusHistory — this path
+        # only ever logged 'created' (+ 'warm_transfer' below), never the underlying
+        # telecaller_status/stm_status/status transitions themselves, so a lead that
+        # went warm at creation was invisible to every date-ranged status filter and
+        # dashboard tile (all of them read LeadStatusHistory, not the live field).
+        old_status = lead.status
+        creation_history = []
+        if lead.telecaller_status:
+            creation_history.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='telecaller_status', old_value='', new_value=lead.telecaller_status,
+            ))
+        if lead.stm_status:
+            creation_history.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='stm_status', old_value='', new_value=lead.stm_status,
+            ))
+        if creation_history:
+            LeadStatusHistory.objects.bulk_create(creation_history)
         # Notify the assignee when an admin/manager hand-picks them on create.
         if can_assign:
             from notifications import notify
@@ -886,7 +1136,23 @@ class LeadListView(APIView):
             lead.save(update_fields=['status'])
             LeadStatusHistory.objects.create(
                 lead=lead, changed_by=request.user,
+                field_changed='status', old_value=old_status, new_value=lead.status,
+            )
+            LeadStatusHistory.objects.create(
+                lead=lead, changed_by=request.user,
                 field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
+            )
+        # A lead that starts directly in the STM pipeline (self-sourced by an STM/CP,
+        # or given an initial STM Status on the create form — e.g. a Channel Partner
+        # lead) has Overall mirror STM Status immediately, same as every later PATCH
+        # already does (see LeadDetailView.patch).
+        if lead.stm_status and lead.status != lead.stm_status:
+            old_status = lead.status
+            lead.status = lead.stm_status
+            lead.save(update_fields=['status'])
+            LeadStatusHistory.objects.create(
+                lead=lead, changed_by=request.user,
+                field_changed='status', old_value=old_status, new_value=lead.status,
             )
         if lead.status == 'warm_transferred' and lead.stm_id is None:
             _run_distribution(lead.company, 'stm')
@@ -1139,9 +1405,9 @@ class ProjectDetailView(APIView):
         # Manager may edit — otherwise an approver restricted to one project could simply
         # add themselves to another and approve it. Mirrors the same gate the Approver
         # Setup panel uses on the client (role Admin / staff / Sales admin-module).
-        if 'booking_approvers' in request.data and not (
+        if (('booking_approvers' in request.data or 'cp_booking_approvers' in request.data) and not (
             _is_hard_admin(request.user) or 'Sales' in (getattr(request.user, 'admin_modules', None) or [])
-        ):
+        )):
             return Response(
                 {'detail': 'Only an administrator can change booking approvers.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -1333,6 +1599,79 @@ class LeadSourceDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class ChannelPartnerListCreateView(APIView):
+    """Admin-only directory of external referral partners (CP Details) — distinct
+    from a 'CP Executive' employee, who manages the relationship with these."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Read access is open to anyone with Sales access (not just admins/CP
+        # managers) — an STM booking a unit through the regular Sales module
+        # needs this list too, to pick a Channel Partner Name from the directory
+        # rather than typing it freehand. Mirrors LeadSourceListView.get, which
+        # is similarly unrestricted; only creating/editing/deleting entries
+        # (below) stays admin/CP-manager only.
+        qs = scope_to_company(ChannelPartner.objects.all(), request.user).annotate(lead_count=Count('leads'))
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        if request.query_params.get('category'):
+            qs = qs.filter(category=request.query_params['category'])
+        search = request.query_params.get('search', '').strip()
+        if search:
+            # name/contact_no/firm_name — matched in Python like Lead's search,
+            # since name/contact_no are encrypted and can't be filtered in SQL.
+            needle = search.lower()
+            hits = [
+                pk for pk, nm, ph, firm in qs.values_list('id', 'name', 'contact_no', 'firm_name')
+                if needle in (nm or '').lower() or needle in (ph or '').lower() or needle in (firm or '').lower()
+            ]
+            qs = qs.filter(id__in=hits)
+        return Response(ChannelPartnerSerializer(qs, many=True).data)
+
+    def post(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        ser = ChannelPartnerSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        cp = ser.save(company=_resolve_company(request), created_by=request.user)
+        # Optional backdate — "when did this partnership actually start" — same
+        # override-after-create trick as a Lead's lead_date (created_at is
+        # auto_now_add, so it can't be set via the serializer).
+        date_added = _imp_dt(request.data.get('date_added'))
+        if date_added:
+            cp.created_at = date_added
+            cp.save(update_fields=['created_at'])
+        return Response(ChannelPartnerSerializer(cp).data, status=status.HTTP_201_CREATED)
+
+
+class ChannelPartnerDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
+        except ChannelPartner.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        ser = ChannelPartnerSerializer(cp, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        ser.save()
+        return Response(ser.data)
+
+    def delete(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
+        except ChannelPartner.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        cp.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class FollowUpListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1352,6 +1691,8 @@ class FollowUpListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(FollowUpSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1408,6 +1749,8 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(SiteVisitSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1504,6 +1847,8 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1561,6 +1906,36 @@ class TelecallerListView(APIView):
             ).order_by('name')
             if not users.exists():
                 users = sales_qs
+        elif crm_role == 'cp_module':
+            # Everyone with access to the Channel Partner module — admins/staff/
+            # Sales Admin-Modules users, and CP-designation Managers (see
+            # is_cp_manager) — for the "who owns this CP lead" filter. Not a
+            # designation substring, so filtered in Python like the other
+            # cross-cutting permission checks in this file.
+            users = sorted(
+                (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                key=lambda u: u.name or '',
+            )
+        elif crm_role == 'sales_cp':
+            # Same-company employees with Sales module access — for the CP
+            # module's "Assign STM" dropdown, letting a CP Cluster Head hand a
+            # CP lead straight to a Sales-side person, no approval step.
+            # Company-scoped like every other list here (base_qs already
+            # honours the caller's own company, or ?company_id for a platform
+            # admin) — no separate CP-access requirement on the assignee.
+            users = sales_qs
+            project_id = request.query_params.get('project_id')
+            if project_id:
+                # Strictly the STMs assigned to THIS project (Team Users →
+                # Assign, the same UserProjectAssignment used by
+                # manager_project_ids) — not the opt-in "unassigned = every
+                # project" fallback used elsewhere, since most employees have
+                # no assignment row at all and that made this list barely
+                # narrow down. Only an explicit assignment gets someone listed.
+                assigned_ids = set(
+                    UserProjectAssignment.objects.filter(project_id=project_id).values_list('user_id', flat=True)
+                )
+                users = [u for u in users if u.id in assigned_ids]
         else:
             users = sales_qs
 
@@ -3026,8 +3401,20 @@ class BookingListCreateView(APIView):
         # left on the normal scoping or an approver loses sight of their own bookings
         # in projects they don't approve. Real admins are exempt entirely.
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
-        if approver_project_ids and not request.query_params.get('mine'):
-            qs = qs.filter(project_id__in=approver_project_ids)
+        # A Channel-Partner-sourced booking is gated by its own approver list, so
+        # someone named a CP approver (but not a regular one) still needs to see
+        # those bookings without gaining visibility into the project's other ones.
+        cp_approver_project_ids = [] if _is_hard_admin(request.user) else _cp_approver_project_ids(request.user, company)
+        # A booking counts as Channel-Partner-sourced either through its lead
+        # (channel_partner FK OR Lead.source = "Channel Partner", same as
+        # cp_lead_q) or its own free-text Source field — see
+        # _is_cp_sourced_booking, mirrored here in query form.
+        is_cp_booking_q = cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner')
+        if (approver_project_ids or cp_approver_project_ids) and not request.query_params.get('mine'):
+            qs = qs.filter(
+                (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
+                | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
+            )
         elif not _sees_all_company(request.user, request, include_manager_role=False):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
@@ -3039,6 +3426,8 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('cp_only') == 'true':
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -3540,8 +3929,14 @@ def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount
 def _notify_booking_approvers(company, booking, submitter):
     try:
         from notifications import notify, reporting_chain
+        # A Channel-Partner-sourced booking routes to the project's CP approver
+        # list instead of its regular one — same split the approve/reject
+        # endpoint and the list scoping enforce (see _can_approve_booking).
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        can_approve_fn = _can_approve_cp_project if is_cp else _can_approve_project
         # 1) Per-project configured approvers (most precise).
-        ids = (booking.project.booking_approvers if booking.project_id else None) or []
+        approver_field = 'cp_booking_approvers' if is_cp else 'booking_approvers'
+        ids = (getattr(booking.project, approver_field, None) if booking.project_id else None) or []
         recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
         # 2) Fallback: the submitting STM's reporting-manager chain.
         if not recipients and booking.stm_id:
@@ -3564,7 +3959,7 @@ def _notify_booking_approvers(company, booking, submitter):
         if booking.project_id:
             recipients = [
                 u for u in recipients
-                if is_admin_or_manager(u) and _can_approve_project(u, booking.project, company)
+                if is_admin_or_manager(u) and can_approve_fn(u, booking.project, company)
             ]
             # Never let the filter silence the request entirely: if no one qualifies,
             # fall back to the company admins, who can approve any project.
@@ -3631,6 +4026,88 @@ def _notify_accounts_managers(company, ntype, title, body, data=None):
         logging.getLogger(__name__).exception('_notify_accounts_managers failed')
 
 
+def _ensure_lead_and_site_visit_for_booking(b):
+    """On a booking's first approval, guarantee it exists in the pipeline as a lead
+    with a completed site visit dated on the booking date.
+
+    Two flows land here. A closure recorded from a lead already has the lead but may
+    have no visit — a walk-in that booked without one ever being logged. A unit booked
+    directly has a lead created at submission time, but likewise no visit. Either way
+    the sale is real and the visit demonstrably happened, so the pipeline should say so
+    rather than showing a closure that came from nowhere.
+
+    Deliberately conservative:
+      - Never duplicates. A completed visit already on this lead for this project is
+        left exactly as it is, which is the normal Record-Closure-from-a-visit path.
+      - Only fabricates a lead when there is a name or phone to build one from.
+      - Attributes to the booking's STM, and to the lead's telecaller where there is
+        one, so the visit counts for the same people the closure does.
+    """
+    if not b.booking_date:
+        return None, None                     # nothing to date the visit by
+
+    lead_id = b.lead_id
+    if not lead_id:
+        name  = (b.client_name or '').strip()
+        phone = (b.phone or '').strip()
+        if not (name or phone):
+            return None, None                 # no identity to build a lead from
+        # Match on the number first. The same client often already exists as a lead —
+        # they were called, or they booked a second unit — and creating another record
+        # would split one person's history across two leads. Phone is encrypted, so the
+        # lookup goes through the blind index, which normalises to the last ten digits.
+        existing = None
+        key = phone_blind_index(phone) if phone else ''
+        if key:
+            existing = (Lead.objects.filter(company_id=b.company_id, phone_key=key)
+                        .order_by('id').first())
+        if existing:
+            lead_id = existing.id
+            # Attach the sale to them without overwriting a working history: only fill
+            # the STM in, and only when nobody is on it.
+            fields = {}
+            if not existing.stm_id and b.stm_id:
+                fields['stm_id'] = b.stm_id
+            if fields:
+                Lead.objects.filter(pk=lead_id).update(**fields)
+        else:
+            lead = Lead.objects.create(
+                company_id=b.company_id, name=name, phone=phone, status='closed',
+                project_id=b.project_id, stm=b.stm, stm_status='closed',
+            )
+            lead_id = lead.id
+        Booking.objects.filter(pk=b.pk).update(lead_id=lead_id)
+        b.lead_id = lead_id
+
+    # The guard is the booking DATE, not merely "this lead has been on a visit".
+    # A repeat buyer visited once per unit they bought, so a visit already logged on
+    # some other day belongs to the other sale and is left alone while this booking
+    # still gets its own. Only a visit already sitting on this booking's date means
+    # there is nothing to add.
+    already = SiteVisit.objects.filter(
+        lead_id=lead_id, project_id=b.project_id, status='completed',
+        visited_at__date=b.booking_date).exists()
+    if already:
+        return lead_id, None
+
+    # booking_date is a date; visits are timestamped, so anchor it at midday local
+    # time — a plain midnight can land on the previous day once rendered in another
+    # timezone, which would put the visit before the booking it came from.
+    visited = datetime.combine(b.booking_date, dt_time(12, 0))
+    if timezone.is_naive(visited):
+        visited = timezone.make_aware(visited, timezone.get_current_timezone())
+
+    tc_id = Lead.objects.filter(pk=lead_id).values_list('telecaller_id', flat=True).first()
+    sv = SiteVisit.objects.create(
+        lead_id=lead_id, project_id=b.project_id, stm=b.stm,
+        referred_by_telecaller_id=tc_id or None,
+        scheduled_at=visited, visited_at=visited,
+        status='completed', outcome='hot',
+        remarks='Recorded automatically from booking #%s on approval.' % b.pk,
+    )
+    return lead_id, sv.id
+
+
 class BookingActionView(APIView):
     """Approve / reject a pending booking (approver = admin or manager)."""
     permission_classes = [IsAuthenticated]
@@ -3649,7 +4126,7 @@ class BookingActionView(APIView):
         # (a project they don't approve is off limits even if it names nobody), and
         # someone named nowhere is blocked from projects that do name approvers.
         # Real admins are exempt.
-        if b.project_id and not _can_approve_project(request.user, b.project, company):
+        if not _can_approve_booking(request.user, b.project_id, b.project, b.lead_id, company, b.source):
             return Response(
                 {'detail': 'You are not a booking approver for this project.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -3663,9 +4140,10 @@ class BookingActionView(APIView):
                 Plot.objects.filter(id__in=_pids).update(status='sold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
+            b.approved_at = timezone.now()
             if b.closure_id:
                 # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at'])
                 Closure.objects.filter(id=b.closure_id).update(
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
             else:
@@ -3681,7 +4159,16 @@ class BookingActionView(APIView):
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
                 b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'closure'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure'])
+                # The sale is now real, so make sure the pipeline shows how it got
+                # here: a lead, and a completed site visit dated on the booking date.
+                try:
+                    _lid, _svid = _ensure_lead_and_site_visit_for_booking(b)
+                    if _svid and not closure.lead_id and _lid:
+                        Closure.objects.filter(pk=closure.pk).update(lead_id=_lid)
+                except Exception:
+                    # Never let this block an approval — the booking is what matters.
+                    logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
             # Notify the STM (approved) and — on a fresh closure — their manager chain.
             from notifications import notify, notify_many, reporting_chain
             _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
@@ -3819,7 +4306,11 @@ class ClosureCancelView(APIView):
         company = _resolve_company(request)
         # ...and only for a project they actually approve. Cancelling undoes an approval,
         # frees the plots and deletes the signed LOI, so it cannot be laxer than approving.
-        if closure.project_id and not _can_approve_project(request.user, closure.project, company):
+        # A closure has no Source field of its own — pull it from the booking that
+        # was approved into this closure, if any, so a CP-sourced deal still routes
+        # to the CP approvers at cancel time too.
+        booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
+        if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
             return Response({'detail': 'You are not a booking approver for this project.'},
                             status=status.HTTP_403_FORBIDDEN)
 
@@ -4597,3 +5088,166 @@ class BackupDownloadView(APIView):
         if not url:
             return Response({'detail': 'Could not generate a download link.'}, status=status.HTTP_502_BAD_GATEWAY)
         return Response({'url': url})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lead transfer: one STM hands a lead to another, held for approval
+# ─────────────────────────────────────────────────────────────────────────────
+def _transfer_approver_ids(company, project_id):
+    """Who may sign off a transfer of a lead on this project.
+
+    The same people who approve that project's bookings — the list an admin sets in
+    Booking & Approvals. Deliberately not "any manager": a lead moving between reps
+    changes whose numbers it lands in, so it needs the same named authority a booking
+    does. A project with nobody named leaves only real admins, which is the same rule
+    _can_approve_project applies.
+    """
+    ids = set()
+    for p in Project.objects.filter(company=company).only('id', 'booking_approvers'):
+        if project_id and p.id != project_id:
+            continue
+        ids.update(p.booking_approvers or [])
+    return sorted(ids)
+
+
+class LeadTransferListCreateView(APIView):
+    """GET  — transfers this user can see (their own requests, plus the queue they approve).
+    POST — request a transfer of one of your leads to another STM."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _resolve_company(request)
+        qs = (LeadTransfer.objects.filter(company=company)
+              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by'))
+        if not _is_hard_admin(request.user):
+            approver_pids = _approver_project_ids(request.user, company)
+            qs = qs.filter(
+                Q(requested_by=request.user) | Q(from_stm=request.user) | Q(to_stm=request.user)
+                | Q(project_id__in=approver_pids)
+            )
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        return Response(LeadTransferSerializer(qs[:200], many=True).data)
+
+    def post(self, request):
+        company = _resolve_company(request)
+        lead_id = request.data.get('lead')
+        to_stm_id = request.data.get('to_stm')
+        if not lead_id or not to_stm_id:
+            return Response({'detail': 'Lead and destination STM are required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        lead = Lead.objects.filter(pk=lead_id, company=company).first()
+        if not lead:
+            return Response({'detail': 'Lead not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Only the rep holding the lead may hand it on (admins may act for them).
+        if not _is_hard_admin(request.user) and lead.stm_id != request.user.id:
+            return Response({'detail': 'This lead is not assigned to you.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        if str(to_stm_id) == str(lead.stm_id):
+            return Response({'detail': 'That is already the assigned STM.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        to_stm = User.objects.filter(pk=to_stm_id, company=company, is_active=True).first()
+        if not to_stm:
+            return Response({'detail': 'Destination STM not found in your company.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if LeadTransfer.objects.filter(lead=lead, status='pending').exists():
+            return Response({'detail': 'A transfer for this lead is already awaiting approval.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        t = LeadTransfer.objects.create(
+            company=company, lead=lead, project_id=lead.project_id,
+            from_stm_id=lead.stm_id, to_stm=to_stm, requested_by=request.user,
+            reason=(request.data.get('reason') or '').strip(),
+        )
+        _notify_transfer_requested(t)
+        return Response(LeadTransferSerializer(t).data, status=status.HTTP_201_CREATED)
+
+
+class LeadTransferActionView(APIView):
+    """Approve or reject a pending transfer. Approval is what actually moves the lead."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        company = _resolve_company(request)
+        t = LeadTransfer.objects.filter(pk=pk, company=company).select_related('lead').first()
+        if not t:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        action = request.data.get('action')
+
+        # The requester may withdraw their own request; everything else needs an approver.
+        if action == 'cancel':
+            if t.requested_by_id != request.user.id and not _is_hard_admin(request.user):
+                return Response({'detail': 'Only the requester can withdraw this.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif not _can_approve_project(request.user, t.project_id, company):
+            return Response({'detail': 'You are not an approver for this project.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if t.status != 'pending':
+            return Response({'detail': 'This request has already been %s.' % t.status},
+                            status=status.HTTP_409_CONFLICT)
+        if action not in ('approve', 'reject', 'cancel'):
+            return Response({'detail': 'Unknown action.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        note = (request.data.get('note') or '').strip()
+        if action == 'approve':
+            with transaction.atomic():
+                # Re-read under a lock: the lead may have moved since the request was
+                # raised, and the record should say what it actually moved from.
+                lead = Lead.objects.select_for_update().get(pk=t.lead_id)
+                t.from_stm_id = lead.stm_id
+                lead.stm_id = t.to_stm_id
+                lead.stm_assigned_at = timezone.now()
+                lead.save(update_fields=['stm', 'stm_assigned_at'])
+                t.status = 'approved'
+                t.decided_by = request.user
+                t.decided_at = timezone.now()
+                t.decision_note = note
+                t.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note',
+                                      'from_stm', 'updated_at'])
+        else:
+            t.status = 'rejected' if action == 'reject' else 'cancelled'
+            t.decided_by = request.user
+            t.decided_at = timezone.now()
+            t.decision_note = note
+            t.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note', 'updated_at'])
+
+        _notify_transfer_decided(t)
+        return Response(LeadTransferSerializer(t).data)
+
+
+def _notify_transfer_requested(t):
+    """Tell the approvers there is something to look at, and the receiving STM it is coming."""
+    try:
+        from notifications import notify, notify_many
+        who = User.objects.filter(id__in=_transfer_approver_ids(t.company, t.project_id))
+        body = '%s wants to transfer %s to %s' % (
+            getattr(t.requested_by, 'name', 'An STM') or 'An STM',
+            getattr(t.lead, 'name', 'a lead') or 'a lead',
+            getattr(t.to_stm, 'name', 'another STM') or 'another STM')
+        notify_many(who, 'lead_transfer_requested', 'Lead Transfer Request', body,
+                    data={'transfer': t.id, 'lead': t.lead_id})
+        if t.to_stm:
+            notify(t.to_stm, 'lead_transfer_requested', 'Lead Coming Your Way',
+                   '%s has asked to transfer %s to you — awaiting approval.' % (
+                       getattr(t.requested_by, 'name', 'An STM') or 'An STM',
+                       getattr(t.lead, 'name', 'a lead') or 'a lead'),
+                   data={'transfer': t.id, 'lead': t.lead_id})
+    except Exception:
+        logger.exception('Could not notify for lead transfer %s', t.pk)
+
+
+def _notify_transfer_decided(t):
+    """Tell both reps the outcome — the one losing the lead and the one gaining it."""
+    try:
+        from notifications import notify
+        verb = {'approved': 'approved', 'rejected': 'rejected', 'cancelled': 'withdrawn'}[t.status]
+        lead_name = getattr(t.lead, 'name', 'a lead') or 'a lead'
+        for person in {t.requested_by_id: t.requested_by, t.from_stm_id: t.from_stm,
+                       t.to_stm_id: t.to_stm}.values():
+            if person and person.id != t.decided_by_id:
+                notify(person, 'lead_transfer_%s' % t.status, 'Lead Transfer %s' % verb.title(),
+                       'The transfer of %s was %s.' % (lead_name, verb),
+                       data={'transfer': t.id, 'lead': t.lead_id})
+    except Exception:
+        logger.exception('Could not notify the outcome of lead transfer %s', t.pk)
