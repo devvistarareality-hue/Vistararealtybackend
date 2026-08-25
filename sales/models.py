@@ -102,6 +102,11 @@ class Project(models.Model):
     allow_unit_switch = models.BooleanField(default=False)  # sq.yd ↔ sq.ft toggle (Kalrav)
     # Manager user IDs who approve bookings for THIS project (admin-selected).
     booking_approvers = models.JSONField(default=list, blank=True)
+    # Separate approver list for bookings whose lead came through a Channel
+    # Partner — a CP-sourced booking is gated by this list instead of the one
+    # above (see _can_approve_cp_project), so the two routes can name different
+    # people without one overriding the other.
+    cp_booking_approvers = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     tagline = models.CharField(max_length=300, blank=True)
     rera = models.CharField(max_length=100, blank=True)

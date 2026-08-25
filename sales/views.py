@@ -109,6 +109,26 @@ def is_cp_manager(user):
     return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
 
 
+def can_access_cp_module(user):
+    """Who can reach the Channel Partner module: true/hard admins always can
+    (see _is_hard_admin); a CP-designation Manager gets in via their
+    designation. Mirrors web's canAccessChannelPartner(user) — keep in sync."""
+    return bool(_is_hard_admin(user) or is_cp_manager(user))
+
+
+def cp_lead_q(prefix=''):
+    """A lead belongs to the Channel Partner module if EITHER it was added
+    through the CP module itself (channel_partner FK set) OR it was added
+    through the regular Sales flow with Source explicitly set to "Channel
+    Partner" (a plain LeadSource, no specific partner attached). `prefix`
+    lets callers scope a related model (e.g. 'lead__' for FollowUp/SiteVisit/
+    Closure/Booking, which don't have these fields directly)."""
+    return (
+        Q(**{f'{prefix}channel_partner__isnull': False}) |
+        Q(**{f'{prefix}source__name__iexact': 'Channel Partner'})
+    )
+
+
 # ── Hierarchy-based visibility ───────────────────────────────────────────────
 # Data visibility is driven by the org tree (User.reporting_manager), NOT by
 # designation strings. A user sees records owned (as STM or telecaller) by
@@ -199,6 +219,62 @@ def _can_approve_project(user, project, company):
         return True
     project_id = getattr(project, 'id', project)
     return project_id in _approver_project_ids(user, company)
+
+
+def _cp_approver_project_ids(user, company):
+    """Ids of projects where `user` is a configured CP booking approver — mirrors
+    _approver_project_ids but reads cp_booking_approvers, the separate list that
+    gates bookings whose lead came through a Channel Partner."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'cp_booking_approvers')
+        if user.id in (p.cp_booking_approvers or [])
+    ]
+
+
+def _can_approve_cp_project(user, project, company):
+    """Whether `user` is a configured CP approver for `project`'s Channel-Partner-
+    sourced bookings — mirrors _can_approve_project exactly, against the separate
+    cp_booking_approvers list."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _cp_approver_project_ids(user, company)
+
+
+def _is_cp_sourced(lead_id):
+    """Whether the given lead (if any) is Channel-Partner-referred — decides which
+    approver list (regular vs CP) gates a booking/closure tied to it. Uses the
+    same definition as cp_lead_q (channel_partner FK OR Source = "Channel
+    Partner") so a lead that shows up as CP in Leads/Dashboard also gets CP
+    approval routing once it's booked — they used to disagree."""
+    if not lead_id:
+        return False
+    return Lead.objects.filter(cp_lead_q(), id=lead_id).exists()
+
+
+def _is_cp_sourced_booking(lead_id, booking_source=None):
+    """Whether a booking counts as Channel-Partner-sourced for approval routing —
+    either its lead is CP-attributed (the structured directory), or its own
+    free-text Source field was set to "Channel Partner" (the older per-booking
+    selector on the booking form itself, unconnected to the ChannelPartner
+    directory but meant the same way: this deal came through a partner, so it
+    should route to the CP approvers, not the project's regular ones)."""
+    if (booking_source or '').strip().lower() == 'channel partner':
+        return True
+    return _is_cp_sourced(lead_id)
+
+
+def _can_approve_booking(user, project_id, project, lead_id, company, booking_source=None):
+    """Which approver list gates a booking or closure: a Channel-Partner-sourced
+    one is approved by the project's CP approvers, everything else by its regular
+    ones. No project at all → no approver-scoping check applies (matches the
+    original `if b.project_id and not _can_approve_project(...)` shape at every
+    call site this replaces)."""
+    if not project_id:
+        return True
+    if _is_cp_sourced_booking(lead_id, booking_source):
+        return _can_approve_cp_project(user, project, company)
+    return _can_approve_project(user, project, company)
 
 
 def can_assign_leads(user):
@@ -359,11 +435,13 @@ class StatsView(APIView):
         date_from  = request.query_params.get('date_from')
         date_to    = request.query_params.get('date_to')
 
-        # Include date range AND admin_view in cache key — otherwise a Sales Admin-
-        # Modules user's team-scoped dashboard and their Admin-section (full company)
-        # dashboard would collide on the same key and serve each other's stale data.
+        # Include date range, admin_view AND cp_only in cache key — otherwise a Sales
+        # Admin-Modules user's team-scoped dashboard and their Admin-section (full
+        # company) dashboard, or the regular Sales dashboard and the Channel Partner
+        # one, would collide on the same key and serve each other's stale data.
         admin_view = request.query_params.get('admin_view') == '1'
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}'
+        cp_only = request.query_params.get('cp_only') == 'true'
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -372,10 +450,13 @@ class StatsView(APIView):
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
 
         # Channel Partner leads have their own module and dashboard — the main
-        # Sales dashboard's counts never include them (see LeadListView for the
-        # matching All Leads behaviour).
-        if request.query_params.get('cp_only') != 'true':
-            leads_qs = leads_qs.filter(channel_partner__isnull=True)
+        # Sales dashboard's counts never include them, and the CP dashboard's
+        # counts are ONLY them (see LeadListView for the matching All Leads
+        # behaviour, and cp_lead_q for what counts as a CP lead).
+        if cp_only:
+            leads_qs = leads_qs.filter(cp_lead_q())
+        else:
+            leads_qs = leads_qs.exclude(cp_lead_q())
 
         # Telecallers / STMs only see stats for leads assigned to them.
         leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
@@ -471,6 +552,16 @@ class StatsView(APIView):
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
         cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        # Same CP/non-CP split as leads_qs above — these are independent queries
+        # against SiteVisit/Closure, not derived from leads_qs, so they need the
+        # same cp_lead_q filter applied directly or the CP dashboard's Site
+        # Visits/Closures tiles would silently show the whole company's numbers.
+        if cp_only:
+            sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
+            cl_qs = cl_qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__'))
+            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__'))
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -499,10 +590,17 @@ class StatsView(APIView):
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        active_projects_qs = scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter)
+        if cp_only:
+            # The CP dashboard's "Active Projects" means projects with actual CP
+            # activity, not every active project company-wide — leads_scope is
+            # already split to the CP pool above (cp_lead_q), not date-windowed
+            # so this stays a stable "currently active in CP" count.
+            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
         sv_done, closures, active_projects = (
             sv_scoped.count(),
             cl_scoped.count(),
-            scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter).count(),
+            active_projects_qs.count(),
         )
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
@@ -739,9 +837,10 @@ class LeadListView(APIView):
         # never shows them, only the Channel Partner section itself does (via
         # cp_only/channel_partner_id below). Keeps the two pools disjoint in both
         # directions: a CP-sourced lead never lands in a regular Sales view, and a
-        # regular lead never leaks into the CP one.
+        # regular lead never leaks into the CP one. See cp_lead_q for what counts
+        # as a CP lead (channel_partner FK set OR Source explicitly "Channel Partner").
         if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')):
-            qs = qs.filter(channel_partner__isnull=True)
+            qs = qs.exclude(cp_lead_q())
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
         # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
@@ -835,8 +934,9 @@ class LeadListView(APIView):
             qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
         elif request.query_params.get('cp_only') == 'true':
             # The Channel Partner section's "CP Leads" tab — every lead referred
-            # by any channel partner, not just one specific partner's.
-            qs = qs.filter(channel_partner__isnull=False)
+            # by any channel partner, OR added via the regular Sales flow with
+            # Source set to "Channel Partner" (see cp_lead_q).
+            qs = qs.filter(cp_lead_q())
         if request.query_params.get('telecaller_id'):
             qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
         if request.query_params.get('stm_id'):
@@ -1247,9 +1347,9 @@ class ProjectDetailView(APIView):
         # Manager may edit — otherwise an approver restricted to one project could simply
         # add themselves to another and approve it. Mirrors the same gate the Approver
         # Setup panel uses on the client (role Admin / staff / Sales admin-module).
-        if 'booking_approvers' in request.data and not (
+        if (('booking_approvers' in request.data or 'cp_booking_approvers' in request.data) and not (
             _is_hard_admin(request.user) or 'Sales' in (getattr(request.user, 'admin_modules', None) or [])
-        ):
+        )):
             return Response(
                 {'detail': 'Only an administrator can change booking approvers.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -1447,8 +1547,12 @@ class ChannelPartnerListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
-            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        # Read access is open to anyone with Sales access (not just admins/CP
+        # managers) — an STM booking a unit through the regular Sales module
+        # needs this list too, to pick a Channel Partner Name from the directory
+        # rather than typing it freehand. Mirrors LeadSourceListView.get, which
+        # is similarly unrestricted; only creating/editing/deleting entries
+        # (below) stays admin/CP-manager only.
         qs = scope_to_company(ChannelPartner.objects.all(), request.user).annotate(lead_count=Count('leads'))
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(company_id=request.query_params['company_id'])
@@ -1467,7 +1571,7 @@ class ChannelPartnerListCreateView(APIView):
         return Response(ChannelPartnerSerializer(qs, many=True).data)
 
     def post(self, request):
-        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+        if not can_access_cp_module(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         ser = ChannelPartnerSerializer(data=request.data)
         if not ser.is_valid():
@@ -1487,7 +1591,7 @@ class ChannelPartnerDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
-        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+        if not can_access_cp_module(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
             cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
@@ -1500,7 +1604,7 @@ class ChannelPartnerDetailView(APIView):
         return Response(ser.data)
 
     def delete(self, request, pk):
-        if not (_is_sales_admin(request.user) or is_cp_manager(request.user)):
+        if not can_access_cp_module(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         try:
             cp = scope_to_company(ChannelPartner.objects.all(), request.user).get(pk=pk)
@@ -1530,7 +1634,7 @@ class FollowUpListView(APIView):
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(lead__channel_partner__isnull=False)
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(FollowUpSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1588,7 +1692,7 @@ class SiteVisitListView(APIView):
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(lead__channel_partner__isnull=False)
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(SiteVisitSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1686,7 +1790,7 @@ class ClosureListView(APIView):
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
         if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(lead__channel_partner__isnull=False)
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -1754,6 +1858,26 @@ class TelecallerListView(APIView):
                 (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
                 key=lambda u: u.name or '',
             )
+        elif crm_role == 'sales_cp':
+            # Same-company employees with Sales module access — for the CP
+            # module's "Assign STM" dropdown, letting a CP Cluster Head hand a
+            # CP lead straight to a Sales-side person, no approval step.
+            # Company-scoped like every other list here (base_qs already
+            # honours the caller's own company, or ?company_id for a platform
+            # admin) — no separate CP-access requirement on the assignee.
+            users = sales_qs
+            project_id = request.query_params.get('project_id')
+            if project_id:
+                # Strictly the STMs assigned to THIS project (Team Users →
+                # Assign, the same UserProjectAssignment used by
+                # manager_project_ids) — not the opt-in "unassigned = every
+                # project" fallback used elsewhere, since most employees have
+                # no assignment row at all and that made this list barely
+                # narrow down. Only an explicit assignment gets someone listed.
+                assigned_ids = set(
+                    UserProjectAssignment.objects.filter(project_id=project_id).values_list('user_id', flat=True)
+                )
+                users = [u for u in users if u.id in assigned_ids]
         else:
             users = sales_qs
 
@@ -3219,8 +3343,20 @@ class BookingListCreateView(APIView):
         # left on the normal scoping or an approver loses sight of their own bookings
         # in projects they don't approve. Real admins are exempt entirely.
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
-        if approver_project_ids and not request.query_params.get('mine'):
-            qs = qs.filter(project_id__in=approver_project_ids)
+        # A Channel-Partner-sourced booking is gated by its own approver list, so
+        # someone named a CP approver (but not a regular one) still needs to see
+        # those bookings without gaining visibility into the project's other ones.
+        cp_approver_project_ids = [] if _is_hard_admin(request.user) else _cp_approver_project_ids(request.user, company)
+        # A booking counts as Channel-Partner-sourced either through its lead
+        # (channel_partner FK OR Lead.source = "Channel Partner", same as
+        # cp_lead_q) or its own free-text Source field — see
+        # _is_cp_sourced_booking, mirrored here in query form.
+        is_cp_booking_q = cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner')
+        if (approver_project_ids or cp_approver_project_ids) and not request.query_params.get('mine'):
+            qs = qs.filter(
+                (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
+                | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
+            )
         elif not _sees_all_company(request.user, request, include_manager_role=False):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
         if request.query_params.get('mine'):           # "My Bookings" — only this user's
@@ -3233,7 +3369,7 @@ class BookingListCreateView(APIView):
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(lead__channel_partner__isnull=False)
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -3735,8 +3871,14 @@ def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount
 def _notify_booking_approvers(company, booking, submitter):
     try:
         from notifications import notify, reporting_chain
+        # A Channel-Partner-sourced booking routes to the project's CP approver
+        # list instead of its regular one — same split the approve/reject
+        # endpoint and the list scoping enforce (see _can_approve_booking).
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        can_approve_fn = _can_approve_cp_project if is_cp else _can_approve_project
         # 1) Per-project configured approvers (most precise).
-        ids = (booking.project.booking_approvers if booking.project_id else None) or []
+        approver_field = 'cp_booking_approvers' if is_cp else 'booking_approvers'
+        ids = (getattr(booking.project, approver_field, None) if booking.project_id else None) or []
         recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
         # 2) Fallback: the submitting STM's reporting-manager chain.
         if not recipients and booking.stm_id:
@@ -3759,7 +3901,7 @@ def _notify_booking_approvers(company, booking, submitter):
         if booking.project_id:
             recipients = [
                 u for u in recipients
-                if is_admin_or_manager(u) and _can_approve_project(u, booking.project, company)
+                if is_admin_or_manager(u) and can_approve_fn(u, booking.project, company)
             ]
             # Never let the filter silence the request entirely: if no one qualifies,
             # fall back to the company admins, who can approve any project.
@@ -3844,7 +3986,7 @@ class BookingActionView(APIView):
         # (a project they don't approve is off limits even if it names nobody), and
         # someone named nowhere is blocked from projects that do name approvers.
         # Real admins are exempt.
-        if b.project_id and not _can_approve_project(request.user, b.project, company):
+        if not _can_approve_booking(request.user, b.project_id, b.project, b.lead_id, company, b.source):
             return Response(
                 {'detail': 'You are not a booking approver for this project.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -4014,7 +4156,11 @@ class ClosureCancelView(APIView):
         company = _resolve_company(request)
         # ...and only for a project they actually approve. Cancelling undoes an approval,
         # frees the plots and deletes the signed LOI, so it cannot be laxer than approving.
-        if closure.project_id and not _can_approve_project(request.user, closure.project, company):
+        # A closure has no Source field of its own — pull it from the booking that
+        # was approved into this closure, if any, so a CP-sourced deal still routes
+        # to the CP approvers at cancel time too.
+        booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
+        if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
             return Response({'detail': 'You are not a booking approver for this project.'},
                             status=status.HTTP_403_FORBIDDEN)
 
