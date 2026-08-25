@@ -14,6 +14,8 @@ urlpatterns = [
     path('leads/backfill-duplicates/', views.BackfillDuplicatesView.as_view()),
     path('sources/',                   views.LeadSourceListView.as_view()),
     path('sources/<int:pk>/',          views.LeadSourceDetailView.as_view()),
+    path('channel-partners/',          views.ChannelPartnerListCreateView.as_view()),
+    path('channel-partners/<int:pk>/', views.ChannelPartnerDetailView.as_view()),
     path('follow-ups/',                views.FollowUpListView.as_view()),
     path('follow-ups/<int:pk>/',       views.FollowUpDetailView.as_view()),
     path('site-visits/',               views.SiteVisitListView.as_view()),
