@@ -1070,6 +1070,28 @@ class LeadListView(APIView):
             lead.save(update_fields=['created_at'])
 
         _record_lead_created(lead, by=request.user)
+        # A telecaller/STM/admin can set an initial TC/STM Status in the SAME request
+        # that creates the lead (e.g. a telecaller working a live WhatsApp chat calls
+        # it warm right away instead of adding it blank and PATCHing afterward). The
+        # PATCH handler logs every status transition to LeadStatusHistory — this path
+        # only ever logged 'created' (+ 'warm_transfer' below), never the underlying
+        # telecaller_status/stm_status/status transitions themselves, so a lead that
+        # went warm at creation was invisible to every date-ranged status filter and
+        # dashboard tile (all of them read LeadStatusHistory, not the live field).
+        old_status = lead.status
+        creation_history = []
+        if lead.telecaller_status:
+            creation_history.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='telecaller_status', old_value='', new_value=lead.telecaller_status,
+            ))
+        if lead.stm_status:
+            creation_history.append(LeadStatusHistory(
+                lead=lead, changed_by=request.user,
+                field_changed='stm_status', old_value='', new_value=lead.stm_status,
+            ))
+        if creation_history:
+            LeadStatusHistory.objects.bulk_create(creation_history)
         # Notify the assignee when an admin/manager hand-picks them on create.
         if can_assign:
             from notifications import notify
@@ -1087,6 +1109,10 @@ class LeadListView(APIView):
             lead.save(update_fields=['status'])
             LeadStatusHistory.objects.create(
                 lead=lead, changed_by=request.user,
+                field_changed='status', old_value=old_status, new_value=lead.status,
+            )
+            LeadStatusHistory.objects.create(
+                lead=lead, changed_by=request.user,
                 field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
             )
         # A lead that starts directly in the STM pipeline (self-sourced by an STM/CP,
@@ -1094,8 +1120,13 @@ class LeadListView(APIView):
         # lead) has Overall mirror STM Status immediately, same as every later PATCH
         # already does (see LeadDetailView.patch).
         if lead.stm_status and lead.status != lead.stm_status:
+            old_status = lead.status
             lead.status = lead.stm_status
             lead.save(update_fields=['status'])
+            LeadStatusHistory.objects.create(
+                lead=lead, changed_by=request.user,
+                field_changed='status', old_value=old_status, new_value=lead.status,
+            )
         if lead.status == 'warm_transferred' and lead.stm_id is None:
             _run_distribution(lead.company, 'stm')
         # Auto-distribute to a telecaller only when the lead is still unassigned
