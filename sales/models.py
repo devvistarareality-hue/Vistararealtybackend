@@ -537,6 +537,11 @@ class Booking(models.Model):
 
     status          = models.CharField(max_length=20, choices=STATUS, default='pending')
     approval_status = models.CharField(max_length=40, blank=True)
+    # Set once, the moment an approver actually approves (BookingActionView) —
+    # deliberately separate from updated_at, which changes on every save and
+    # would drift away from the true approval moment if the booking is ever
+    # touched again afterwards (e.g. LOI regenerated).
+    approved_at     = models.DateTimeField(null=True, blank=True)
     revision_no     = models.IntegerField(default=0)
     # The booking this one revises. The client has always posted `revision_of` but it
     # was never stored, leaving revision chains to be inferred from closure/unit —

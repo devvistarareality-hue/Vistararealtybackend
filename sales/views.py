@@ -4000,9 +4000,10 @@ class BookingActionView(APIView):
                 Plot.objects.filter(id__in=_pids).update(status='sold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
+            b.approved_at = timezone.now()
             if b.closure_id:
                 # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at'])
                 Closure.objects.filter(id=b.closure_id).update(
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
             else:
@@ -4018,7 +4019,7 @@ class BookingActionView(APIView):
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
                 b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'closure'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure'])
             # Notify the STM (approved) and — on a fresh closure — their manager chain.
             from notifications import notify, notify_many, reporting_chain
             _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
