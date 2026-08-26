@@ -829,6 +829,28 @@ def _leads_by_status_transition(leads_scope, field, value, date_from, date_to):
     return set(hist.values_list('lead_id', flat=True))
 
 
+def _leads_worked_in_range(leads_scope, field, uncalled_value, date_from, date_to):
+    """Lead ids whose `field` transitioned OUT of `uncalled_value` for the
+    FIRST time within [date_from, date_to] — i.e. when they were first
+    actually called/worked. Powers the "Called" tab's date filter so a lead
+    worked today isn't attributed to whenever it happened to be created —
+    e.g. a lead that arrived Monday while the rep was on leave, then got
+    called once they were back Tuesday, is Tuesday's work, not Monday's.
+
+    Deliberately keyed on old_value=uncalled_value (the transition AWAY from
+    "never touched"), not "any change to a real value" — a lead is only ever
+    Called once. Editing its status again later (a second call, a status
+    correction) does not recount it as Called on that later day too;
+    re-engaging with an already-called lead is what Follow-Ups are for."""
+    hist = LeadStatusHistory.objects.filter(
+        lead__in=leads_scope, field_changed=field, old_value=uncalled_value)
+    if date_from:
+        hist = hist.filter(created_at__date__gte=date_from)
+    if date_to:
+        hist = hist.filter(created_at__date__lte=date_to)
+    return set(hist.values_list('lead_id', flat=True))
+
+
 def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
     """Lead ids still at stm_status='sv_done' whose latest completed visit outcome
     matches `value`, dated by when that visit happened — mirrors StatsView's
@@ -950,6 +972,22 @@ class LeadListView(APIView):
                 skip_created_at_filter = True
             else:
                 qs = qs.filter(stm_status=stm_status_filter)
+        # The "Called" tab's date filter must mean "worked within this range", not
+        # "created within this range" — a lead that arrived while the rep was on
+        # leave (say Monday) and only got called once they were back (Tuesday) is
+        # Tuesday's work, not Monday's, even though it was created Monday. Only
+        # kicks in when nothing above already narrowed by a specific status value
+        # (that path already date-filters correctly on its own terms).
+        work = request.query_params.get('work')
+        if work == 'called' and (date_from_param or date_to_param) and not skip_created_at_filter:
+            if is_telecaller(request.user):
+                ids = _leads_worked_in_range(qs, 'telecaller_status', '', date_from_param, date_to_param)
+            elif is_stm(request.user) or is_cp(request.user):
+                ids = _leads_worked_in_range(qs, 'stm_status', '', date_from_param, date_to_param)
+            else:
+                ids = _leads_worked_in_range(qs, 'status', 'new', date_from_param, date_to_param)
+            qs = qs.filter(id__in=ids)
+            skip_created_at_filter = True
         project_id = request.query_params.get('project_id')
         if project_id == 'none':
             qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
@@ -985,7 +1023,7 @@ class LeadListView(APIView):
         # Work split for telecaller / STM portals: separate the leads they still have
         # to call ('pending') from the ones they've already actioned ('called'),
         # keyed off their own status field. Admins/managers fall back to overall status.
-        work = request.query_params.get('work')
+        # (`work` itself was already read above, alongside the date-range handling.)
         if work == 'pending':
             if is_telecaller(request.user):
                 qs = qs.filter(telecaller_status='')
@@ -3516,6 +3554,12 @@ class BookingListCreateView(APIView):
                 company=company, name=data.get('client_name', '').strip(),
                 phone=(data.get('phone') or '').strip(), status='new',
                 project_id=data.get('project') or None, source=src,
+                # STM self-sourced this client straight into a booking — no
+                # telecaller ever touched it. stm must be set (same value the
+                # Booking itself gets below), or _distribute's telecaller pool
+                # (which requires stm__isnull=True) silently scoops this lead up
+                # and hands someone else's direct sale to a random telecaller.
+                stm=request.user,
             )
             lead_id = lead.id
 
@@ -3684,6 +3728,12 @@ class BookingDraftView(APIView):
                 company=company, name=data.get('client_name', '').strip(),
                 phone=(data.get('phone') or '').strip(), status='new',
                 project_id=data.get('project') or None, source=src,
+                # STM self-sourced this client straight into a booking — no
+                # telecaller ever touched it. stm must be set (same value the
+                # Booking itself gets below), or _distribute's telecaller pool
+                # (which requires stm__isnull=True) silently scoops this lead up
+                # and hands someone else's direct sale to a random telecaller.
+                stm=request.user,
             )
             lead_id = lead.id
 
