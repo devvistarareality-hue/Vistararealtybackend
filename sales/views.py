@@ -440,7 +440,11 @@ class StatsView(APIView):
         # company) dashboard, or the regular Sales dashboard and the Channel Partner
         # one, would collide on the same key and serve each other's stale data.
         admin_view = request.query_params.get('admin_view') == '1'
-        cp_only = request.query_params.get('cp_only') == 'true'
+        # A CP-designation Manager only ever gets the CP dashboard's numbers,
+        # regardless of which query params reach here (see is_cp_manager) —
+        # the frontend's cp_only param is the normal path but not the only one
+        # that can reach this view.
+        cp_only = request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user)
         cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
         cached = cache.get(cache_key)
         if cached is not None:
@@ -888,7 +892,12 @@ class LeadListView(APIView):
         # directions: a CP-sourced lead never lands in a regular Sales view, and a
         # regular lead never leaks into the CP one. See cp_lead_q for what counts
         # as a CP lead (channel_partner FK set OR Source explicitly "Channel Partner").
-        if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')):
+        # A CP-designation Manager is boxed into the CP pool unconditionally (see
+        # is_cp_manager) — not just when the CP module's own pages happen to send
+        # cp_only, or navigating straight to this endpoint's plain /sales/leads
+        # page would show them the whole company's non-CP leads instead.
+        if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
+                or is_cp_manager(request.user)):
             qs = qs.exclude(cp_lead_q())
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
@@ -997,7 +1006,7 @@ class LeadListView(APIView):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('channel_partner_id'):
             qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
-        elif request.query_params.get('cp_only') == 'true':
+        elif request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
             # The Channel Partner section's "CP Leads" tab — every lead referred
             # by any channel partner, OR added via the regular Sales flow with
             # Source set to "Channel Partner" (see cp_lead_q).
@@ -1729,7 +1738,7 @@ class FollowUpListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true':
+        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(FollowUpSerializer(qs, many=True).data)
 
@@ -1787,7 +1796,7 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
-        if request.query_params.get('cp_only') == 'true':
+        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(SiteVisitSerializer(qs, many=True).data)
 
@@ -1885,8 +1894,14 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
-        if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(cp_lead_q(prefix='lead__'))
+        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+            # A closure counts as CP the same way its booking does — either its
+            # lead is CP-attributed (cp_lead_q) or the booking that became this
+            # closure had its own free-text Source set to "Channel Partner" (see
+            # _is_cp_sourced_booking) — otherwise a Sales-module booking that
+            # chose that source silently drops out of the CP Closures tab once
+            # approved.
+            qs = qs.filter(cp_lead_q(prefix='lead__') | Q(bookings__source__iexact='channel partner')).distinct()
         return Response(ClosureSerializer(qs, many=True).data)
 
     def post(self, request):
@@ -3464,8 +3479,15 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true':
-            qs = qs.filter(cp_lead_q(prefix='lead__'))
+        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+            # Reuse is_cp_booking_q (computed above), not cp_lead_q alone — a
+            # booking counts as CP-sourced either through its lead OR its own
+            # free-text Source field (see _is_cp_sourced_booking). Filtering on
+            # cp_lead_q alone dropped a Sales-module booking tagged Source =
+            # "Channel Partner" from this list even though _can_approve_booking
+            # already routes its approval to the CP approvers — it was
+            # authorized but invisible to the person meant to approve it.
+            qs = qs.filter(is_cp_booking_q)
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):
