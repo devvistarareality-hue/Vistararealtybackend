@@ -87,14 +87,16 @@ def default_monthly_dates(investment_date, tenure_months):
 
 
 def maturity_value(principal, total_return_pct, investment_date, maturity_date):
-    """Principal + full-tenure interest, day-count basis — the total an
-    investor holds by maturity_date regardless of payout cadence (equals the
-    sum of every quarterly/monthly instalment, or the one-shot maturity
-    payout, whichever cadence is actually chosen — same daily_rate formula as
-    generate_payout_schedule, just totalled over the whole tenure instead of
-    per instalment)."""
-    days = (maturity_date - investment_date).days
-    return principal + principal * (total_return_pct / Decimal('100')) * Decimal(days) / Decimal('365')
+    """Principal + the scheme's total return, applied once over the whole
+    tenure — total_return_pct is the total return BY maturity (e.g. a
+    "LEGACY 110" scheme pays 110% total over its 5-year tenure, not 110%
+    every year), not an annualized rate to be scaled by day-count. This is
+    the total an investor holds by maturity_date regardless of payout
+    cadence (equals the sum of every quarterly/monthly instalment, or the
+    one-shot maturity payout, whichever cadence is actually chosen — see
+    generate_payout_schedule, which spreads this same fixed total interest
+    pro-rata across the tenure's actual days)."""
+    return principal + principal * (total_return_pct / Decimal('100'))
 
 
 def generate_payout_schedule(investor, custom_entries=None):
@@ -111,13 +113,17 @@ def generate_payout_schedule(investor, custom_entries=None):
       default_quarterly_dates / default_monthly_dates — each due on
       PAYOUT_DAY, except the last which is capped at the maturity date so no
       stretch of the tenure goes uncompensated), sized by actual day-count
-      proration at the investor's annual total_return_pct (daily_rate =
-      principal * pct/100 / 365, instalment = daily_rate * days since the
-      PREVIOUS instalment, or since investment_date for the first one). Both
-      the first AND last instalments are usually stubs — e.g. investing 25
-      Jun with quarterly payout means a 15-day first instalment due 10 Jul,
-      not a full quarter's share — plus one final 'maturity' row for the
-      principal only, due the same day as that last (capped) interest row.
+      proration of the investor's FIXED total return over the tenure
+      (total_return_pct is the total return by maturity, not an annualized
+      rate — see maturity_value): daily_rate = (principal * pct/100) /
+      tenure_days, instalment = daily_rate * days since the PREVIOUS
+      instalment, or since investment_date for the first one. Both the first
+      AND last instalments are usually stubs — e.g. investing 25 Jun with
+      quarterly payout means a 15-day first instalment due 10 Jul, not a full
+      quarter's share — plus one final 'maturity' row for the principal
+      only, due the same day as that last (capped) interest row. The sum of
+      every instalment therefore always equals principal * pct/100, exactly
+      matching maturity_value's total interest.
     - Maturity: a single 'maturity' row (principal + full total return) due
       on the maturity date.
     """
@@ -148,7 +154,8 @@ def generate_payout_schedule(investor, custom_entries=None):
             if investor.interest_payout == 'quarterly'
             else default_monthly_dates(investor.investment_date, scheme.tenure_months)
         )
-        daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal('365')
+        tenure_days = (investor.maturity_date - investor.investment_date).days
+        daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal(tenure_days)
         prev_date = investor.investment_date
         for due_date in dates:
             days_elapsed = (due_date - prev_date).days
