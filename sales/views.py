@@ -4112,8 +4112,13 @@ def _ensure_lead_and_site_visit_for_booking(b):
       - Never duplicates. A completed visit already on this lead for this project is
         left exactly as it is, which is the normal Record-Closure-from-a-visit path.
       - Only fabricates a lead when there is a name or phone to build one from.
-      - Attributes to the booking's STM, and to the lead's telecaller where there is
-        one, so the visit counts for the same people the closure does.
+      - Attributes only to the booking's STM — never to a telecaller. Whoever is on
+        lead.telecaller_id may have had no part in this particular sale (e.g. an
+        earlier lead they once worked reused for an unrelated direct booking), so
+        crediting them here would hand out site-visit incentive for a visit they
+        didn't do. A real, telecaller-referred visit already gets its own SiteVisit
+        row logged at the time — this fabricated one exists purely to backfill the
+        pipeline for a closure that has none, not to attribute credit beyond the STM.
     """
     if not b.booking_date:
         return None, None                     # nothing to date the visit by
@@ -4169,10 +4174,8 @@ def _ensure_lead_and_site_visit_for_booking(b):
     if timezone.is_naive(visited):
         visited = timezone.make_aware(visited, timezone.get_current_timezone())
 
-    tc_id = Lead.objects.filter(pk=lead_id).values_list('telecaller_id', flat=True).first()
     sv = SiteVisit.objects.create(
         lead_id=lead_id, project_id=b.project_id, stm=b.stm,
-        referred_by_telecaller_id=tc_id or None,
         scheduled_at=visited, visited_at=visited,
         status='completed', outcome='hot',
         remarks='Recorded automatically from booking #%s on approval.' % b.pk,
