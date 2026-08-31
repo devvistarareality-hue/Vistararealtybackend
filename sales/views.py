@@ -4224,7 +4224,15 @@ class BookingActionView(APIView):
             else:
                 # First approval of a new booking → mirror it into My Conversions now.
                 if b.lead_id:
-                    Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed')
+                    # Both fields move to 'closed' together — status is the overall
+                    # pipeline field (what All Leads and the dashboard's closed-count
+                    # tile read; see Q(status='closed') in StatsView), stm_status is
+                    # the STM portal's own field. Leaving status behind used to strand
+                    # a lead auto-created at booking submission (status='new') on
+                    # "new" forever once its booking was approved, even though
+                    # _ensure_lead_and_site_visit_for_booking's backfill path already
+                    # sets both together for the no-lead-at-all case below.
+                    Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed', status='closed')
                 closure = Closure.objects.create(
                     company_id=b.company_id, lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
                     client_name=b.client_name or '', client_phone=b.phone or '',
