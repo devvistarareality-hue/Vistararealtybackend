@@ -914,11 +914,12 @@ class InvestorActionView(APIView):
                     investor.amount_invested = Decimal(str(pr['amount_invested']))
                 if 'total_return_pct' in pr:
                     investor.total_return_pct = Decimal(str(pr['total_return_pct']))
-                for f in ('interest_payout', 'security', 'notes'):
+                for f in ('interest_payout', 'security', 'notes', 'name', 'phone'):
                     if f in pr:
                         setattr(investor, f, pr[f])
                 update_fields = [
                     'amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes',
+                    'name', 'phone', 'phone_key',
                     'loi_document', 'pending_loi_document', 'pending_revision', 'pending_revision_type',
                     'approval_status', 'updated_at',
                 ]
@@ -1043,7 +1044,11 @@ class InvestorReviseView(APIView):
             return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         pending = {}
-        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes'):
+        # name/phone are editable on a revision (unlike scheme/investment_date,
+        # which genuinely can't change without becoming a different deal) — a
+        # revision is also the natural place to fix a typo or an updated
+        # number caught after the original LOI was signed.
+        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes', 'name', 'phone'):
             if f in request.data:
                 pending[f] = request.data[f]
         try:
