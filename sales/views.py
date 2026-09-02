@@ -1571,7 +1571,11 @@ class PlotHoldView(APIView):
                     continue
                 _release_expired_holds(Plot.objects.filter(pk=pid))
                 plot.refresh_from_db()
-                if plot.status != 'available':
+                # A 'resale' plot is a previously-sold unit an admin has put back
+                # on the market — bookable exactly like 'available', just kept
+                # visually distinct (purple, not green) so the team can tell a
+                # fresh unit from a resale one.
+                if plot.status not in ('available', 'resale'):
                     reason = 'held_by_other' if (plot.held_by_id and plot.held_by_id != request.user.id) else plot.status
                     failed.append({'id': pid, 'number': plot.number, 'reason': reason})
                     continue
@@ -3570,7 +3574,7 @@ class BookingListCreateView(APIView):
                 # instant.
                 with transaction.atomic():
                     for p in Plot.objects.select_for_update().filter(pk__in=requested_plot_ids):
-                        ok = p.status == 'available' or (p.status == 'hold' and p.held_by_id == request.user.id)
+                        ok = p.status in ('available', 'resale') or (p.status == 'hold' and p.held_by_id == request.user.id)
                         if not ok:
                             return Response(
                                 {'detail': f'Plot {p.number} is no longer available — it may have just been selected or booked by another salesperson.'},
@@ -3799,7 +3803,7 @@ class BookingDraftView(APIView):
             # the conflict instead so the frontend can warn without discarding anything.
             with transaction.atomic():
                 for plot in Plot.objects.select_for_update().filter(pk__in=pids):
-                    if plot.status == 'available':
+                    if plot.status in ('available', 'resale'):
                         plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
                         plot.save(update_fields=['status', 'held_by', 'held_at'])
                     elif not (plot.status == 'hold' and plot.held_by_id == request.user.id):

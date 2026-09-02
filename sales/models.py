@@ -167,7 +167,8 @@ class Plot(models.Model):
     AVAILABLE = 'available'
     HOLD = 'hold'
     SOLD = 'sold'
-    STATUS_CHOICES = [(AVAILABLE, 'Available'), (HOLD, 'Hold'), (SOLD, 'Sold')]
+    RESALE = 'resale'
+    STATUS_CHOICES = [(AVAILABLE, 'Available'), (HOLD, 'Hold'), (SOLD, 'Sold'), (RESALE, 'Resale')]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='plots')
     number = models.CharField(max_length=50)
