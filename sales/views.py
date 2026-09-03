@@ -1617,6 +1617,54 @@ class LeadSourceListView(APIView):
         return Response(LeadSourceSerializer(ser.save(company=request.user.company)).data, status=status.HTTP_201_CREATED)
 
 
+class LeadCompanySearchView(APIView):
+    """Company-wide lead lookup by name/phone — deliberately NOT scoped to the
+    caller's own reporting tree the way LeadListView.get's default search is.
+    Its whole point is to answer "does this client already have a lead, and
+    who owns it" before someone creates a duplicate — e.g. an STM who can't
+    find a telecaller's warm-transferred-but-not-yet-distributed lead in
+    their own scoped list (scope_leads_to_role never shows a frontline role
+    the unassigned pool), so they'd otherwise add a fresh lead that silently
+    orphans that telecaller's site-visit incentive.
+
+    Read-only, minimal fields only (name/phone/status/project/owners) — no
+    remarks, budget, email, etc. Excludes CP leads, a deliberately separate
+    pool elsewhere in the app (see cp_lead_q)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_sales_access(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        search = request.query_params.get('search', '').strip()
+        if not search:
+            return Response([])
+        qs = scope_to_company(Lead.objects.all(), request.user).exclude(cp_lead_q())
+        digits = ''.join(c for c in search if c.isdigit())
+        if len(digits) >= 10 and not any(c.isalpha() for c in search):
+            qs = qs.filter(phone_key=phone_blind_index(digits[-10:]))
+        else:
+            needle = search.lower()
+            hits = [
+                pk for pk, nm, ph in qs.values_list('id', 'name', 'phone')
+                if needle in (nm or '').lower() or needle in (ph or '').lower()
+            ]
+            qs = qs.filter(id__in=hits)
+        qs = qs.select_related('telecaller', 'stm', 'project').order_by('-created_at')[:25]
+        return Response([
+            {
+                'id': l.id,
+                'name': l.name,
+                'phone': l.phone,
+                'status': l.status,
+                'project_name': l.project.name if l.project_id else '',
+                'telecaller_name': l.telecaller.name if l.telecaller_id else '',
+                'stm_name': l.stm.name if l.stm_id else '',
+                'created_at': l.created_at,
+            }
+            for l in qs
+        ])
+
+
 class BackfillDuplicatesView(APIView):
     """One-time endpoint to mark existing duplicate leads based on last 10 phone digits."""
     permission_classes = [IsAuthenticated]
