@@ -3695,6 +3695,28 @@ class BookingListCreateView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Pratishtha prices every unit from that unit's price book. With no book
+            # there is nothing to price from, and the client falls back to a rate-based
+            # form whose formulas have no pratishtha branch — that saved bookings at a
+            # zero total. The client blocks this now, but an older build (or a direct
+            # call) must not be able to write a mispriced booking. EOIs stay exempt:
+            # they are raised before a unit is chosen, so no book applies.
+            if proj_id and has_plot and Project.objects.filter(
+                    pk=proj_id, formula_set='pratishtha').exists():
+                pids = [int(x) for x in (data.get('plot_ids') or []) if str(x).isdigit()]
+                if not pids and str(data.get('plot') or '').isdigit():
+                    pids = [int(data['plot'])]
+                bookless = [
+                    p.number for p in Plot.objects.filter(pk__in=pids)
+                    if not (p.price_book or {})
+                ]
+                if bookless:
+                    return Response(
+                        {'detail': 'Price book not loaded for %s. A Pratishtha booking '
+                                   'cannot be priced until it is.' % ', '.join(bookless)},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
         # Guard against duplicate submissions: a plot shouldn't have more than one
         # active (pending/approved) booking at a time. Traced real production
         # duplicates (same client/plot/amount, 10-30s apart) to a user resubmitting
