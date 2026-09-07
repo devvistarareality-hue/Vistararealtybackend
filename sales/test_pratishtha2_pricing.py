@@ -63,5 +63,38 @@ class MissingAreaTests(SimpleTestCase):
         self.assertEqual(b['unit'], 'A-SHOP1')
         self.assertEqual(b['sq_feet'], 700)
 
+
+class ShopRateBandTests(SimpleTestCase):
+    """Rs 12,000/sq.ft under 500 sq.ft, Rs 11,000 at 500 and above."""
+
+    def test_under_500_takes_the_higher_rate(self):
+        self.assertEqual(pratishtha2.shop_rate_for(255), 12_000)
+        self.assertEqual(pratishtha2.shop_rate_for(499), 12_000)
+
+    def test_500_and_above_takes_the_lower_rate(self):
+        self.assertEqual(pratishtha2.shop_rate_for(500), 11_000)
+        self.assertEqual(pratishtha2.shop_rate_for(700), 11_000)
+
+    def test_the_band_reaches_the_price_book(self):
+        small = pratishtha2.price_book_for('A-SHOP3', sq_feet=255)
+        big = pratishtha2.price_book_for('A-SHOP1', sq_feet=700)
+        self.assertEqual(small['rate'], 12_000)
+        self.assertEqual(small['amount'], 255 * 12_000)
+        self.assertEqual(big['rate'], 11_000)
+        self.assertEqual(big['amount'], 700 * 11_000)
+
+    def test_an_explicit_rate_overrides_the_band(self):
+        """What the booking form's editable Rate field passes in."""
+        b = pratishtha2.shop_price_book('A-SHOP1', 700, rate=9_500)
+        self.assertEqual(b['rate'], 9_500)
+        self.assertEqual(b['amount'], 700 * 9_500)
+
+    def test_the_band_is_a_cliff_and_that_is_intended(self):
+        """499 sq.ft costs more than 500 — inherent to a size band, pinned so a
+        later 'fix' is a deliberate decision rather than an accident."""
+        just_under = pratishtha2.price_book_for('A-SHOP1', sq_feet=499)['amount']
+        just_over = pratishtha2.price_book_for('A-SHOP1', sq_feet=500)['amount']
+        self.assertGreater(just_under, just_over)
+
     def test_an_unrecognised_number_gets_no_book(self):
         self.assertIsNone(pratishtha2.price_book_for('random', flat_area=60))

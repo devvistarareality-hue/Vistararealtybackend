@@ -18,15 +18,53 @@ areas are per-unit data on the Plot rows (`size`, `terrace_area`).
 
 import re
 
-from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, shop_price_book
+from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 
 # Rs per sq.yd, every flat, any facing.
 FLAT_RATE = 31666.6666666667
 # Rs per sq.yd of private terrace. Units without a terrace price nothing for it.
 TERRACE_RATE = 12000
-# Shops reuse the original's rules and rate. ASSUMED: not separately confirmed for
-# Pratishtha 2 — change SHOP_RATE in pratishtha.py's terms here if it differs.
-SHOP_RATE_ASSUMED = True
+# Shops keep the original's charge rules (6% stamp on loan, 5% GST, AUDA 400/sq.ft,
+# 50% loan) but price on a size band of their own: the smaller the shop, the higher
+# the per-sq.ft rate.
+SHOP_RATE_SMALL = 12000      # Rs per sq.ft, under SHOP_SMALL_BELOW
+SHOP_RATE_LARGE = 11000      # Rs per sq.ft, at or above it
+SHOP_SMALL_BELOW = 500       # sq.ft
+
+
+def shop_rate_for(sq_feet):
+    """Rs 12,000/sq.ft under 500 sq.ft, Rs 11,000 at 500 and above."""
+    return SHOP_RATE_SMALL if float(sq_feet or 0) < SHOP_SMALL_BELOW else SHOP_RATE_LARGE
+
+
+def shop_price_book(number, sq_feet, rate=None):
+    """Price book for a Pratishtha 2 shop.
+
+    Same shape and charge rules as the original's shop_price_book, but the rate
+    comes from the size band rather than a single project-wide SHOP_RATE — and can
+    be overridden, which is what the booking form's editable Rate field passes in.
+    """
+    sq = float(sq_feet or 0)
+    rate = shop_rate_for(sq) if rate in (None, '') else float(rate)
+    amount = _r(sq * rate)
+    loan = _r(amount * SHOP_LOAN_PCT)
+    extras = {
+        'stamp_duty_reg': _r(loan * SHOP_RULES['stamp_duty_reg'][1]),
+        'gst':            _r(loan * SHOP_RULES['gst'][1]),
+        'auda':           _r(sq * SHOP_RULES['auda'][1]),
+        'maint_adv_6m':   _r(sq * 1.5 * 6),
+        'maint_dep_12m':  _r(sq * 1.5 * 12),
+        'legal':          SHOP_RULES['legal'][1],
+    }
+    total_extra = sum(extras.values())
+    return {
+        'kind': 'shop', 'unit': number,
+        'sq_feet': sq, 'rate': rate,
+        'amount': amount, 'loan_amount': loan,
+        **extras,
+        'total_extra': total_extra,
+        'grand_total': amount + total_extra,
+    }
 
 # A-1001 / E-104 / B-Shop3 — an optional block letter, then a unit number. The
 # original's price_book_for() tests n.isdigit(), so every one of these fell through
@@ -91,9 +129,7 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None):
         sq = sq_feet
         if not sq:
             return None
-        book = shop_price_book(unit, float(sq))
-        book['unit'] = str(number)      # keep the block prefix the plot is named by
-        return book
+        return shop_price_book(str(number), float(sq))
     if not flat_area:
         return None
     return flat_price_book(str(number), flat_area, terrace_area)
