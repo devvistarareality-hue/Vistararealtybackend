@@ -88,6 +88,12 @@ def shop_price_book(number, sq_feet, rate=None):
     sq = float(sq_feet or 0)
     rate = shop_rate_for(sq) if rate in (None, '') else float(rate)
     amount = _r(sq * rate)
+    # 50% is the OPENING DEFAULT, not a rule. The booking form's "Total Unit Price"
+    # field drives this: the salesperson enters a percentage of the Shop Amount (or a
+    # rupee figure), and Final Unit Price, stamp duty and GST all recompute off it —
+    # see computeShop in lib/pratishthaShop.js, which reads the stored figure back as
+    # a starting percentage via impliedUnitPct. The default matches the sheet, whose
+    # column header reads "Loan Amount(amount/2)".
     loan = _r(amount * SHOP_LOAN_PCT)
     extras = {
         'stamp_duty_reg': _r(loan * SHOP_RULES['stamp_duty_reg'][1]),
