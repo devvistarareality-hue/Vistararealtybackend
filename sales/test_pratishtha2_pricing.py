@@ -146,11 +146,30 @@ class FloorRateTests(SimpleTestCase):
         self.assertEqual(self._price('E-104', 'road')[1], 1_950_000)
         self.assertEqual(self._price('E-404', 'road')[1], 1_850_000)
 
-    def test_an_unknown_floor_gets_no_book_rather_than_a_guess(self):
-        """Floors 8-10 have no rate yet. A guessed rate would be a wrong price
-        that looks right — the same failure the price_book work exists to stop."""
+    def test_floors_8_to_10(self):
         for unit in ('E-801', 'E-901', 'E-1001'):
-            self.assertIsNone(pratishtha2.price_book_for(unit, flat_area=60), unit)
+            rate, price = self._price(unit)
+            self.assertAlmostEqual(rate, 28333.3333333333)
+            self.assertEqual(price, 1_700_000, unit)
+
+    def test_an_unknown_floor_gets_no_book_rather_than_a_guess(self):
+        """Block E runs 1-10; an 11th floor has no rate. A guessed one would be a
+        wrong price that looks right — the failure this work exists to stop."""
+        self.assertIsNone(pratishtha2.price_book_for('E-1101', flat_area=60))
+
+    def test_the_rate_steps_down_with_height(self):
+        floors = [self._price(f'E-{f}01')[0] for f in (1, 4, 8)]
+        self.assertEqual(floors, sorted(floors, reverse=True))
+
+    def test_tenth_floor_terraces_price_at_the_quoted_rate(self):
+        """Straight off the sheet's BOX PRICE column."""
+        for unit, terr, box in (('E-1001', 60, 2_420_000), ('E-1002', 86, 2_782_000),
+                                ('E-1010', 20, 1_940_000), ('E-1011', 41, 2_192_000)):
+            facing = 'road' if unit == 'E-1002' else 'garden'
+            b = pratishtha2.price_book_for(unit, flat_area=60, terrace_area=terr,
+                                           facing=facing)
+            self.assertEqual(b['terrace_price'], terr * 12_000, unit)
+            self.assertEqual(b['box_price'], box, unit)
 
     def test_floor_is_read_off_the_unit_number(self):
         self.assertEqual(pratishtha2.floor_of('104'), 1)

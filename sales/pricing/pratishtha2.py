@@ -24,12 +24,13 @@ from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 # 31,666.6667 (60 sq.yd -> 19,00,000), floors 4-7 quote 30,000 (-> 18,00,000).
 # Facing does not move the rate; it adds a lump sum (see FACING_PREMIUM).
 #
-# Floors outside this table have no rate and get NO price book rather than a
-# guessed one — same principle as a unit with no area. Add the band here when the
-# rate for those floors is known.
+# Block E runs 1-10 and every floor is listed. A floor outside this table has no
+# rate and gets NO price book rather than a guessed one — same principle as a unit
+# with no area. Add the band here when another block's rates are known.
 FLAT_RATE_BY_FLOOR = {
-    1: 31666.6666666667, 2: 31666.6666666667, 3: 31666.6666666667,
-    4: 30000, 5: 30000, 6: 30000, 7: 30000,
+    1: 31666.6666666667, 2: 31666.6666666667, 3: 31666.6666666667,   # 19,00,000
+    4: 30000, 5: 30000, 6: 30000, 7: 30000,                          # 18,00,000
+    8: 28333.3333333333, 9: 28333.3333333333, 10: 28333.3333333333,  # 17,00,000
 }
 
 
