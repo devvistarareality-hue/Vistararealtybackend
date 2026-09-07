@@ -24,6 +24,7 @@ class UnitNumberTests(SimpleTestCase):
 
 class FlatPricingTests(SimpleTestCase):
     def test_e104_matches_the_quoted_rates(self):
+        """No facing given, so no premium — the plain rate arithmetic."""
         b = pratishtha2.price_book_for('E-104', flat_area=60, terrace_area=35)
         self.assertEqual(b['flat_price'], 1_900_000)      # 60 x 31,666.6667
         self.assertEqual(b['terrace_price'], 420_000)     # 35 x 12,000
@@ -44,6 +45,43 @@ class FlatPricingTests(SimpleTestCase):
     def test_the_original_project_still_halves_its_terrace(self):
         o = pratishtha.price_book_for('101')          # 1st floor, 21 sq.yd terrace
         self.assertEqual(o['terrace_rate'], o['flat_rate'] / 2)
+
+
+class FacingPremiumTests(SimpleTestCase):
+    """Road facing adds a lump sum to the Flat Price — it is not a higher rate."""
+
+    def _book(self, facing):
+        return pratishtha2.price_book_for(
+            'E-104', flat_area=60, terrace_area=35, facing=facing)
+
+    def test_road_adds_the_premium(self):
+        b = self._book('road')
+        self.assertEqual(b['facing_premium'], 50_000)
+        self.assertEqual(b['flat_price'], 1_950_000)      # 60 x 31,666.6667 + 50,000
+        self.assertEqual(b['box_price'], 2_370_000)       # + 35 x 12,000
+
+    def test_garden_and_blank_pay_no_premium(self):
+        for facing in ('garden', '', None):
+            b = self._book(facing)
+            self.assertEqual(b['facing_premium'], 0, facing)
+            self.assertEqual(b['flat_price'], 1_900_000, facing)
+
+    def test_the_rate_itself_does_not_change_with_facing(self):
+        self.assertEqual(self._book('road')['flat_rate'],
+                         self._book('garden')['flat_rate'])
+
+    def test_the_premium_does_not_touch_the_terrace(self):
+        self.assertEqual(self._book('road')['terrace_price'],
+                         self._book('garden')['terrace_price'])
+
+    def test_facing_is_recorded_on_the_book(self):
+        self.assertEqual(self._book('road')['facing'], 'road')
+        self.assertEqual(self._book(None)['facing'], '')
+
+    def test_the_original_still_prices_facing_by_rate(self):
+        """Untouched: it charges different per-sq.yd rates, with no premium."""
+        self.assertNotEqual(pratishtha.FLAT_RATE['road'], pratishtha.FLAT_RATE['garden'])
+        self.assertNotIn('facing_premium', pratishtha.price_book_for('101'))
 
 
 class MissingAreaTests(SimpleTestCase):

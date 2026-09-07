@@ -74,6 +74,7 @@ class Command(BaseCommand):
                 flat_area=area,
                 terrace_area=_area(plot.terrace_area) or 0,
                 sq_feet=area,
+                facing=plot.facing,
             )
             if not book:
                 skipped_area += 1

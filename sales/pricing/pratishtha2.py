@@ -20,8 +20,17 @@ import re
 
 from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 
-# Rs per sq.yd, every flat, any facing.
+# Rs per sq.yd, the same for every facing.
 FLAT_RATE = 31666.6666666667
+# Facing is a flat premium on the Flat Price, NOT a different rate — the original
+# prices road and garden at different per-sq.yd rates, Pratishtha 2 adds a lump sum
+# to road-facing units instead. It lands on the Flat Price only: the terrace is
+# priced off TERRACE_RATE and is unaffected.
+FACING_PREMIUM = {'road': 50000}
+
+
+def facing_premium_for(facing):
+    return FACING_PREMIUM.get(str(facing or '').strip().lower(), 0)
 # Rs per sq.yd of private terrace. Units without a terrace price nothing for it.
 TERRACE_RATE = 12000
 # Shops keep the original's charge rules (6% stamp on loan, 5% GST, AUDA 400/sq.ft,
@@ -83,12 +92,15 @@ def parse_unit(number):
     return ((block or '').upper(), unit)
 
 
-def flat_price_book(number, flat_area, terrace_area=0, token=FLAT_TOKEN):
+def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_TOKEN,
+                    rate=None):
     """Price book for a Pratishtha 2 flat, rounded at each step like the original."""
     R = FLAT_RULES
     area = float(flat_area or 0)
     terr = float(terrace_area or 0)
-    flat_price = _r(area * FLAT_RATE)
+    flat_rate = float(rate) if rate not in (None, '') else FLAT_RATE
+    premium = facing_premium_for(facing)
+    flat_price = _r(area * flat_rate) + premium
     terrace_rate = TERRACE_RATE if terr else 0
     terrace_price = _r(terr * terrace_rate)
     box = flat_price + terrace_price
@@ -96,9 +108,15 @@ def flat_price_book(number, flat_area, terrace_area=0, token=FLAT_TOKEN):
     bank_processing = _r(loan * R['bank_processing_pct'])
     dastavej = _r((box - bank_processing) / R['dastavej_divisor'])
     return {
-        'kind': 'flat', 'unit': number,
+        # `facing` is carried the way the original's books carry it — the booking form
+        # and the LOI both surface it, and it records which rate the unit was priced on.
+        'kind': 'flat', 'unit': number, 'facing': (facing or ''),
         'flat_area': area, 'terrace_area': terr,
-        'flat_rate': FLAT_RATE, 'terrace_rate': terrace_rate,
+        # `flat_rate` is the BASE rate; `facing_premium` is the lump sum on top. Both
+        # are carried so the booking form can show the base rate as an editable field
+        # and add the premium back when it recomputes the price from it.
+        'flat_rate': flat_rate, 'terrace_rate': terrace_rate,
+        'facing_premium': premium,
         'flat_price': flat_price, 'terrace_price': terrace_price,
         'box_price': box, 'token': token, 'bank_loan': loan,
         'bank_processing': bank_processing,
@@ -109,7 +127,7 @@ def flat_price_book(number, flat_area, terrace_area=0, token=FLAT_TOKEN):
     }
 
 
-def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None):
+def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=None):
     """The price book for a Pratishtha 2 unit, or None when its areas are unknown.
 
     Shops price per sq.ft on the original's shop rules; flats per sq.yd on the rates
@@ -132,4 +150,4 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None):
         return shop_price_book(str(number), float(sq))
     if not flat_area:
         return None
-    return flat_price_book(str(number), flat_area, terrace_area)
+    return flat_price_book(str(number), flat_area, terrace_area, facing=facing)
