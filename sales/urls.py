@@ -8,6 +8,7 @@ urlpatterns = [
     path('leads/bulk-delete/',         views.BulkDeleteLeadsView.as_view()),
     path('leads/import/',              views.BulkImportLeadsView.as_view()),
     path('leads/import-template/',     views.LeadImportTemplateView.as_view()),
+    path('leads/search/',              views.LeadCompanySearchView.as_view()),
     path('leads/<int:pk>/',            views.LeadDetailView.as_view()),
     path('projects/',                  views.ProjectListView.as_view()),
     path('projects/<int:pk>/',         views.ProjectDetailView.as_view()),

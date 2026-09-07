@@ -6,7 +6,7 @@ from datetime import datetime, time as dt_time, timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Count, OuterRef, Subquery
+from django.db.models import Q, Count, OuterRef, Subquery, Case, When, Value, F
 from django.utils import timezone
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -109,11 +109,23 @@ def is_cp_manager(user):
     return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
 
 
+def is_cp_designated(user):
+    """Anyone whose designation puts them in the Channel Partner module — a CP
+    Executive (is_cp, own-records-only) or a CP-designation Manager
+    (is_cp_manager, project-scoped). Used everywhere a cp_only query param
+    would otherwise need to be sent by the caller: forces the CP-only pool
+    server-side for both tiers regardless of which page/params reach the
+    endpoint, so a CP Executive's own leads (which are CP-attributed) aren't
+    excluded by the plain Sales view's "hide CP leads" default."""
+    return is_cp(user) or is_cp_manager(user)
+
+
 def can_access_cp_module(user):
     """Who can reach the Channel Partner module: true/hard admins always can
-    (see _is_hard_admin); a CP-designation Manager gets in via their
-    designation. Mirrors web's canAccessChannelPartner(user) — keep in sync."""
-    return bool(_is_hard_admin(user) or is_cp_manager(user))
+    (see _is_hard_admin); a CP-designation Manager or CP Executive gets in via
+    their designation. Mirrors web's canAccessChannelPartner(user) — keep in
+    sync."""
+    return bool(_is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
 
 
 def cp_lead_q(prefix=''):
@@ -444,7 +456,7 @@ class StatsView(APIView):
         # regardless of which query params reach here (see is_cp_manager) —
         # the frontend's cp_only param is the normal path but not the only one
         # that can reach this view.
-        cp_only = request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user)
+        cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
         cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
         cached = cache.get(cache_key)
         if cached is not None:
@@ -900,12 +912,13 @@ class LeadListView(APIView):
         # directions: a CP-sourced lead never lands in a regular Sales view, and a
         # regular lead never leaks into the CP one. See cp_lead_q for what counts
         # as a CP lead (channel_partner FK set OR Source explicitly "Channel Partner").
-        # A CP-designation Manager is boxed into the CP pool unconditionally (see
-        # is_cp_manager) — not just when the CP module's own pages happen to send
-        # cp_only, or navigating straight to this endpoint's plain /sales/leads
-        # page would show them the whole company's non-CP leads instead.
+        # A CP-designation Manager or CP Executive is boxed into the CP pool
+        # unconditionally (see is_cp_designated) — not just when the CP
+        # module's own pages happen to send cp_only, or navigating straight to
+        # this endpoint's plain /sales/leads page would exclude their own
+        # (CP-attributed) leads entirely instead of showing them.
         if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
-                or is_cp_manager(request.user)):
+                or is_cp_designated(request.user)):
             qs = qs.exclude(cp_lead_q())
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
@@ -1014,7 +1027,7 @@ class LeadListView(APIView):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('channel_partner_id'):
             qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
-        elif request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+        elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # The Channel Partner section's "CP Leads" tab — every lead referred
             # by any channel partner, OR added via the regular Sales flow with
             # Source set to "Channel Partner" (see cp_lead_q).
@@ -1512,6 +1525,22 @@ class ProjectDetailView(APIView):
 PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
 
 
+def _release_plots(plot_ids):
+    """Release held plots back to whatever they were before the hold —
+    'resale' if pre_hold_status says so, else 'available'. Every release path
+    (self-release, expiry, discard draft, booking reject, closure cancel)
+    goes through this, so a previously-sold unit put up for resale that gets
+    tentatively held — someone testing whether it can be rebooked, or a
+    booking attempt that didn't go through — returns to resale on release
+    instead of silently losing that flag and defaulting to available."""
+    if not plot_ids:
+        return 0
+    return Plot.objects.filter(id__in=plot_ids).update(
+        status=Case(When(pre_hold_status='resale', then=Value('resale')), default=Value('available')),
+        held_by=None, held_at=None, pre_hold_status='',
+    )
+
+
 def _release_expired_holds(plots_qs):
     """Self-healing: flip stale soft-holds (a rep selected the unit on the picker but
     never submitted) back to available before reading. Only touches held_by-tracked
@@ -1533,8 +1562,7 @@ def _release_expired_holds(plots_qs):
             pinned.add(b.plot_id)
         pinned.update(b.plot_ids or [])
     to_expire = candidate_ids - pinned
-    if to_expire:
-        Plot.objects.filter(id__in=to_expire).update(status='available', held_by=None, held_at=None)
+    _release_plots(to_expire)
 
 
 class PlotListView(APIView):
@@ -1585,12 +1613,17 @@ class PlotHoldView(APIView):
                     continue
                 _release_expired_holds(Plot.objects.filter(pk=pid))
                 plot.refresh_from_db()
-                if plot.status != 'available':
+                # A 'resale' plot is a previously-sold unit an admin has put back
+                # on the market — bookable exactly like 'available', just kept
+                # visually distinct (purple, not green) so the team can tell a
+                # fresh unit from a resale one.
+                if plot.status not in ('available', 'resale'):
                     reason = 'held_by_other' if (plot.held_by_id and plot.held_by_id != request.user.id) else plot.status
                     failed.append({'id': pid, 'number': plot.number, 'reason': reason})
                     continue
+                plot.pre_hold_status = plot.status
                 plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
-                plot.save(update_fields=['status', 'held_by', 'held_at'])
+                plot.save(update_fields=['status', 'held_by', 'held_at', 'pre_hold_status'])
                 held.append(pid)
         return Response({'held': held, 'failed': failed})
 
@@ -1604,8 +1637,8 @@ class PlotReleaseView(APIView):
 
     def post(self, request):
         ids = [int(x) for x in (request.data.get('plot_ids') or []) if str(x).isdigit()]
-        n = Plot.objects.filter(pk__in=ids, held_by=request.user, status='hold') \
-                         .update(status='available', held_by=None, held_at=None)
+        mine = list(Plot.objects.filter(pk__in=ids, held_by=request.user, status='hold').values_list('id', flat=True))
+        n = _release_plots(mine)
         return Response({'released': n})
 
 
@@ -1625,6 +1658,54 @@ class LeadSourceListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         return Response(LeadSourceSerializer(ser.save(company=request.user.company)).data, status=status.HTTP_201_CREATED)
+
+
+class LeadCompanySearchView(APIView):
+    """Company-wide lead lookup by name/phone — deliberately NOT scoped to the
+    caller's own reporting tree the way LeadListView.get's default search is.
+    Its whole point is to answer "does this client already have a lead, and
+    who owns it" before someone creates a duplicate — e.g. an STM who can't
+    find a telecaller's warm-transferred-but-not-yet-distributed lead in
+    their own scoped list (scope_leads_to_role never shows a frontline role
+    the unassigned pool), so they'd otherwise add a fresh lead that silently
+    orphans that telecaller's site-visit incentive.
+
+    Read-only, minimal fields only (name/phone/status/project/owners) — no
+    remarks, budget, email, etc. Excludes CP leads, a deliberately separate
+    pool elsewhere in the app (see cp_lead_q)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_sales_access(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        search = request.query_params.get('search', '').strip()
+        if not search:
+            return Response([])
+        qs = scope_to_company(Lead.objects.all(), request.user).exclude(cp_lead_q())
+        digits = ''.join(c for c in search if c.isdigit())
+        if len(digits) >= 10 and not any(c.isalpha() for c in search):
+            qs = qs.filter(phone_key=phone_blind_index(digits[-10:]))
+        else:
+            needle = search.lower()
+            hits = [
+                pk for pk, nm, ph in qs.values_list('id', 'name', 'phone')
+                if needle in (nm or '').lower() or needle in (ph or '').lower()
+            ]
+            qs = qs.filter(id__in=hits)
+        qs = qs.select_related('telecaller', 'stm', 'project').order_by('-created_at')[:25]
+        return Response([
+            {
+                'id': l.id,
+                'name': l.name,
+                'phone': l.phone,
+                'status': l.status,
+                'project_name': l.project.name if l.project_id else '',
+                'telecaller_name': l.telecaller.name if l.telecaller_id else '',
+                'stm_name': l.stm.name if l.stm_id else '',
+                'created_at': l.created_at,
+            }
+            for l in qs
+        ])
 
 
 class BackfillDuplicatesView(APIView):
@@ -1765,7 +1846,7 @@ class FollowUpListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(FollowUpSerializer(qs, many=True).data)
 
@@ -1823,7 +1904,7 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead__company_id=cid)
         if request.query_params.get('lead_id'):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(SiteVisitSerializer(qs, many=True).data)
 
@@ -1921,7 +2002,7 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
-        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # A closure counts as CP the same way its booking does — either its
             # lead is CP-attributed (cp_lead_q) or the booking that became this
             # closure had its own free-text Source set to "Channel Partner" (see
@@ -3569,7 +3650,7 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_manager(request.user):
+        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # Reuse is_cp_booking_q (computed above), not cp_lead_q alone — a
             # booking counts as CP-sourced either through its lead OR its own
             # free-text Source field (see _is_cp_sourced_booking). Filtering on
@@ -3647,7 +3728,7 @@ class BookingListCreateView(APIView):
                 # instant.
                 with transaction.atomic():
                     for p in Plot.objects.select_for_update().filter(pk__in=requested_plot_ids):
-                        ok = p.status == 'available' or (p.status == 'hold' and p.held_by_id == request.user.id)
+                        ok = p.status in ('available', 'resale') or (p.status == 'hold' and p.held_by_id == request.user.id)
                         if not ok:
                             return Response(
                                 {'detail': f'Plot {p.number} is no longer available — it may have just been selected or booked by another salesperson.'},
@@ -3793,8 +3874,15 @@ class BookingListCreateView(APIView):
             # is still pending approval does NOT appear as a booked closure.
             # held_by/held_at are cleared here — this is now a hard hold backed by a
             # real pending Booking, not the picker's soft hold, so it never auto-expires.
+            # pre_hold_status is normally already set by PlotHoldView's earlier soft
+            # hold (left untouched here); the fallback captures it directly for a
+            # submission that skipped that step and arrived straight from
+            # available/resale.
             if pids:
-                Plot.objects.filter(id__in=pids).update(status='hold', held_by=None, held_at=None)
+                Plot.objects.filter(id__in=pids).update(
+                    pre_hold_status=Case(When(pre_hold_status='', then=F('status')), default=F('pre_hold_status')),
+                    status='hold', held_by=None, held_at=None,
+                )
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
@@ -3876,9 +3964,10 @@ class BookingDraftView(APIView):
             # the conflict instead so the frontend can warn without discarding anything.
             with transaction.atomic():
                 for plot in Plot.objects.select_for_update().filter(pk__in=pids):
-                    if plot.status == 'available':
+                    if plot.status in ('available', 'resale'):
+                        plot.pre_hold_status = plot.status
                         plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
-                        plot.save(update_fields=['status', 'held_by', 'held_at'])
+                        plot.save(update_fields=['status', 'held_by', 'held_at', 'pre_hold_status'])
                     elif not (plot.status == 'hold' and plot.held_by_id == request.user.id):
                         plot_conflicts.append({'id': plot.id, 'number': plot.number})
 
@@ -3923,8 +4012,7 @@ class BookingDiscardDraftView(APIView):
         if not _is_hard_admin(request.user) and b.stm_id not in _visible_user_ids(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-        if pids:
-            Plot.objects.filter(id__in=pids).update(status='available', held_by=None, held_at=None)
+        _release_plots(pids)
         b.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -4369,8 +4457,7 @@ class BookingActionView(APIView):
             b.save(update_fields=['status', 'approval_status', 'loi_document'])
             if not is_rev:
                 _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-                if _pids:
-                    Plot.objects.filter(id__in=_pids).update(status='available')
+                _release_plots(_pids)
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
             from notifications import notify
@@ -4504,8 +4591,7 @@ class ClosureCancelView(APIView):
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            if _pids:
-                Plot.objects.filter(id__in=_pids).update(status='available')
+            _release_plots(_pids)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
             b.save(update_fields=['status', 'approval_status', 'loi_document'])

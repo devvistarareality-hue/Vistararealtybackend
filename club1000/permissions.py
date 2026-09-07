@@ -34,3 +34,27 @@ def _scheme_approver_ids(user, company):
         s.id for s in Scheme.objects.filter(company=company).only('id', 'investor_approvers')
         if user.id in (s.investor_approvers or [])
     ]
+
+
+def _is_hard_admin(user):
+    """A real company/platform administrator, as opposed to someone who merely
+    reaches manager-level Club 1000 access via manager_modules/admin_modules —
+    mirrors sales.views._is_hard_admin exactly. Only these bypass per-scheme
+    approver scoping entirely."""
+    return bool(user.is_staff or is_platform_admin(user) or user.role == 'Admin')
+
+
+def can_approve_investor(user, scheme_id, company):
+    """Whether `user` may approve/reject an investor under `scheme_id` — mirrors
+    sales.views._can_approve_project exactly, one level down (Scheme instead of
+    Project). Being a Club 1000 manager (is_club1000_manager — broadly granted
+    module access) is NOT itself approval authority; only a real admin, or a
+    manager specifically named in that scheme's investor_approvers list, may
+    approve/reject. A scheme naming nobody is approvable only by a real admin,
+    not by every manager — same rule sales' _can_approve_project uses for an
+    unconfigured project's booking_approvers."""
+    if _is_hard_admin(user):
+        return True
+    if not scheme_id:
+        return False
+    return scheme_id in _scheme_approver_ids(user, company)

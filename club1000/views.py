@@ -11,7 +11,7 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 from sales.views import MANAGER_ROLES
-from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids
+from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor
 from .models import (
     Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
     REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
@@ -871,7 +871,8 @@ def _notify_investor_approvers(company, investor, submitter):
 
 
 class InvestorActionView(APIView):
-    """Approve / reject a pending investor (approver = a Club 1000 manager)."""
+    """Approve / reject a pending investor (approver = that scheme's configured
+    investor_approvers, or a real admin — see can_approve_investor)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -880,6 +881,15 @@ class InvestorActionView(APIView):
         investor = _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk=pk).first()
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # Enforced here and not merely by hiding the buttons in the list, or any
+        # Club 1000 manager could approve another scheme's investor straight
+        # through the API — the scheme's own investor_approvers picker (see
+        # Investor Approvers — by scheme) would otherwise be purely cosmetic.
+        if not can_approve_investor(request.user, investor.scheme_id, request.user.company):
+            return Response(
+                {'detail': 'You are not a configured approver for this scheme.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         action = request.data.get('action')
         if action not in ('approve', 'reject'):
             return Response({'detail': "action must be 'approve' or 'reject'."}, status=status.HTTP_400_BAD_REQUEST)
@@ -904,11 +914,12 @@ class InvestorActionView(APIView):
                     investor.amount_invested = Decimal(str(pr['amount_invested']))
                 if 'total_return_pct' in pr:
                     investor.total_return_pct = Decimal(str(pr['total_return_pct']))
-                for f in ('interest_payout', 'security', 'notes'):
+                for f in ('interest_payout', 'security', 'notes', 'name', 'phone'):
                     if f in pr:
                         setattr(investor, f, pr[f])
                 update_fields = [
                     'amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes',
+                    'name', 'phone', 'phone_key',
                     'loi_document', 'pending_loi_document', 'pending_revision', 'pending_revision_type',
                     'approval_status', 'updated_at',
                 ]
@@ -1033,7 +1044,11 @@ class InvestorReviseView(APIView):
             return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         pending = {}
-        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes'):
+        # name/phone are editable on a revision (unlike scheme/investment_date,
+        # which genuinely can't change without becoming a different deal) — a
+        # revision is also the natural place to fix a typo or an updated
+        # number caught after the original LOI was signed.
+        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes', 'name', 'phone'):
             if f in request.data:
                 pending[f] = request.data[f]
         try:
