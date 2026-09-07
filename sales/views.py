@@ -500,6 +500,13 @@ class StatsView(APIView):
         agg = leads_qs.aggregate(
             total_leads=Count('id'),
             new_leads=Count('id', filter=Q(status='new')),
+            # Genuinely unassigned: nobody owns it yet. `status='new'` alone is NOT
+            # this — a lead handed to a telecaller (or self-sourced by an STM) keeps
+            # status='new' until it moves warm to an STM, so counting status alone
+            # reported assigned leads as unassigned. Mirrors the distributor's own
+            # pool definition in _distribute(); keep the two in step.
+            unassigned_leads=Count('id', filter=Q(
+                status='new', telecaller__isnull=True, stm__isnull=True)),
             leads_today=Count('id', filter=Q(created_at__date=today)),
             called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
         )
@@ -666,6 +673,7 @@ class StatsView(APIView):
         payload = {
             'total_leads':        agg['total_leads'],
             'new_leads':          agg['new_leads'],
+            'unassigned_leads':   agg['unassigned_leads'],
             'leads_today':        agg['leads_today'],
             'called_count':       agg['called_count'],
             'to_call_count':      to_call_count,
@@ -1028,6 +1036,11 @@ class LeadListView(APIView):
             qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
         if request.query_params.get('stm_id'):
             qs = qs.filter(stm_id=request.query_params['stm_id'])
+        # Drill-through for the dashboard's "Unassigned" tile. `telecaller_id`/
+        # `stm_id` above only accept a concrete id, so there is no way to ask for
+        # "nobody owns this" without a dedicated flag.
+        if request.query_params.get('unassigned') == 'true':
+            qs = qs.filter(status='new', telecaller__isnull=True, stm__isnull=True)
         if request.query_params.get('is_duplicate') == 'true':
             qs = qs.filter(is_duplicate=True)
         if not skip_created_at_filter:
@@ -1137,6 +1150,17 @@ class LeadListView(APIView):
                 extra['telecaller_assigned_at'] = timezone.now()
             if ser.validated_data.get('stm'):
                 extra['stm_assigned_at'] = timezone.now()
+            # Nobody picked on the form → the creator owns it, same as the
+            # self-sourced branch above. This used to fall through to distribution,
+            # which silently drops ("skipped" in _distribute) any lead whose project
+            # has no member of the matching designation — leaving it unassigned for
+            # good. The STM slot is the right one: can_assign is only true for users
+            # who are neither telecaller nor STM nor CP (see can_assign_leads), so
+            # the creator here is an admin/manager/cluster head. Status stays empty
+            # so it lands in their "To Call" bucket, as an assigned lead already does.
+            if not ser.validated_data.get('telecaller') and not ser.validated_data.get('stm'):
+                extra['stm'] = request.user
+                extra['stm_assigned_at'] = timezone.now()
 
         lead = ser.save(
             company=company,
@@ -1182,10 +1206,13 @@ class LeadListView(APIView):
         # Notify the assignee when an admin/manager hand-picks them on create.
         if can_assign:
             from notifications import notify
-            if lead.telecaller_id:
+            # Never notify the creator about their own lead — with the fallback
+            # above they are usually the assignee, and "New Lead Assigned" for a
+            # lead you just typed in is pure noise.
+            if lead.telecaller_id and lead.telecaller_id != request.user.id:
                 notify(lead.telecaller, 'new_lead', 'New Lead Assigned',
                        f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
-            if lead.stm_id:
+            if lead.stm_id and lead.stm_id != request.user.id:
                 notify(lead.stm, 'new_lead', 'New Lead Assigned',
                        f'{lead.name} has been assigned to you.', {'lead_id': lead.id})
         # Telecaller marked the new lead "warm" → warm-transfer into the STM pipeline
@@ -2209,6 +2236,8 @@ class DistributionSettingsView(APIView):
             'stm_signin_time':  str(s.stm_signin_time)[:5],
             'stm_signout_time': str(s.stm_signout_time)[:5],
             'managers': managers,   # for the per-project booking-approver picker
+            # Real pending pools for the two "N unassigned leads" lines.
+            'pending': _distribution_pool_counts(company),
         })
 
     def put(self, request):
@@ -2460,6 +2489,67 @@ def _pending_direct_to_stm(company):
         telecaller__isnull=True, stm__isnull=True,
         project__isnull=False,
     ).exclude(project_id__in=_telecaller_project_ids(company))
+
+
+def _distribution_pool_counts(company):
+    """How many leads the next distribution run would actually pick up.
+
+    Must mirror the two querysets in _distribute() exactly — the Distribution
+    page previously showed stats' `new_leads` (every lead at status='new',
+    including ones already owned by a telecaller/STM) for the TC pool and
+    `sv_done` (completed site visits!) for the STM pool, so neither number
+    described the pool it was labelling.
+    """
+    company_leads = Lead.objects.filter(company=company)
+    tc_project_ids = _telecaller_project_ids(company)
+    tc_pool = company_leads.filter(
+        telecaller__isnull=True, stm__isnull=True, status='new',
+        project_id__in=tc_project_ids,
+    )
+    stm_pool = company_leads.filter(
+        Q(status='warm_transferred', stm__isnull=True)
+        | (Q(status='new', stm__isnull=True, telecaller__isnull=True,
+             project__isnull=False)
+           & ~Q(project_id__in=tc_project_ids))
+    )
+    return {
+        'telecaller': tc_pool.count(),
+        'stm': stm_pool.count(),
+        'blocked': _unroutable_by_project(company, tc_pool, stm_pool),
+    }
+
+
+def _unroutable_by_project(company, tc_pool, stm_pool):
+    """Leads that distribution can never place, grouped by project.
+
+    _distribute matches a lead to members assigned to its project AND holding the
+    matching designation; anything else it counts as "skipped" and moves on. On an
+    auto-run (lead created) that count is discarded, so a project with no STM on it
+    accumulates unassigned leads indefinitely with nothing surfacing it. This is the
+    structural case — who is *assigned*, not who happened to mark available today.
+    """
+    assigned = {}
+    for pid, desig in UserProjectAssignment.objects.filter(
+        user__company=company, user__is_active=True,
+    ).values_list('project_id', 'user__designation'):
+        assigned.setdefault(pid, set()).add((desig or '').upper())
+
+    out = []
+    for pool, desig in ((tc_pool, 'TELECALLER'), (stm_pool, 'STM')):
+        rows = (pool.values('project_id', 'project__name')
+                    .annotate(n=Count('id')).order_by('-n'))
+        for r in rows:
+            pid = r['project_id']
+            if pid is not None and desig in assigned.get(pid, ()):
+                continue          # someone can receive these
+            out.append({
+                'project': r['project__name'] or '(no project)',
+                'count': r['n'],
+                'needs': desig,
+                'reason': ('lead has no project' if pid is None
+                           else f'no active {desig} is assigned to this project'),
+            })
+    return sorted(out, key=lambda x: -x['count'])
 
 
 def _run_distribution(company, dist_type, triggered_by=None, gate='full'):
