@@ -37,7 +37,7 @@ class FlatPricingTests(SimpleTestCase):
         self.assertNotEqual(b['terrace_rate'], b['flat_rate'] / 2)
 
     def test_no_terrace_means_no_terrace_charge(self):
-        b = pratishtha2.price_book_for('A-1001', flat_area=84)
+        b = pratishtha2.price_book_for('A-101', flat_area=84)
         self.assertEqual(b['terrace_price'], 0)
         self.assertEqual(b['terrace_rate'], 0)
         self.assertEqual(b['box_price'], b['flat_price'])
@@ -120,6 +120,47 @@ class FinalUnitPriceTests(SimpleTestCase):
                 + o['gst'] + o['bank_processing'])
         self.assertAlmostEqual(four, o['box_price'], delta=2)
         self.assertNotIn('dastavej_divisor', o)
+
+
+class FloorRateTests(SimpleTestCase):
+    """The rate steps down with height: 31,666.6667 on floors 1-3, 30,000 on 4-7.
+    Facing does not move the rate, it adds a lump sum on top."""
+
+    def _price(self, unit, facing='garden'):
+        b = pratishtha2.price_book_for(unit, flat_area=60, facing=facing)
+        return b['flat_rate'], b['flat_price']
+
+    def test_floors_1_to_3(self):
+        for unit in ('E-101', 'E-201', 'E-301'):
+            rate, price = self._price(unit)
+            self.assertAlmostEqual(rate, 31666.6666666667)
+            self.assertEqual(price, 1_900_000, unit)
+
+    def test_floors_4_to_7(self):
+        for unit in ('E-401', 'E-501', 'E-601', 'E-701'):
+            rate, price = self._price(unit)
+            self.assertEqual(rate, 30_000)
+            self.assertEqual(price, 1_800_000, unit)
+
+    def test_the_road_premium_is_the_same_on_every_floor(self):
+        self.assertEqual(self._price('E-104', 'road')[1], 1_950_000)
+        self.assertEqual(self._price('E-404', 'road')[1], 1_850_000)
+
+    def test_an_unknown_floor_gets_no_book_rather_than_a_guess(self):
+        """Floors 8-10 have no rate yet. A guessed rate would be a wrong price
+        that looks right — the same failure the price_book work exists to stop."""
+        for unit in ('E-801', 'E-901', 'E-1001'):
+            self.assertIsNone(pratishtha2.price_book_for(unit, flat_area=60), unit)
+
+    def test_floor_is_read_off_the_unit_number(self):
+        self.assertEqual(pratishtha2.floor_of('104'), 1)
+        self.assertEqual(pratishtha2.floor_of('1001'), 10)
+        self.assertIsNone(pratishtha2.floor_of('Shop3'))
+
+    def test_an_explicit_floor_beats_the_number(self):
+        """The Plot row's own `floor` wins, so a renumbered unit still prices right."""
+        b = pratishtha2.price_book_for('E-104', flat_area=60, floor=4)
+        self.assertEqual(b['flat_rate'], 30_000)
 
 
 class MissingAreaTests(SimpleTestCase):

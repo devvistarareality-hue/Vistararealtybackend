@@ -20,8 +20,33 @@ import re
 
 from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 
-# Rs per sq.yd, the same for every facing.
-FLAT_RATE = 31666.6666666667
+# Rs per sq.yd by floor. The rate steps DOWN with height — floors 1-3 quote
+# 31,666.6667 (60 sq.yd -> 19,00,000), floors 4-7 quote 30,000 (-> 18,00,000).
+# Facing does not move the rate; it adds a lump sum (see FACING_PREMIUM).
+#
+# Floors outside this table have no rate and get NO price book rather than a
+# guessed one — same principle as a unit with no area. Add the band here when the
+# rate for those floors is known.
+FLAT_RATE_BY_FLOOR = {
+    1: 31666.6666666667, 2: 31666.6666666667, 3: 31666.6666666667,
+    4: 30000, 5: 30000, 6: 30000, 7: 30000,
+}
+
+
+def flat_rate_for(floor):
+    """Rs per sq.yd for a floor, or None when that floor's rate isn't known."""
+    try:
+        return FLAT_RATE_BY_FLOOR.get(int(floor))
+    except (TypeError, ValueError):
+        return None
+
+
+def floor_of(unit):
+    """Floor from a unit number: '104' -> 1, '1001' -> 10. None if not a flat."""
+    n = str(unit or '').strip()
+    if not n.isdigit() or len(n) < 3:
+        return None
+    return int(n[:-2])
 # Facing is a flat premium on the Flat Price, NOT a different rate — the original
 # prices road and garden at different per-sq.yd rates, Pratishtha 2 adds a lump sum
 # to road-facing units instead. It lands on the Flat Price only: the terrace is
@@ -104,7 +129,9 @@ def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_T
     R = FLAT_RULES
     area = float(flat_area or 0)
     terr = float(terrace_area or 0)
-    flat_rate = float(rate) if rate not in (None, '') else FLAT_RATE
+    if rate in (None, ''):
+        raise ValueError('flat_price_book needs a rate for %s' % number)
+    flat_rate = float(rate)
     premium = facing_premium_for(facing)
     flat_price = _r(area * flat_rate) + premium
     terrace_rate = TERRACE_RATE if terr else 0
@@ -134,7 +161,8 @@ def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_T
     }
 
 
-def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=None):
+def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=None,
+                   floor=None):
     """The price book for a Pratishtha 2 unit, or None when its areas are unknown.
 
     Shops price per sq.ft on the original's shop rules; flats per sq.yd on the rates
@@ -157,4 +185,9 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=
         return shop_price_book(str(number), float(sq))
     if not flat_area:
         return None
-    return flat_price_book(str(number), flat_area, terrace_area, facing=facing)
+    # Floor drives the rate. Prefer what the caller passes (the Plot row's own
+    # `floor`), else read it off the unit number.
+    rate = flat_rate_for(floor if floor is not None else floor_of(unit))
+    if rate is None:
+        return None
+    return flat_price_book(str(number), flat_area, terrace_area, facing=facing, rate=rate)
