@@ -200,6 +200,40 @@ class MissingAreaTests(SimpleTestCase):
         self.assertEqual(b['sq_feet'], 700)
 
 
+class GroundFloorShopTests(SimpleTestCase):
+    """Block E numbers its ground-floor shops E-1..E-16, with no 'Shop' in the
+    name — so shop-ness comes off floor 0, not the number. Figures are the sheet's
+    own columns for the six distinct sizes in the block."""
+
+    SHEET = {  # sq.ft -> (rate, amount, loan, stamp, gst, auda, m6, m12, extra, box)
+        700: (11000, 7700000, 3850000, 231000, 192500, 280000, 6300, 12600, 732400, 8432400),
+        690: (11000, 7590000, 3795000, 227700, 189750, 276000, 6210, 12420, 722080, 8312080),
+        420: (12000, 5040000, 2520000, 151200, 126000, 168000, 3780, 7560, 466540, 5506540),
+        405: (12000, 4860000, 2430000, 145800, 121500, 162000, 3645, 7290, 450235, 5310235),
+        402: (12000, 4824000, 2412000, 144720, 120600, 160800, 3618, 7236, 446974, 5270974),
+        255: (12000, 3060000, 1530000, 91800, 76500, 102000, 2295, 4590, 287185, 3347185),
+    }
+
+    def test_floor_0_is_a_shop_even_without_shop_in_the_name(self):
+        b = pratishtha2.price_book_for('E-1', sq_feet=700, floor=0)
+        self.assertEqual(b['kind'], 'shop')
+
+    def test_every_column_matches_the_sheet(self):
+        for sq, exp in self.SHEET.items():
+            b = pratishtha2.price_book_for('E-1', sq_feet=sq, floor=0)
+            got = (b['rate'], b['amount'], b['loan_amount'], b['stamp_duty_reg'],
+                   b['gst'], b['auda'], b['maint_adv_6m'], b['maint_dep_12m'],
+                   b['total_extra'], b['grand_total'])
+            self.assertEqual(got, exp, '%s sq.ft' % sq)
+
+    def test_a_shop_without_an_area_still_gets_no_book(self):
+        self.assertIsNone(pratishtha2.price_book_for('E-1', floor=0))
+
+    def test_a_flat_floor_is_not_treated_as_a_shop(self):
+        self.assertEqual(
+            pratishtha2.price_book_for('E-101', flat_area=60, floor=1)['kind'], 'flat')
+
+
 class ShopRateBandTests(SimpleTestCase):
     """Rs 12,000/sq.ft under 500 sq.ft, Rs 11,000 at 500 and above."""
 

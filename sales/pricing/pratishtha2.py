@@ -175,7 +175,13 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=
     if not parsed:
         return None
     _block, unit = parsed
-    if unit.lower().startswith('shop'):
+    # Two naming conventions in one project: blocks A-D name their shops
+    # 'A-SHOP1' / 'B-Shop3', block E numbers its ground-floor shops plainly as
+    # E-1..E-16. The name alone therefore cannot decide — floor 0 is the reliable
+    # signal, and E-1..E-16 all carry it.
+    is_shop = unit.lower().startswith('shop') or (
+        floor is not None and str(floor).strip().isdigit() and int(floor) == 0)
+    if is_shop:
         # Deliberately NO fallback to the original's SHOP_AREAS. Pratishtha 2's
         # A-SHOP1, C-Shop1 and the original's Shop1 are three different shops in
         # three different blocks; borrowing the original's floor plate would have
