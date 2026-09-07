@@ -30,8 +30,9 @@ from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 # Written as price / area so each entry reads as the quoted flat price it must
 # reproduce, and the division stays exact instead of a transcribed decimal.
 _E_BANDS = {1: 1900000 / 60, 4: 1800000 / 60, 8: 1700000 / 60}      # 60 sq.yd
-_AB_BANDS = {1: 3000000 / 84, 4: 2900000 / 84,                      # 84 sq.yd
-             8: 2800000 / 84, 11: 2700000 / 84}
+# Blocks A-D share one ladder: 84 sq.yd flats, 12 floors, identical quoted prices.
+_ABCD_BANDS = {1: 3000000 / 84, 4: 2900000 / 84,                    # 84 sq.yd
+               8: 2800000 / 84, 11: 2700000 / 84}
 
 
 def _bands(spec, top):
@@ -45,9 +46,9 @@ def _bands(spec, top):
 
 
 FLAT_RATE_BY_BLOCK = {
-    'E': _bands(_E_BANDS, 10),    # 31,666.67 / 30,000 / 28,333.33
-    'A': _bands(_AB_BANDS, 12),   # 35,714.29 / 34,523.81 / 33,333.33 / 32,142.86
-    'B': _bands(_AB_BANDS, 12),
+    'E': _bands(_E_BANDS, 10),      # 31,666.67 / 30,000 / 28,333.33
+    # 35,714.29 / 34,523.81 / 33,333.33 / 32,142.86
+    **{b: _bands(_ABCD_BANDS, 12) for b in ('A', 'B', 'C', 'D')},
 }
 # Fallback for a number that reaches this module without a block letter.
 FLAT_RATE_BY_FLOOR = FLAT_RATE_BY_BLOCK['E']
@@ -73,11 +74,10 @@ def floor_of(unit):
 # to road-facing units instead. It lands on the Flat Price only: the terrace is
 # priced off TERRACE_RATE and is unaffected.
 FACING_PREMIUM = {'road': 50000}
-# Blocks A and B double the premium on their top two floors — 27,00,000 garden
-# against 28,00,000 road on floors 11-12, where every other band differs by 50,000.
+# Blocks A-D double the premium on their top two floors — 27,00,000 garden against
+# 28,00,000 road on floors 11-12, where every other band differs by 50,000.
 PREMIUM_BY_BLOCK_FLOOR = {
-    ('A', 11): 100000, ('A', 12): 100000,
-    ('B', 11): 100000, ('B', 12): 100000,
+    (b, f): 100000 for b in ('A', 'B', 'C', 'D') for f in (11, 12)
 }
 # The original divides by 1.07 to strip the 7% (6% stamp + 1% GST) back out of an
 # all-inclusive box price. Pratishtha 2's Final Unit Price is Box Price - Bank
