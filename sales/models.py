@@ -179,6 +179,14 @@ class Plot(models.Model):
     # and for a hard hold backed by an actual pending Booking, so neither ever auto-expires.
     held_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='held_plots')
     held_at = models.DateTimeField(null=True, blank=True)
+    # What `status` was immediately before this plot entered 'hold' — so releasing
+    # it (self-release, expiry, discard draft, reject, cancel) can restore that
+    # instead of always defaulting to 'available'. Matters specifically for a
+    # 'resale' unit: someone testing whether it can be rebooked, or a booking
+    # attempt that didn't go through, used to leave it stuck on 'available'
+    # afterward, silently losing the resale flag. Blank for a plot that's never
+    # been held, or whose hold predates this field.
+    pre_hold_status = models.CharField(max_length=20, blank=True)
     size = models.CharField(max_length=100, blank=True)
     construction_area = models.CharField(max_length=100, blank=True)  # sq.ft; auto-maps into booking
     cluster_type = models.CharField(max_length=100, blank=True)
