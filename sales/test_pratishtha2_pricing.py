@@ -84,6 +84,44 @@ class FacingPremiumTests(SimpleTestCase):
         self.assertNotIn('facing_premium', pratishtha.price_book_for('101'))
 
 
+class FinalUnitPriceTests(SimpleTestCase):
+    """Pratishtha 2 has no 1.07 divisor: Final Unit Price = Box Price - Bank
+    Processing. The Box Price stays the total the customer pays — stamp duty and GST
+    are sale-deed figures inside it, not charges added on top."""
+
+    def _book(self):
+        return pratishtha2.price_book_for(
+            'E-104', flat_area=60, terrace_area=35, facing='road')
+
+    def test_final_unit_price_is_box_minus_processing(self):
+        b = self._book()
+        self.assertEqual(b['dastavej_value'], b['box_price'] - b['bank_processing'])
+        self.assertEqual(b['dastavej_value'], 2_263_845)
+
+    def test_no_divisor_is_recorded_on_the_book(self):
+        self.assertEqual(self._book()['dastavej_divisor'], 1)
+
+    def test_the_box_price_remains_the_total(self):
+        b = self._book()
+        self.assertEqual(b['total'], b['box_price'])
+        self.assertEqual(b['total'], 2_370_000)
+
+    def test_the_rows_deliberately_do_not_sum_to_the_total(self):
+        """They did under 1.07. They no longer do, and that is correct — pinned so
+        nobody 'repairs' it back into an all-inclusive breakdown."""
+        b = self._book()
+        four = (b['dastavej_value'] + b['stamp_duty_reg']
+                + b['gst'] + b['bank_processing'])
+        self.assertGreater(four, b['box_price'])
+
+    def test_the_original_still_divides_by_107(self):
+        o = pratishtha.price_book_for('101')
+        four = (o['dastavej_value'] + o['stamp_duty_reg']
+                + o['gst'] + o['bank_processing'])
+        self.assertAlmostEqual(four, o['box_price'], delta=2)
+        self.assertNotIn('dastavej_divisor', o)
+
+
 class MissingAreaTests(SimpleTestCase):
     def test_a_flat_with_no_area_gets_no_book(self):
         """Never a zero-priced book — that is the failure being prevented."""

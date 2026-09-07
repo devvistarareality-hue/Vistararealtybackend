@@ -27,6 +27,12 @@ FLAT_RATE = 31666.6666666667
 # to road-facing units instead. It lands on the Flat Price only: the terrace is
 # priced off TERRACE_RATE and is unaffected.
 FACING_PREMIUM = {'road': 50000}
+# The original divides by 1.07 to strip the 7% (6% stamp + 1% GST) back out of an
+# all-inclusive box price. Pratishtha 2's Final Unit Price is Box Price - Bank
+# Processing flat, so there is no divisor. The Box Price remains the total the
+# customer pays: stamp duty and GST are sale-deed figures already inside it, not
+# charges added on top — which is why the four rows no longer sum to it.
+DASTAVEJ_DIVISOR = 1
 
 
 def facing_premium_for(facing):
@@ -106,7 +112,7 @@ def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_T
     box = flat_price + terrace_price
     loan = box - token
     bank_processing = _r(loan * R['bank_processing_pct'])
-    dastavej = _r((box - bank_processing) / R['dastavej_divisor'])
+    dastavej = _r((box - bank_processing) / DASTAVEJ_DIVISOR)
     return {
         # `facing` is carried the way the original's books carry it — the booking form
         # and the LOI both surface it, and it records which rate the unit was priced on.
@@ -117,6 +123,7 @@ def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_T
         # and add the premium back when it recomputes the price from it.
         'flat_rate': flat_rate, 'terrace_rate': terrace_rate,
         'facing_premium': premium,
+        'dastavej_divisor': DASTAVEJ_DIVISOR,
         'flat_price': flat_price, 'terrace_price': terrace_price,
         'box_price': box, 'token': token, 'bank_loan': loan,
         'bank_processing': bank_processing,
