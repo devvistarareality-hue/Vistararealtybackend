@@ -182,6 +182,58 @@ class FloorRateTests(SimpleTestCase):
         self.assertEqual(b['flat_rate'], 30_000)
 
 
+class BlockABTests(SimpleTestCase):
+    """Blocks A and B: 84 sq.yd flats over 12 floors, on their own rate ladder —
+    and a road premium that doubles on the top two floors."""
+
+    BANDS = {1: (3000000, 3050000), 2: (3000000, 3050000), 3: (3000000, 3050000),
+             4: (2900000, 2950000), 5: (2900000, 2950000), 6: (2900000, 2950000),
+             7: (2900000, 2950000), 8: (2800000, 2850000), 9: (2800000, 2850000),
+             10: (2800000, 2850000), 11: (2700000, 2800000), 12: (2700000, 2800000)}
+
+    def test_every_floor_matches_the_sheet(self):
+        for block in ('A', 'B'):
+            for floor, (garden, road) in self.BANDS.items():
+                for facing, expected in (('garden', garden), ('road', road)):
+                    b = pratishtha2.price_book_for(
+                        '%s-%d01' % (block, floor), flat_area=84,
+                        facing=facing, floor=floor)
+                    self.assertEqual(b['flat_price'], expected,
+                                     '%s floor %d %s' % (block, floor, facing))
+
+    def test_the_premium_doubles_on_floors_11_and_12(self):
+        for floor, expected in ((10, 50_000), (11, 100_000), (12, 100_000)):
+            b = pratishtha2.price_book_for('A-%d02' % floor, flat_area=84,
+                                           facing='road', floor=floor)
+            self.assertEqual(b['facing_premium'], expected, 'floor %d' % floor)
+
+    def test_block_e_keeps_its_own_ladder(self):
+        """A and B must not have moved E's rates."""
+        for unit, floor, price in (('E-101', 1, 1_900_000), ('E-401', 4, 1_800_000),
+                                   ('E-801', 8, 1_700_000)):
+            b = pratishtha2.price_book_for(unit, flat_area=60, facing='garden',
+                                           floor=floor)
+            self.assertEqual(b['flat_price'], price, unit)
+
+    def test_e_keeps_the_flat_50k_premium_on_every_floor(self):
+        for floor in (1, 8, 10):
+            b = pratishtha2.price_book_for('E-%d04' % floor, flat_area=60,
+                                           facing='road', floor=floor)
+            self.assertEqual(b['facing_premium'], 50_000)
+
+    def test_a_floor_above_the_block_gets_no_book(self):
+        self.assertIsNone(pratishtha2.price_book_for('A-1301', flat_area=84, floor=13))
+        self.assertIsNone(pratishtha2.price_book_for('E-1101', flat_area=60, floor=11))
+
+    def test_floor_1_terraces_price_at_the_quoted_rate(self):
+        for unit, terr, price in (('A-105', 55, 660_000), ('A-102', 30, 360_000),
+                                  ('A-106', 25, 300_000), ('B-103', 55, 660_000)):
+            b = pratishtha2.price_book_for(unit, flat_area=84, terrace_area=terr,
+                                           facing='road' if unit != 'A-106' else 'garden',
+                                           floor=1)
+            self.assertEqual(b['terrace_price'], price, unit)
+
+
 class MissingAreaTests(SimpleTestCase):
     def test_a_flat_with_no_area_gets_no_book(self):
         """Never a zero-priced book — that is the failure being prevented."""

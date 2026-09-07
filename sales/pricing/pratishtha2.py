@@ -27,17 +27,37 @@ from .pratishtha import _r, FLAT_RULES, FLAT_TOKEN, SHOP_LOAN_PCT, SHOP_RULES
 # Block E runs 1-10 and every floor is listed. A floor outside this table has no
 # rate and gets NO price book rather than a guessed one — same principle as a unit
 # with no area. Add the band here when another block's rates are known.
-FLAT_RATE_BY_FLOOR = {
-    1: 31666.6666666667, 2: 31666.6666666667, 3: 31666.6666666667,   # 19,00,000
-    4: 30000, 5: 30000, 6: 30000, 7: 30000,                          # 18,00,000
-    8: 28333.3333333333, 9: 28333.3333333333, 10: 28333.3333333333,  # 17,00,000
+# Written as price / area so each entry reads as the quoted flat price it must
+# reproduce, and the division stays exact instead of a transcribed decimal.
+_E_BANDS = {1: 1900000 / 60, 4: 1800000 / 60, 8: 1700000 / 60}      # 60 sq.yd
+_AB_BANDS = {1: 3000000 / 84, 4: 2900000 / 84,                      # 84 sq.yd
+             8: 2800000 / 84, 11: 2700000 / 84}
+
+
+def _bands(spec, top):
+    """{1: r, 4: r2} -> a rate for every floor up to `top`, each band running on
+    until the next one starts."""
+    out, cur = {}, None
+    for f in range(1, top + 1):
+        cur = spec.get(f, cur)
+        out[f] = cur
+    return out
+
+
+FLAT_RATE_BY_BLOCK = {
+    'E': _bands(_E_BANDS, 10),    # 31,666.67 / 30,000 / 28,333.33
+    'A': _bands(_AB_BANDS, 12),   # 35,714.29 / 34,523.81 / 33,333.33 / 32,142.86
+    'B': _bands(_AB_BANDS, 12),
 }
+# Fallback for a number that reaches this module without a block letter.
+FLAT_RATE_BY_FLOOR = FLAT_RATE_BY_BLOCK['E']
 
 
-def flat_rate_for(floor):
-    """Rs per sq.yd for a floor, or None when that floor's rate isn't known."""
+def flat_rate_for(floor, block=None):
+    """Rs per sq.yd for a block's floor, or None when that rate isn't known."""
+    table = FLAT_RATE_BY_BLOCK.get((block or '').strip().upper(), FLAT_RATE_BY_FLOOR)
     try:
-        return FLAT_RATE_BY_FLOOR.get(int(floor))
+        return table.get(int(floor))
     except (TypeError, ValueError):
         return None
 
@@ -53,6 +73,12 @@ def floor_of(unit):
 # to road-facing units instead. It lands on the Flat Price only: the terrace is
 # priced off TERRACE_RATE and is unaffected.
 FACING_PREMIUM = {'road': 50000}
+# Blocks A and B double the premium on their top two floors — 27,00,000 garden
+# against 28,00,000 road on floors 11-12, where every other band differs by 50,000.
+PREMIUM_BY_BLOCK_FLOOR = {
+    ('A', 11): 100000, ('A', 12): 100000,
+    ('B', 11): 100000, ('B', 12): 100000,
+}
 # The original divides by 1.07 to strip the 7% (6% stamp + 1% GST) back out of an
 # all-inclusive box price. Pratishtha 2's Final Unit Price is Box Price - Bank
 # Processing flat, so there is no divisor. The Box Price remains the total the
@@ -61,8 +87,14 @@ FACING_PREMIUM = {'road': 50000}
 DASTAVEJ_DIVISOR = 1
 
 
-def facing_premium_for(facing):
-    return FACING_PREMIUM.get(str(facing or '').strip().lower(), 0)
+def facing_premium_for(facing, block=None, floor=None):
+    if str(facing or '').strip().lower() != 'road':
+        return 0
+    try:
+        key = ((block or '').strip().upper(), int(floor))
+    except (TypeError, ValueError):
+        key = None
+    return PREMIUM_BY_BLOCK_FLOOR.get(key, FACING_PREMIUM['road'])
 # Rs per sq.yd of private terrace. Units without a terrace price nothing for it.
 TERRACE_RATE = 12000
 # Shops keep the original's charge rules (6% stamp on loan, 5% GST, AUDA 400/sq.ft,
@@ -131,7 +163,7 @@ def parse_unit(number):
 
 
 def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_TOKEN,
-                    rate=None):
+                    rate=None, block=None, floor=None):
     """Price book for a Pratishtha 2 flat, rounded at each step like the original."""
     R = FLAT_RULES
     area = float(flat_area or 0)
@@ -139,7 +171,7 @@ def flat_price_book(number, flat_area, terrace_area=0, facing=None, token=FLAT_T
     if rate in (None, ''):
         raise ValueError('flat_price_book needs a rate for %s' % number)
     flat_rate = float(rate)
-    premium = facing_premium_for(facing)
+    premium = facing_premium_for(facing, block, floor)
     flat_price = _r(area * flat_rate) + premium
     terrace_rate = TERRACE_RATE if terr else 0
     terrace_price = _r(terr * terrace_rate)
@@ -200,7 +232,9 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=
         return None
     # Floor drives the rate. Prefer what the caller passes (the Plot row's own
     # `floor`), else read it off the unit number.
-    rate = flat_rate_for(floor if floor is not None else floor_of(unit))
+    fl = floor if floor is not None else floor_of(unit)
+    rate = flat_rate_for(fl, _block)
     if rate is None:
         return None
-    return flat_price_book(str(number), flat_area, terrace_area, facing=facing, rate=rate)
+    return flat_price_book(str(number), flat_area, terrace_area, facing=facing,
+                           rate=rate, block=_block, floor=fl)
