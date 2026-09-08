@@ -105,11 +105,12 @@ SHOP_RATE_LARGE = 11000      # Rs per sq.ft, at or above it
 SHOP_SMALL_BELOW = 500       # sq.ft
 
 
-# C and D share one run of ground-floor shops — C-Shop1..10 and D-SHOP11..24 are
-# RERA 1..24 of a single parade — so the paperwork names them "C&D Shop N" rather
-# than by the block their plot record happens to sit in. Pratishtha 2 only; block E
-# numbers its own shops E-1..E-16 and is not paired with anything.
-SHOP_BLOCK_PAIR = {'C': 'C&D', 'D': 'C&D'}
+# The ground-floor shops run as two parades, each numbered 1..24 continuously across
+# a pair of blocks: A-SHOP1..10 with B-Shop11..24, and C-Shop1..10 with D-SHOP11..24.
+# The paperwork names them by the parade ("A&B Shop 3"), not by the block whose plot
+# record happens to hold them. Pratishtha 2 only; block E numbers its own shops
+# E-1..E-16 and is not paired with anything.
+SHOP_BLOCK_PAIR = {'A': 'A&B', 'B': 'A&B', 'C': 'C&D', 'D': 'C&D'}
 
 
 def shop_display_name(number):

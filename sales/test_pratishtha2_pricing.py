@@ -302,21 +302,28 @@ class CombinedShopNameTests(SimpleTestCase):
     D-SHOP11..24 are RERA 1..24 of the same run — so the paperwork names them
     "C&D Shop N" rather than by the block their plot record sits in."""
 
-    def test_c_and_d_shops_get_the_combined_name(self):
-        self.assertEqual(pratishtha2.shop_display_name('C-Shop1'), 'C&D Shop 1')
-        self.assertEqual(pratishtha2.shop_display_name('C-Shop10'), 'C&D Shop 10')
-        self.assertEqual(pratishtha2.shop_display_name('D-SHOP11'), 'C&D Shop 11')
-        self.assertEqual(pratishtha2.shop_display_name('D-SHOP24'), 'C&D Shop 24')
+    def test_each_parade_gets_its_combined_name(self):
+        for plot, expected in (
+                ('A-SHOP1', 'A&B Shop 1'), ('A-SHOP10', 'A&B Shop 10'),
+                ('B-Shop11', 'A&B Shop 11'), ('B-Shop24', 'A&B Shop 24'),
+                ('C-Shop1', 'C&D Shop 1'), ('C-Shop10', 'C&D Shop 10'),
+                ('D-SHOP11', 'C&D Shop 11'), ('D-SHOP24', 'C&D Shop 24')):
+            self.assertEqual(pratishtha2.shop_display_name(plot), expected, plot)
+
+    def test_the_two_parades_never_collide(self):
+        """Both run 1..24, so the parade prefix is the only thing telling A&B Shop 3
+        apart from C&D Shop 3."""
+        self.assertNotEqual(pratishtha2.shop_display_name('A-SHOP3'),
+                            pratishtha2.shop_display_name('C-Shop3'))
 
     def test_the_name_reaches_the_price_book(self):
         b = pratishtha2.price_book_for('D-SHOP17', sq_feet=325, floor=0)
         self.assertEqual(b['display_unit'], 'C&D Shop 17')
         self.assertEqual(b['unit'], 'D-SHOP17', 'unit must stay the plot number')
 
-    def test_unpaired_blocks_get_no_combined_name(self):
-        """E numbers its own shops and is not paired; A and B are not paired yet."""
+    def test_block_e_is_unpaired(self):
+        """E numbers its own shops E-1..E-16 and belongs to no parade."""
         self.assertIsNone(pratishtha2.shop_display_name('E-1'))
-        self.assertIsNone(pratishtha2.shop_display_name('A-SHOP1'))
         self.assertNotIn('display_unit',
                          pratishtha2.price_book_for('E-1', sq_feet=700, floor=0))
 
