@@ -105,6 +105,25 @@ SHOP_RATE_LARGE = 11000      # Rs per sq.ft, at or above it
 SHOP_SMALL_BELOW = 500       # sq.ft
 
 
+# C and D share one run of ground-floor shops — C-Shop1..10 and D-SHOP11..24 are
+# RERA 1..24 of a single parade — so the paperwork names them "C&D Shop N" rather
+# than by the block their plot record happens to sit in. Pratishtha 2 only; block E
+# numbers its own shops E-1..E-16 and is not paired with anything.
+SHOP_BLOCK_PAIR = {'C': 'C&D', 'D': 'C&D'}
+
+
+def shop_display_name(number):
+    """'C-Shop3' -> 'C&D Shop 3'. None when the block isn't part of a pair."""
+    parsed = parse_unit(number)
+    if not parsed:
+        return None
+    block, unit = parsed
+    pair = SHOP_BLOCK_PAIR.get(block)
+    if not pair or not unit.lower().startswith('shop'):
+        return None
+    return '%s Shop %s' % (pair, unit[4:])
+
+
 def shop_rate_for(sq_feet):
     """Rs 12,000/sq.ft under 500 sq.ft, Rs 11,000 at 500 and above."""
     return SHOP_RATE_SMALL if float(sq_feet or 0) < SHOP_SMALL_BELOW else SHOP_RATE_LARGE
@@ -227,7 +246,13 @@ def price_book_for(number, flat_area=None, terrace_area=0, sq_feet=None, facing=
         sq = sq_feet
         if not sq:
             return None
-        return shop_price_book(str(number), float(sq))
+        book = shop_price_book(str(number), float(sq))
+        display = shop_display_name(number)
+        if display:
+            # `unit` stays the plot number so edits key off something stable;
+            # `display_unit` is what the form and the LOI print.
+            book['display_unit'] = display
+        return book
     if not flat_area:
         return None
     # Floor drives the rate. Prefer what the caller passes (the Plot row's own

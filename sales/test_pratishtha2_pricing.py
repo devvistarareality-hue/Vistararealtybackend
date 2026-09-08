@@ -297,6 +297,33 @@ class GroundFloorShopTests(SimpleTestCase):
             pratishtha2.price_book_for('E-101', flat_area=60, floor=1)['kind'], 'flat')
 
 
+class CombinedShopNameTests(SimpleTestCase):
+    """C and D share one parade of ground-floor shops — C-Shop1..10 and
+    D-SHOP11..24 are RERA 1..24 of the same run — so the paperwork names them
+    "C&D Shop N" rather than by the block their plot record sits in."""
+
+    def test_c_and_d_shops_get_the_combined_name(self):
+        self.assertEqual(pratishtha2.shop_display_name('C-Shop1'), 'C&D Shop 1')
+        self.assertEqual(pratishtha2.shop_display_name('C-Shop10'), 'C&D Shop 10')
+        self.assertEqual(pratishtha2.shop_display_name('D-SHOP11'), 'C&D Shop 11')
+        self.assertEqual(pratishtha2.shop_display_name('D-SHOP24'), 'C&D Shop 24')
+
+    def test_the_name_reaches_the_price_book(self):
+        b = pratishtha2.price_book_for('D-SHOP17', sq_feet=325, floor=0)
+        self.assertEqual(b['display_unit'], 'C&D Shop 17')
+        self.assertEqual(b['unit'], 'D-SHOP17', 'unit must stay the plot number')
+
+    def test_unpaired_blocks_get_no_combined_name(self):
+        """E numbers its own shops and is not paired; A and B are not paired yet."""
+        self.assertIsNone(pratishtha2.shop_display_name('E-1'))
+        self.assertIsNone(pratishtha2.shop_display_name('A-SHOP1'))
+        self.assertNotIn('display_unit',
+                         pratishtha2.price_book_for('E-1', sq_feet=700, floor=0))
+
+    def test_a_flat_never_gets_a_shop_name(self):
+        self.assertIsNone(pratishtha2.shop_display_name('C-101'))
+
+
 class ShopRateBandTests(SimpleTestCase):
     """Rs 12,000/sq.ft under 500 sq.ft, Rs 11,000 at 500 and above."""
 
