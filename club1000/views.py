@@ -12,7 +12,7 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 from sales.views import MANAGER_ROLES
-from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor
+from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor, can_configure_scheme_approvers
 from .models import (
     Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
     REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
@@ -128,6 +128,11 @@ class SchemeDetailView(APIView):
     def patch(self, request, pk):
         if not is_club1000_manager(request.user):
             return _no_permission()
+        # investor_approvers specifically needs the narrower config-admin check
+        # (Director/real admin) — everything else on a scheme stays editable by
+        # any Club 1000 manager, same as before.
+        if 'investor_approvers' in request.data and not can_configure_scheme_approvers(request.user):
+            return _no_permission()
         scheme = self._get(request, pk)
         if not scheme:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -167,7 +172,7 @@ class SchemeToggleApproverView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if not is_club1000_manager(request.user):
+        if not can_configure_scheme_approvers(request.user):
             return _no_permission()
         manager_id = request.data.get('manager_id')
         if not manager_id:
