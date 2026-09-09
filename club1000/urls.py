@@ -6,6 +6,7 @@ urlpatterns = [
     path('users/',                    views.Club1000UsersView.as_view()),
     path('schemes/',                  views.SchemeListCreateView.as_view()),
     path('schemes/<int:pk>/',         views.SchemeDetailView.as_view()),
+    path('schemes/<int:pk>/toggle-approver/', views.SchemeToggleApproverView.as_view()),
     path('investors/references/',     views.ReferenceSuggestionsView.as_view()),
     path('investors/next-loi-no/',    views.InvestorNextLoiNoView.as_view()),
     path('investors/',                views.InvestorListCreateView.as_view()),
