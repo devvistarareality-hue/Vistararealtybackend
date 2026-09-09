@@ -257,6 +257,7 @@ class ChannelPartner(models.Model):
     firm_name = models.CharField(max_length=150, blank=True)
     category = models.CharField(max_length=10, choices=CP_CATEGORY, default='normal')
     segment = models.CharField(max_length=15, choices=CP_SEGMENT, blank=True)
+    city = models.CharField(max_length=100, blank=True)
     area = models.CharField(max_length=200, blank=True)
     is_active = models.BooleanField(default=True)
     created_by = models.ForeignKey(

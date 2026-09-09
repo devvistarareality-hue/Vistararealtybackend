@@ -18,7 +18,7 @@ class ChannelPartnerSerializer(serializers.ModelSerializer):
         model = ChannelPartner
         fields = [
             'id', 'company_id', 'name', 'contact_no', 'firm_name', 'category', 'segment',
-            'area', 'is_active', 'created_by', 'created_at', 'updated_at', 'lead_count',
+            'city', 'area', 'is_active', 'created_by', 'created_at', 'updated_at', 'lead_count',
         ]
         read_only_fields = ['company_id', 'created_by', 'created_at', 'updated_at']
 
