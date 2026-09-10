@@ -464,15 +464,23 @@ class StatsView(APIView):
 
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
+        # Used below to exempt a CP lead handed off to a regular Sales STM/
+        # telecaller from the CP/non-CP split — see the comment on leads_qs.
+        own_ids = _visible_user_ids(request.user)
 
         # Channel Partner leads have their own module and dashboard — the main
         # Sales dashboard's counts never include them, and the CP dashboard's
         # counts are ONLY them (see LeadListView for the matching All Leads
-        # behaviour, and cp_lead_q for what counts as a CP lead).
+        # behaviour, and cp_lead_q for what counts as a CP lead). Same ownership
+        # exception as LeadListView: a CP lead handed off to a regular Sales
+        # STM/telecaller counts in THEIR dashboard once it's theirs to work —
+        # otherwise a transferred lead vanished from both the CP dashboard (no
+        # longer CP-owned) and the Sales one (blanket-excluded), stranding it
+        # nowhere and leaving "To Call" undercounted for the person who has it.
         if cp_only:
             leads_qs = leads_qs.filter(cp_lead_q())
         else:
-            leads_qs = leads_qs.exclude(cp_lead_q())
+            leads_qs = leads_qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
 
         # Telecallers / STMs only see stats for leads assigned to them.
         leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
@@ -583,8 +591,9 @@ class StatsView(APIView):
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
             cl_qs = cl_qs.filter(cp_lead_q(prefix='lead__'))
         else:
-            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__'))
-            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__'))
+            # Same ownership exception as leads_qs above.
+            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
+            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -917,9 +926,18 @@ class LeadListView(APIView):
         # module's own pages happen to send cp_only, or navigating straight to
         # this endpoint's plain /sales/leads page would exclude their own
         # (CP-attributed) leads entirely instead of showing them.
+        #
+        # Exception: a CP lead handed off to a regular Sales STM/telecaller (the
+        # CP Cluster Head's "Assign STM") stops being CP-exclusive the moment it's
+        # theirs to work — the blanket exclude used to hide it from that very
+        # person (and their manager) even though scope_leads_to_role below would
+        # otherwise show it, since ownership is what actually governs visibility.
+        # Only exempts leads owned by the viewer or their own reporting chain, not
+        # every CP lead in the company — the pool stays disjoint for everyone else.
         if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
                 or is_cp_designated(request.user)):
-            qs = qs.exclude(cp_lead_q())
+            own_ids = _visible_user_ids(request.user)
+            qs = qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
         # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
@@ -1145,11 +1163,27 @@ class LeadListView(APIView):
                     extra['telecaller_status'] = 'callback'
         else:
             # Admin/manager assigned via the form → stamp assignment time. Status is
-            # left empty so the lead lands in the assignee's "To Call" bucket.
-            if ser.validated_data.get('telecaller'):
+            # left empty so the lead lands in the assignee's "To Call" bucket — a
+            # status/remarks typed alongside an assignment to someone ELSE is the
+            # assigner's own note, not that person's call outcome (they haven't
+            # called yet), so it's dropped here rather than silently landing the
+            # lead in their "Called" bucket before they've done anything. E.g. a CP
+            # Cluster Head creating a lead, assigning it straight to an STM, and
+            # jotting "seems warm" as they do it used to make it look like the STM
+            # had already called. Same reset LeadDetailView.patch does when an
+            # EXISTING lead is later reassigned to someone else.
+            picked_telecaller = ser.validated_data.get('telecaller')
+            picked_stm = ser.validated_data.get('stm')
+            if picked_telecaller:
                 extra['telecaller_assigned_at'] = timezone.now()
-            if ser.validated_data.get('stm'):
+                if picked_telecaller.id != request.user.id:
+                    extra['telecaller_status'] = ''
+                    extra['telecaller_remarks'] = ''
+            if picked_stm:
                 extra['stm_assigned_at'] = timezone.now()
+                if picked_stm.id != request.user.id:
+                    extra['stm_status'] = ''
+                    extra['stm_remarks'] = ''
             # Nobody picked on the form → the creator owns it, same as the
             # self-sourced branch above. This used to fall through to distribution,
             # which silently drops ("skipped" in _distribute) any lead whose project
@@ -1158,7 +1192,7 @@ class LeadListView(APIView):
             # who are neither telecaller nor STM nor CP (see can_assign_leads), so
             # the creator here is an admin/manager/cluster head. Status stays empty
             # so it lands in their "To Call" bucket, as an assigned lead already does.
-            if not ser.validated_data.get('telecaller') and not ser.validated_data.get('stm'):
+            if not picked_telecaller and not picked_stm:
                 extra['stm'] = request.user
                 extra['stm_assigned_at'] = timezone.now()
 
@@ -1316,6 +1350,24 @@ class LeadDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
+
+        # Handing a lead to a different STM starts their work fresh — the new owner
+        # hasn't called them yet, so their own stm_status/remarks can't legitimately
+        # carry over from whoever had it before (or from whatever the person doing
+        # the reassigning typed in the same form, which is THEIR note, not the new
+        # owner's call outcome). Without this a reassigned lead kept its old status
+        # and landed straight in the new STM's "Called" bucket (see LeadListView's
+        # work=pending/called split, keyed on stm_status=='') even though they
+        # hadn't touched it — exactly what CREATING a lead and assigning it already
+        # avoids (LeadListView.post leaves stm_status empty on purpose so it lands
+        # in the assignee's "To Call" bucket); this brings reassignment via PATCH
+        # in line with that. Only fires on an actual change of owner, not every
+        # save, and not when stm is being cleared back to nobody.
+        if old_stm_id != lead.stm_id and lead.stm_id:
+            lead.stm_status = ''
+            lead.stm_remarks = ''
+            lead.status = 'assigned'
+            lead.save(update_fields=['stm_status', 'stm_remarks', 'status'])
 
         # A lead is "warm" when EITHER the telecaller sets TC Status = warm OR the
         # overall status is set to warm_transferred. Keep both in sync so the TC Status
@@ -1671,8 +1723,12 @@ class LeadCompanySearchView(APIView):
     orphans that telecaller's site-visit incentive.
 
     Read-only, minimal fields only (name/phone/status/project/owners) — no
-    remarks, budget, email, etc. Excludes CP leads, a deliberately separate
-    pool elsewhere in the app (see cp_lead_q)."""
+    remarks, budget, email, etc. Deliberately INCLUDES Channel Partner leads
+    despite that pool being kept separate everywhere else (see cp_lead_q) —
+    a duplicate can just as easily already exist as a CP lead, and this
+    view's entire purpose is catching that before someone adds a fresh one;
+    excluding CP leads defeated it. Each result is flagged is_cp so the
+    caller can show it's a CP lead rather than a regular Sales one."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1681,7 +1737,7 @@ class LeadCompanySearchView(APIView):
         search = request.query_params.get('search', '').strip()
         if not search:
             return Response([])
-        qs = scope_to_company(Lead.objects.all(), request.user).exclude(cp_lead_q())
+        qs = scope_to_company(Lead.objects.all(), request.user)
         digits = ''.join(c for c in search if c.isdigit())
         if len(digits) >= 10 and not any(c.isalpha() for c in search):
             qs = qs.filter(phone_key=phone_blind_index(digits[-10:]))
@@ -1692,7 +1748,7 @@ class LeadCompanySearchView(APIView):
                 if needle in (nm or '').lower() or needle in (ph or '').lower()
             ]
             qs = qs.filter(id__in=hits)
-        qs = qs.select_related('telecaller', 'stm', 'project').order_by('-created_at')[:25]
+        qs = qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner').order_by('-created_at')[:25]
         return Response([
             {
                 'id': l.id,
@@ -1703,6 +1759,8 @@ class LeadCompanySearchView(APIView):
                 'telecaller_name': l.telecaller.name if l.telecaller_id else '',
                 'stm_name': l.stm.name if l.stm_id else '',
                 'created_at': l.created_at,
+                'is_cp': bool(l.channel_partner_id or (l.source_id and l.source.name.lower() == 'channel partner')),
+                'channel_partner_name': l.channel_partner.name if l.channel_partner_id else '',
             }
             for l in qs
         ])

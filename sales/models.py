@@ -99,6 +99,15 @@ class Project(models.Model):
     FORMULA_SETS = [('kalrav', 'Kalrav'), ('ankhol', 'Ankhol'), ('industrial', 'Industrial'),
                     ('pratishtha', 'Pratishtha')]
     formula_set = models.CharField(max_length=20, choices=FORMULA_SETS, default='kalrav')
+    # Default rates for this project's booking form — e.g. {'land_rate': '5000',
+    # 'dev_rate': '1200', 'maint_rate': '20'}. Which keys make sense depends on
+    # formula_set (mirrors web's fieldFlags(formula_set) — Kalrav/Ankhol get
+    # land/dev/construction/maintenance rates, Industrial swaps construction for
+    # sale-deed/dev-agreement rates, Pratishtha uses none of this — it prices
+    # per unit from Plot.price_book instead). The booking form prefills from
+    # here when a plot in this project is picked, but every field stays
+    # editable per booking — this is just the starting point, not a lock.
+    rate_master = models.JSONField(default=dict, blank=True)
     allow_unit_switch = models.BooleanField(default=False)  # sq.yd ↔ sq.ft toggle (Kalrav)
     # Manager user IDs who approve bookings for THIS project (admin-selected).
     booking_approvers = models.JSONField(default=list, blank=True)
