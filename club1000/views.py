@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
+from django.db import transaction
 from django.db.models import Q
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -11,7 +12,7 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 from sales.views import MANAGER_ROLES
-from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor
+from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor, can_configure_scheme_approvers
 from .models import (
     Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
     REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
@@ -127,6 +128,11 @@ class SchemeDetailView(APIView):
     def patch(self, request, pk):
         if not is_club1000_manager(request.user):
             return _no_permission()
+        # investor_approvers specifically needs the narrower config-admin check
+        # (Director/real admin) — everything else on a scheme stays editable by
+        # any Club 1000 manager, same as before.
+        if 'investor_approvers' in request.data and not can_configure_scheme_approvers(request.user):
+            return _no_permission()
         scheme = self._get(request, pk)
         if not scheme:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -148,6 +154,41 @@ class SchemeDetailView(APIView):
             return Response({'detail': 'Scheme has investors — disabled instead of deleted.'})
         scheme.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class SchemeToggleApproverView(APIView):
+    """Add/remove one manager from a scheme's investor_approvers, atomically.
+
+    The obvious client-side approach — read investor_approvers, compute the
+    new array, PATCH the whole thing — races the moment two toggles for the
+    SAME scheme are in flight together (e.g. checking two managers a click
+    apart in the UI): each request computed `next` from whatever it read
+    before either had saved, so whichever response's write lands LAST at the
+    DB wins, regardless of which was sent last, silently dropping the other
+    click's change with no error on either side. select_for_update() forces
+    concurrent toggles for the same scheme to serialize at the DB row lock,
+    each one reading the true post-previous-toggle state, so nothing is lost
+    no matter how the requests interleave over the network."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not can_configure_scheme_approvers(request.user):
+            return _no_permission()
+        manager_id = request.data.get('manager_id')
+        if not manager_id:
+            return Response({'detail': 'manager_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            scheme = _company_filtered(Scheme.objects.select_for_update(), request).filter(pk=pk).first()
+            if not scheme:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            current = scheme.investor_approvers or []
+            manager_id = int(manager_id)
+            scheme.investor_approvers = (
+                [m for m in current if m != manager_id] if manager_id in current
+                else [*current, manager_id]
+            )
+            scheme.save(update_fields=['investor_approvers'])
+        return Response(SchemeSerializer(scheme).data)
 
 
 class ReferenceSuggestionsView(APIView):

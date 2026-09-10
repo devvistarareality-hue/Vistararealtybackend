@@ -44,6 +44,17 @@ def _is_hard_admin(user):
     return bool(user.is_staff or is_platform_admin(user) or user.role == 'Admin')
 
 
+def can_configure_scheme_approvers(user):
+    """Who may pick a scheme's investor_approvers — narrower than
+    is_club1000_manager (which just gets someone onto the Approvals page):
+    only Directors and real admins decide who approves each scheme, same as
+    Sales restricts its "Booking Approvers — by project" panel to isAdmin
+    rather than every booking-approving manager. Enforced here, not merely by
+    hiding the picker in the UI — otherwise any Club 1000 manager could set
+    themselves (or anyone) as an approver straight through the API."""
+    return bool(_is_hard_admin(user) or user.role == 'Director')
+
+
 def can_approve_investor(user, scheme_id, company):
     """Whether `user` may approve/reject an investor under `scheme_id` — mirrors
     sales.views._can_approve_project exactly, one level down (Scheme instead of
