@@ -1163,11 +1163,27 @@ class LeadListView(APIView):
                     extra['telecaller_status'] = 'callback'
         else:
             # Admin/manager assigned via the form → stamp assignment time. Status is
-            # left empty so the lead lands in the assignee's "To Call" bucket.
-            if ser.validated_data.get('telecaller'):
+            # left empty so the lead lands in the assignee's "To Call" bucket — a
+            # status/remarks typed alongside an assignment to someone ELSE is the
+            # assigner's own note, not that person's call outcome (they haven't
+            # called yet), so it's dropped here rather than silently landing the
+            # lead in their "Called" bucket before they've done anything. E.g. a CP
+            # Cluster Head creating a lead, assigning it straight to an STM, and
+            # jotting "seems warm" as they do it used to make it look like the STM
+            # had already called. Same reset LeadDetailView.patch does when an
+            # EXISTING lead is later reassigned to someone else.
+            picked_telecaller = ser.validated_data.get('telecaller')
+            picked_stm = ser.validated_data.get('stm')
+            if picked_telecaller:
                 extra['telecaller_assigned_at'] = timezone.now()
-            if ser.validated_data.get('stm'):
+                if picked_telecaller.id != request.user.id:
+                    extra['telecaller_status'] = ''
+                    extra['telecaller_remarks'] = ''
+            if picked_stm:
                 extra['stm_assigned_at'] = timezone.now()
+                if picked_stm.id != request.user.id:
+                    extra['stm_status'] = ''
+                    extra['stm_remarks'] = ''
             # Nobody picked on the form → the creator owns it, same as the
             # self-sourced branch above. This used to fall through to distribution,
             # which silently drops ("skipped" in _distribute) any lead whose project
@@ -1176,7 +1192,7 @@ class LeadListView(APIView):
             # who are neither telecaller nor STM nor CP (see can_assign_leads), so
             # the creator here is an admin/manager/cluster head. Status stays empty
             # so it lands in their "To Call" bucket, as an assigned lead already does.
-            if not ser.validated_data.get('telecaller') and not ser.validated_data.get('stm'):
+            if not picked_telecaller and not picked_stm:
                 extra['stm'] = request.user
                 extra['stm_assigned_at'] = timezone.now()
 
@@ -1334,6 +1350,24 @@ class LeadDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
+
+        # Handing a lead to a different STM starts their work fresh — the new owner
+        # hasn't called them yet, so their own stm_status/remarks can't legitimately
+        # carry over from whoever had it before (or from whatever the person doing
+        # the reassigning typed in the same form, which is THEIR note, not the new
+        # owner's call outcome). Without this a reassigned lead kept its old status
+        # and landed straight in the new STM's "Called" bucket (see LeadListView's
+        # work=pending/called split, keyed on stm_status=='') even though they
+        # hadn't touched it — exactly what CREATING a lead and assigning it already
+        # avoids (LeadListView.post leaves stm_status empty on purpose so it lands
+        # in the assignee's "To Call" bucket); this brings reassignment via PATCH
+        # in line with that. Only fires on an actual change of owner, not every
+        # save, and not when stm is being cleared back to nobody.
+        if old_stm_id != lead.stm_id and lead.stm_id:
+            lead.stm_status = ''
+            lead.stm_remarks = ''
+            lead.status = 'assigned'
+            lead.save(update_fields=['stm_status', 'stm_remarks', 'status'])
 
         # A lead is "warm" when EITHER the telecaller sets TC Status = warm OR the
         # overall status is set to warm_transferred. Keep both in sync so the TC Status
