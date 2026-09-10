@@ -1671,8 +1671,12 @@ class LeadCompanySearchView(APIView):
     orphans that telecaller's site-visit incentive.
 
     Read-only, minimal fields only (name/phone/status/project/owners) — no
-    remarks, budget, email, etc. Excludes CP leads, a deliberately separate
-    pool elsewhere in the app (see cp_lead_q)."""
+    remarks, budget, email, etc. Deliberately INCLUDES Channel Partner leads
+    despite that pool being kept separate everywhere else (see cp_lead_q) —
+    a duplicate can just as easily already exist as a CP lead, and this
+    view's entire purpose is catching that before someone adds a fresh one;
+    excluding CP leads defeated it. Each result is flagged is_cp so the
+    caller can show it's a CP lead rather than a regular Sales one."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -1681,7 +1685,7 @@ class LeadCompanySearchView(APIView):
         search = request.query_params.get('search', '').strip()
         if not search:
             return Response([])
-        qs = scope_to_company(Lead.objects.all(), request.user).exclude(cp_lead_q())
+        qs = scope_to_company(Lead.objects.all(), request.user)
         digits = ''.join(c for c in search if c.isdigit())
         if len(digits) >= 10 and not any(c.isalpha() for c in search):
             qs = qs.filter(phone_key=phone_blind_index(digits[-10:]))
@@ -1692,7 +1696,7 @@ class LeadCompanySearchView(APIView):
                 if needle in (nm or '').lower() or needle in (ph or '').lower()
             ]
             qs = qs.filter(id__in=hits)
-        qs = qs.select_related('telecaller', 'stm', 'project').order_by('-created_at')[:25]
+        qs = qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner').order_by('-created_at')[:25]
         return Response([
             {
                 'id': l.id,
@@ -1703,6 +1707,8 @@ class LeadCompanySearchView(APIView):
                 'telecaller_name': l.telecaller.name if l.telecaller_id else '',
                 'stm_name': l.stm.name if l.stm_id else '',
                 'created_at': l.created_at,
+                'is_cp': bool(l.channel_partner_id or (l.source_id and l.source.name.lower() == 'channel partner')),
+                'channel_partner_name': l.channel_partner.name if l.channel_partner_id else '',
             }
             for l in qs
         ])
