@@ -464,15 +464,23 @@ class StatsView(APIView):
 
         today = timezone.localdate()
         leads_qs = scope_to_company(Lead.objects.all(), request.user)
+        # Used below to exempt a CP lead handed off to a regular Sales STM/
+        # telecaller from the CP/non-CP split — see the comment on leads_qs.
+        own_ids = _visible_user_ids(request.user)
 
         # Channel Partner leads have their own module and dashboard — the main
         # Sales dashboard's counts never include them, and the CP dashboard's
         # counts are ONLY them (see LeadListView for the matching All Leads
-        # behaviour, and cp_lead_q for what counts as a CP lead).
+        # behaviour, and cp_lead_q for what counts as a CP lead). Same ownership
+        # exception as LeadListView: a CP lead handed off to a regular Sales
+        # STM/telecaller counts in THEIR dashboard once it's theirs to work —
+        # otherwise a transferred lead vanished from both the CP dashboard (no
+        # longer CP-owned) and the Sales one (blanket-excluded), stranding it
+        # nowhere and leaving "To Call" undercounted for the person who has it.
         if cp_only:
             leads_qs = leads_qs.filter(cp_lead_q())
         else:
-            leads_qs = leads_qs.exclude(cp_lead_q())
+            leads_qs = leads_qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
 
         # Telecallers / STMs only see stats for leads assigned to them.
         leads_qs = scope_leads_to_role(leads_qs, request.user, request=request)
@@ -583,8 +591,9 @@ class StatsView(APIView):
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
             cl_qs = cl_qs.filter(cp_lead_q(prefix='lead__'))
         else:
-            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__'))
-            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__'))
+            # Same ownership exception as leads_qs above.
+            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
+            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
         if not _sees_all_company(request.user, request):
             _ids = _visible_user_ids(request.user)
             sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
@@ -917,9 +926,18 @@ class LeadListView(APIView):
         # module's own pages happen to send cp_only, or navigating straight to
         # this endpoint's plain /sales/leads page would exclude their own
         # (CP-attributed) leads entirely instead of showing them.
+        #
+        # Exception: a CP lead handed off to a regular Sales STM/telecaller (the
+        # CP Cluster Head's "Assign STM") stops being CP-exclusive the moment it's
+        # theirs to work — the blanket exclude used to hide it from that very
+        # person (and their manager) even though scope_leads_to_role below would
+        # otherwise show it, since ownership is what actually governs visibility.
+        # Only exempts leads owned by the viewer or their own reporting chain, not
+        # every CP lead in the company — the pool stays disjoint for everyone else.
         if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
                 or is_cp_designated(request.user)):
-            qs = qs.exclude(cp_lead_q())
+            own_ids = _visible_user_ids(request.user)
+            qs = qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
 
         # The visit's Hot/Warm/Cold outcome (most recent completed visit) — shown
         # alongside "sv done" so the list reads e.g. "SV Done · Hot" instead of
