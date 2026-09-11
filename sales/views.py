@@ -1627,8 +1627,9 @@ class PlotListView(APIView):
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         _release_expired_holds(Plot.objects.filter(project_id=project_id))
-        plots = Plot.objects.filter(project_id=project_id)
-        return Response(PlotSerializer(plots, many=True).data)
+        plots = Plot.objects.filter(project_id=project_id).select_related('project')
+        # context: can_cancel_hold is per-viewer, so the serializer needs the request.
+        return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
 
 
 class PlotDetailView(APIView):
@@ -1644,7 +1645,7 @@ class PlotDetailView(APIView):
         ser = PlotSerializer(plot, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(PlotSerializer(ser.save()).data)
+        return Response(PlotSerializer(ser.save(), context={'request': request}).data)
 
 
 class PlotHoldView(APIView):
@@ -1692,6 +1693,64 @@ class PlotReleaseView(APIView):
         mine = list(Plot.objects.filter(pk__in=ids, held_by=request.user, status='hold').values_list('id', flat=True))
         n = _release_plots(mine)
         return Response({'released': n})
+
+
+class PlotCancelHoldView(APIView):
+    """Cancel the soft hold on units someone has selected or drafted but not yet
+    submitted.
+
+    PlotReleaseView already frees a rep's own selections, but only their own and only
+    as part of deselecting on the picker. This is the deliberate act, and it lets a
+    project's booking approver clear a unit somebody else left sitting — previously
+    that needed the holder to come back or the expiry to run out.
+
+    Refuses a unit whose booking is already submitted: that is an approval to reject,
+    not a hold to drop, and it leaves a record this endpoint does not.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .permissions_plot import can_cancel_plot_hold
+        company = _resolve_company(request)
+        ids = [int(x) for x in (request.data.get('plot_ids') or []) if str(x).isdigit()]
+        if not ids and str(request.data.get('plot_id') or '').isdigit():
+            ids = [int(request.data['plot_id'])]
+        if not ids:
+            return Response({'detail': 'No units given.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        plots = list(Plot.objects.filter(id__in=ids, project__company=company)
+                     .select_related('project'))
+        if not plots:
+            return Response({'detail': 'Unit not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        submitted = [p.number for p in plots if p.status == Plot.HOLD and not p.held_by_id]
+        if submitted:
+            return Response(
+                {'detail': 'Booking already submitted for %s — reject it from Approvals '
+                           'instead of cancelling the hold.' % ', '.join(submitted)},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        allowed = [p for p in plots if can_cancel_plot_hold(request.user, p)]
+        if not allowed:
+            return Response({'detail': 'You cannot cancel this hold.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        # A drafted unit's hold is pinned by the draft, so freeing the plot without
+        # clearing the draft would leave the draft pointing at a unit someone else can
+        # now book. Discard the drafts too, which is what the drafter's own discard
+        # does — the unit is being taken back either way.
+        ids_allowed = [p.id for p in allowed]
+        drafts = [b for b in Booking.objects.filter(
+            project__company=company, status='draft').only('id', 'plot_id', 'plot_ids')
+            if b.plot_id in ids_allowed or set(b.plot_ids or []) & set(ids_allowed)]
+        for b in drafts:
+            b.delete()
+        released = _release_plots(ids_allowed)
+        return Response({
+            'released': released,
+            'drafts_discarded': len(drafts),
+            'skipped': [p.number for p in plots if p.id not in ids_allowed],
+        })
 
 
 class LeadSourceListView(APIView):
