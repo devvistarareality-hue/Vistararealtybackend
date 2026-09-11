@@ -1506,6 +1506,16 @@ class ProjectListView(APIView):
             Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
             request.user,
         )
+        # A project-scoped Manager (see manager_project_ids) already only sees leads,
+        # site visits and closures for their assigned project(s) — but this endpoint
+        # is what every "pick a project" screen calls (Booking's Select Project,
+        # the Leads/Site Visits/Closure filter dropdowns, …), and it was never
+        # scoped the same way, so a Manager assigned to just one project still saw
+        # every project in the company to pick from here, even though picking an
+        # unauthorized one returned no data anyway.
+        pids = manager_project_ids(request.user)
+        if pids is not None:
+            projects = projects.filter(id__in=pids)
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
