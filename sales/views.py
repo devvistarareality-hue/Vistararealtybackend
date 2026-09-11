@@ -1727,12 +1727,12 @@ class PlotCancelHoldView(APIView):
         if submitted:
             return Response(
                 {'detail': 'Booking already submitted for %s — reject it from Approvals '
-                           'instead of cancelling the hold.' % ', '.join(submitted)},
+                           'instead of cancelling it here.' % ', '.join(submitted)},
                 status=status.HTTP_400_BAD_REQUEST)
 
         allowed = [p for p in plots if can_cancel_plot_hold(request.user, p)]
         if not allowed:
-            return Response({'detail': 'You cannot cancel this hold.'},
+            return Response({'detail': 'You cannot cancel this selection.'},
                             status=status.HTTP_403_FORBIDDEN)
 
         # A drafted unit's hold is pinned by the draft, so freeing the plot without
