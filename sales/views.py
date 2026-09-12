@@ -2509,6 +2509,10 @@ class MyAvailabilityView(APIView):
             'checked_in_at': avail.checked_in_at.isoformat() if (avail and avail.checked_in_at) else None,
             'expires_at':    expires_at,
             'ttl_hours':     AVAILABILITY_TTL_HOURS,
+            # Signing in after the role's time forfeits a share of the backlog — see
+            # _distribution_credit_for. Reported so the person can see why their
+            # count is behind the room's instead of assuming distribution is broken.
+            **_late_signin_payload(request.user, avail),
         })
 
     def post(self, request):
@@ -2528,7 +2532,9 @@ class MyAvailabilityView(APIView):
             expires_at = _availability_expires_at(request.user)
             if expires_at is None and obj.checked_in_at:
                 expires_at = (obj.checked_in_at + timedelta(hours=AVAILABILITY_TTL_HOURS)).isoformat()
-        return Response({'is_available': active, 'expires_at': expires_at, 'ttl_hours': AVAILABILITY_TTL_HOURS})
+        return Response({'is_available': active, 'expires_at': expires_at,
+                         'ttl_hours': AVAILABILITY_TTL_HOURS,
+                         **_late_signin_payload(request.user, obj)})
 
 
 # ── Distribution Weights ──────────────────────────────────────────────────────
@@ -2584,6 +2590,26 @@ def _window_state(company, dist_type):
     if now_ist >= signout:
         return 'after_signout'
     return 'open'
+
+
+def _late_signin_payload(user, avail):
+    """What to tell someone about signing in late, for the availability widgets.
+
+    `signed_in_late` is about this sign-in specifically, not the clock now — asked an
+    hour later it must still describe what happened, so it reads the recorded
+    handicap rather than re-testing the time.
+    """
+    if not (avail and avail.is_available):
+        return {'signed_in_late': False, 'missed_leads': 0, 'signin_time': None}
+    dist_type = _dist_type_for(user)
+    signin = None
+    if dist_type:
+        settings = DistributionSettings.objects.filter(company=user.company).first()
+        if settings:
+            field = 'tc_signin_time' if dist_type == 'telecaller' else 'stm_signin_time'
+            signin = str(getattr(settings, field))[:5]
+    credit = avail.distribution_credit or 0
+    return {'signed_in_late': credit > 0, 'missed_leads': credit, 'signin_time': signin}
 
 
 def _mark_available(user, company, is_available, date_str):

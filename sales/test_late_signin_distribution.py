@@ -178,3 +178,62 @@ class SignInAwardsCreditTests(APITestCase):
         row = UserAvailability.objects.get(user=self.late, date=str(date.today()))
         self.assertFalse(row.is_available)
         self.assertEqual(row.distribution_credit, 0)
+
+
+class LateSignInIsReportedTests(APITestCase):
+    """The availability widgets tell the person they signed in late, so a count that
+    trails the room's reads as expected rather than as distribution being broken."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='LT3', name='Late Co 3')
+        DistributionSettings.objects.create(
+            company=cls.co, tc_signin_time='10:10', tc_signout_time='23:59',
+            stm_signin_time='00:01', stm_signout_time='23:59')   # everyone is late
+        cls.project = Project.objects.create(company=cls.co, name='Kalrav')
+        cls.source = LeadSource.objects.create(company=cls.co, name='Meta')
+        cls.early = User.objects.create(email='lt3_a@x.com', company=cls.co, role='STM',
+                                        designation='STM', user_code='U1')
+        cls.late = User.objects.create(email='lt3_b@x.com', company=cls.co, role='STM',
+                                       designation='STM', user_code='U2')
+        for u in (cls.early, cls.late):
+            UserProjectAssignment.objects.create(user=u, project=cls.project)
+
+    def setUp(self):
+        cache.clear()
+
+    def test_a_late_sign_in_is_reported_back(self):
+        UserAvailability.objects.create(
+            user=self.early, date=str(date.today()), is_available=True,
+            checked_in_at=timezone.now(), distribution_credit=0)
+        for i in range(4):
+            Lead.objects.create(company=self.co, project=self.project, source=self.source,
+                                status='new', name=f'Y{i}', phone=f'94000{i:05d}',
+                                stm=self.early, stm_assigned_at=timezone.now())
+        auth(self.client, self.late)
+        r = self.client.post('/api/sales/availability/me/', {'is_available': True}, format='json')
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data['signed_in_late'])
+        self.assertEqual(r.data['missed_leads'], 4)
+        self.assertEqual(r.data['signin_time'], '00:01')
+
+    def test_it_still_says_so_when_asked_later(self):
+        """Reads the recorded handicap, not the clock — so it describes this sign-in."""
+        auth(self.client, self.late)
+        self.client.post('/api/sales/availability/me/', {'is_available': True}, format='json')
+        r = self.client.get('/api/sales/availability/me/')
+        self.assertEqual(r.data['signed_in_late'], r.data['missed_leads'] > 0)
+
+    def test_the_first_person_in_is_not_told_they_are_late(self):
+        """Late with an empty room costs nothing, so there is nothing to report."""
+        auth(self.client, self.late)
+        r = self.client.post('/api/sales/availability/me/', {'is_available': True}, format='json')
+        self.assertFalse(r.data['signed_in_late'])
+        self.assertEqual(r.data['missed_leads'], 0)
+
+    def test_nothing_is_claimed_when_signed_out(self):
+        auth(self.client, self.late)
+        self.client.post('/api/sales/availability/me/', {'is_available': True}, format='json')
+        self.client.post('/api/sales/availability/me/', {'is_available': False}, format='json')
+        r = self.client.get('/api/sales/availability/me/')
+        self.assertFalse(r.data['signed_in_late'])
