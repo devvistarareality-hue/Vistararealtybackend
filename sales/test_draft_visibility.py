@@ -78,3 +78,56 @@ class DraftVisibilityTests(APITestCase):
         r = self.client.get('/api/sales/bookings/')
         self.assertNotIn('Sales Draft', [b['client_name'] for b in r.data])
         self.assertNotIn('CP Draft', [b['client_name'] for b in r.data])
+
+
+class CpUserSeesOwnDraftTests(APITestCase):
+    """A CP-designated user's list is filtered to CP-sourced bookings. A draft is
+    uncategorised until a lead or Source says otherwise, so that filter was hiding a
+    CP rep's own draft from their own list — resuming it loaded nothing and the form
+    sat on "Loading unit pricing…" with no project, no unit and no pricing.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='CPD', name='CP Draft Co')
+        cls.cp = User.objects.create(email='cpd_cp@x.com', company=cls.co, role='Manager',
+                                     designation='CP CLUSTER HEAD', user_code='C1')
+        cls.other = User.objects.create(email='cpd_other@x.com', company=cls.co, role='STM',
+                                        designation='STM', user_code='C2')
+        cls.project = Project.objects.create(company=cls.co, name='Kalrav')
+        # exactly the shape of the real one: saved before any Source was chosen
+        cls.own = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.cp, status='draft',
+            source='walk-in', client_name='Own Draft', phone='9000000010')
+        cls.own_cp = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.cp, status='draft',
+            source='Channel Partner', client_name='Own CP Draft', phone='9000000011')
+        cls.someone_elses = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.other, status='draft',
+            source='walk-in', client_name='Other Draft', phone='9000000012')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.cp)
+
+    def _names(self, url='/api/sales/bookings/?status=draft'):
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        return sorted(b['client_name'] for b in r.data)
+
+    def test_a_cp_user_sees_their_own_non_cp_draft(self):
+        """The regression: resume needs to find it, whatever its Source says."""
+        self.assertIn('Own Draft', self._names())
+
+    def test_and_still_sees_their_cp_draft(self):
+        self.assertIn('Own CP Draft', self._names())
+
+    def test_the_exemption_does_not_leak_anyone_elses(self):
+        self.assertNotIn('Other Draft', self._names())
+
+    def test_submitted_non_cp_bookings_stay_filtered_out(self):
+        """Only drafts are exempt — the CP list is still the CP pool otherwise."""
+        Booking.objects.create(company=self.co, project=self.project, stm=self.cp,
+                               status='pending', source='walk-in',
+                               client_name='Own Submitted', phone='9000000013')
+        self.assertNotIn('Own Submitted', self._names('/api/sales/bookings/'))
