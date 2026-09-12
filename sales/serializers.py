@@ -90,6 +90,20 @@ def _plot_draft_map(project_id):
     return out
 
 
+def _plot_pending_map(project_id):
+    """{plot_id: pending Booking id} for every unit whose booking is submitted and
+    waiting on a manager. Plot.status is 'hold' for this and for a bare map selection
+    alike — the two are told apart only by held_by, which submission clears — so the
+    picker needs this to colour "waiting for approval" separately from "someone is
+    still choosing". One query per project, same shape as _plot_draft_map."""
+    out = {}
+    rows = Booking.objects.filter(project_id=project_id, status='pending').only('id', 'plot_id', 'plot_ids')
+    for b in rows:
+        for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
+            out[pid] = b.id
+    return out
+
+
 class PlotSerializer(serializers.ModelSerializer):
     # Who holds or has sold this unit — shown on the unit map so the team can see at a
     # glance who is on a booked plot without opening it.
@@ -131,11 +145,41 @@ class PlotSerializer(serializers.ModelSerializer):
             cache[obj.project_id] = _plot_draft_map(obj.project_id)
         return cache[obj.project_id].get(obj.id)
 
+    # Id of the submitted-but-unapproved Booking on this unit, if any. Drives the
+    # amber "Hold" state: the unit is spoken for and waiting on a manager, as opposed
+    # to "In Progress", which now means only that someone has it selected or drafted.
+    pending_booking_id = serializers.SerializerMethodField()
+
+    def get_pending_booking_id(self, obj):
+        if obj.status != Plot.HOLD:
+            return None
+        cache = getattr(self, '_pending_cache', None)
+        if cache is None:
+            cache = {}
+            self._pending_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_pending_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
+    # Whether this unit is a soft hold someone can cancel — set only for a map
+    # selection or draft, never for a booking that has already been submitted (that
+    # goes through the approvals screen's reject instead).
+    can_cancel_hold = serializers.SerializerMethodField()
+
+    def get_can_cancel_hold(self, obj):
+        if obj.status != Plot.HOLD or not obj.held_by_id:
+            return False
+        user = getattr(self.context.get('request'), 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        from .permissions_plot import can_cancel_plot_hold
+        return can_cancel_plot_hold(user, obj)
+
     class Meta:
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
                   'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
-                  'held_by_name', 'drafted_booking_id']
+                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold']
         read_only_fields = ['id', 'project']
 
 

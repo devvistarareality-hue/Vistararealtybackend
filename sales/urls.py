@@ -53,6 +53,7 @@ urlpatterns = [
     path('plots/rename-type/',         views.PlotRenameTypeView.as_view()),
     path('plots/hold/',                views.PlotHoldView.as_view()),
     path('plots/release/',             views.PlotReleaseView.as_view()),
+    path('plots/cancel-hold/',         views.PlotCancelHoldView.as_view()),
     path('plots/<int:pk>/',            views.PlotDetailView.as_view()),
     path('webhooks/meta/',             views.MetaWebhookView.as_view()),
     path('webhooks/meta/config/',      views.MetaWebhookConfigView.as_view()),
