@@ -667,6 +667,16 @@ class UserAvailability(models.Model):
     date = models.DateField()
     is_available = models.BooleanField(default=False)
     checked_in_at = models.DateTimeField(null=True, blank=True)
+    # Handicap for signing in late, so the rotation does not hand the latecomer a
+    # burst of leads to "catch up" with everyone who was here on time.
+    #
+    # Distribution ranks by how many leads a person already has today, so somebody
+    # arriving at 2pm with a count of 0 beat colleagues sitting on 50 and swept the
+    # next 50 leads on their own. This is what they are treated as already holding
+    # when they arrive: the lowest effective count among the people they will be
+    # sharing leads with, which drops them into the rotation level rather than at
+    # the front of it. Zero for anyone who signed in by their designated time.
+    distribution_credit = models.PositiveIntegerField(default=0)
 
     class Meta:
         unique_together = ['user', 'date']

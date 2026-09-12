@@ -2425,10 +2425,7 @@ class AvailabilityView(APIView):
             user = User.objects.get(pk=user_id, company=company)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=404)
-        obj, _ = UserAvailability.objects.update_or_create(
-            user=user, date=today,
-            defaults={'is_available': is_available, 'checked_in_at': timezone.now() if is_available else None},
-        )
+        obj = _mark_available(user, company, is_available, today)
         # Marking available flushes the unassigned bucket to this role (window-gated).
         dist_type = _dist_type_for(user)
         if obj.is_available and dist_type:
@@ -2511,10 +2508,7 @@ class MyAvailabilityView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         is_available = request.data.get('is_available', True)
         today = str(date_cls.today())
-        obj, _ = UserAvailability.objects.update_or_create(
-            user=request.user, date=today,
-            defaults={'is_available': is_available, 'checked_in_at': timezone.now() if is_available else None},
-        )
+        obj = _mark_available(request.user, _resolve_company(request), is_available, today)
         active = _availability_active(obj, request.user)
         # Marking available flushes the unassigned bucket to this user's role (window-gated).
         if active:
@@ -2580,6 +2574,98 @@ def _window_state(company, dist_type):
     if now_ist >= signout:
         return 'after_signout'
     return 'open'
+
+
+def _mark_available(user, company, is_available, date_str):
+    """Record a sign-in/out, awarding the late handicap on the way in.
+
+    Both the admin toggle and a rep's own switch land here, so the two cannot
+    disagree about who counts as late.
+    """
+    credit = 0
+    if is_available:
+        dist_type = _dist_type_for(user)
+        if dist_type:
+            # Recomputed on each sign-in rather than kept from an earlier one today:
+            # somebody who signs out and back in should be levelled against the room
+            # as it stands then, not as it stood this morning.
+            credit = _distribution_credit_for(user, company, dist_type)
+    obj, _created = UserAvailability.objects.update_or_create(
+        user=user, date=date_str,
+        defaults={
+            'is_available': is_available,
+            'checked_in_at': timezone.now() if is_available else None,
+            'distribution_credit': credit,
+        },
+    )
+    return obj
+
+
+def _signed_in_late(company, dist_type, when=None):
+    """Whether `when` is past this role's designated sign-in time.
+
+    On time means at the sign-in time or before it. A company with no distribution
+    settings has no deadline, so nobody is late.
+    """
+    from zoneinfo import ZoneInfo
+    settings = DistributionSettings.objects.filter(company=company).first()
+    if not settings:
+        return False
+    field = 'tc_signin_time' if dist_type == 'telecaller' else 'stm_signin_time'
+    signin = str(getattr(settings, field))[:5]
+    now_ist = (when or timezone.now()).astimezone(ZoneInfo('Asia/Kolkata')).strftime('%H:%M')
+    return now_ist > signin
+
+
+def _distribution_credit_for(user, company, dist_type, when=None):
+    """What a late arrival is treated as already holding, so they join the rotation
+    level with everyone else instead of being handed a catch-up burst.
+
+    Ranking is by today's lead count, so somebody arriving at 2pm on zero used to
+    outrank colleagues holding 50 and take the next 50 leads by themselves. Crediting
+    them with the lowest effective count among the people they will actually share
+    leads with puts them level: the next lead goes round the room one each, which is
+    what a late joiner should get.
+
+    The lowest rather than the highest, deliberately — late is not meant to be a
+    penalty, only the loss of the backlog they were not there for.
+
+    Scoped to peers who share a project, because distribution is project-strict: the
+    counts of somebody working an entirely different project say nothing about the
+    queue this person is joining.
+    """
+    from datetime import date as date_cls
+    if not _signed_in_late(company, dist_type, when):
+        return 0
+    desig = 'TELECALLER' if dist_type == 'telecaller' else 'STM'
+    peers = [
+        a for a in UserAvailability.objects.filter(
+            user__company=company, user__designation__iexact=desig,
+            date=str(date_cls.today()), is_available=True,
+        ).exclude(user=user)
+        if _availability_active(a)
+    ]
+    if not peers:
+        return 0            # first one in today — there is no backlog to have missed
+    mine = set(UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True))
+    if mine:
+        shared = {}
+        for uid, pid in UserProjectAssignment.objects.filter(
+                user_id__in=[a.user_id for a in peers]).values_list('user_id', 'project_id'):
+            shared.setdefault(uid, set()).add(pid)
+        peers = [a for a in peers if shared.get(a.user_id, set()) & mine]
+        if not peers:
+            return 0        # nobody else is on this person's projects
+    field = 'telecaller' if dist_type == 'telecaller' else 'stm'
+    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = (Lead.objects
+            .filter(**{f'{field}_id__in': [a.user_id for a in peers],
+                       f'{field}_assigned_at__gte': today_start})
+            .values(f'{field}_id').annotate(n=Count('id')))
+    counts = {r[f'{field}_id']: r['n'] for r in rows}
+    # A peer's own credit counts too, or a third latecomer would be levelled against
+    # the second one's raw count and undo the second one's handicap.
+    return min((counts.get(a.user_id, 0) + (a.distribution_credit or 0)) for a in peers)
 
 
 def _telecaller_project_ids(company):
@@ -2783,6 +2869,15 @@ def _distribute(company, dist_type, triggered_by=None, gate='full'):
             counts = {row['stm_id']: row['n'] for row in count_qs}
         for m in members:
             counts.setdefault(m.id, 0)
+        # Somebody who signed in after their time carries a handicap so the rotation
+        # does not back-fill them to the level of those who were here on time — see
+        # _distribution_credit_for. Zero for everyone who signed in on time, which
+        # leaves the ranking below exactly as it was.
+        credits = {
+            a.user_id: (a.distribution_credit or 0)
+            for a in UserAvailability.objects.filter(
+                user_id__in=[m.id for m in members], date=today, is_available=True)
+        }
 
         # Project assignments (STRICT): a member only receives leads of the project(s)
         # assigned to them. A member with NO project assigned receives NOTHING — and a
@@ -2812,7 +2907,7 @@ def _distribute(company, dist_type, triggered_by=None, gate='full'):
             if not eligible:
                 skipped += 1
                 continue
-            best = min(eligible, key=lambda uid: counts[uid] / (weight_map.get(uid, 1)))
+            best = min(eligible, key=lambda uid: (counts[uid] + credits.get(uid, 0)) / (weight_map.get(uid, 1)))
             user_leads[best].append(lead.pk)
             counts[best] += 1
 
