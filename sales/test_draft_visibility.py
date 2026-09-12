@@ -158,3 +158,64 @@ class CpUserSeesOwnDraftTests(APITestCase):
                                status='pending', source='walk-in',
                                client_name='Other Submitted', phone='9000000014')
         self.assertNotIn('Other Submitted', self._names('/api/sales/bookings/'))
+
+
+class BookingDetailAccessTests(APITestCase):
+    """Opening one booking by id, which is how resuming a draft loads it.
+
+    Listing and searching made resuming hostage to the list's scoping — approver
+    narrowing and the CP pool filter each silently returned nothing, leaving the form
+    blank on "Loading unit pricing…". Fetching the record by id answers a plain
+    question with a plain answer.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='BDT', name='Detail Co')
+        cls.other_co = Company.objects.create(code='BDX', name='Other Co')
+        cls.admin = User.objects.create(email='bdt_admin@x.com', company=cls.co,
+                                        role='Admin', is_staff=True, user_code='B0')
+        cls.author = User.objects.create(email='bdt_stm@x.com', company=cls.co,
+                                         role='STM', designation='STM', user_code='B1')
+        cls.approver = User.objects.create(email='bdt_mgr@x.com', company=cls.co,
+                                           role='Manager', user_code='B2')
+        cls.stranger = User.objects.create(email='bdt_x@x.com', company=cls.co,
+                                           role='STM', designation='STM', user_code='B3')
+        cls.outsider = User.objects.create(email='bdt_out@x.com', company=cls.other_co,
+                                           role='Admin', is_staff=True, user_code='B4')
+        cls.project = Project.objects.create(company=cls.co, name='Tower',
+                                             booking_approvers=[cls.approver.id])
+        cls.draft = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.author, status='draft',
+            source='walk-in', client_name='Draft Client', phone='9000000030')
+
+    def setUp(self):
+        cache.clear()
+
+    def _get(self, user):
+        auth(self.client, user)
+        return self.client.get('/api/sales/bookings/%d/' % self.draft.id)
+
+    def test_the_author_can_open_it(self):
+        self.assertEqual(self._get(self.author).status_code, 200)
+
+    def test_an_admin_can_open_anyones(self):
+        r = self._get(self.admin)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['client_name'], 'Draft Client')
+
+    def test_the_projects_approver_can_open_it(self):
+        self.assertEqual(self._get(self.approver).status_code, 200)
+
+    def test_an_unrelated_colleague_cannot(self):
+        self.assertEqual(self._get(self.stranger).status_code, 404)
+
+    def test_another_company_cannot(self):
+        """Tenant isolation holds even for their admin."""
+        self.assertEqual(self._get(self.outsider).status_code, 404)
+
+    def test_refusal_is_404_not_403(self):
+        """A booking you may not see should not be confirmed to exist."""
+        r = self._get(self.stranger)
+        self.assertEqual(r.status_code, 404)
+        self.assertNotIn('client_name', r.data)

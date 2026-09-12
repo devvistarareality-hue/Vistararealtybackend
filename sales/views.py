@@ -4193,6 +4193,40 @@ class BookingListCreateView(APIView):
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 
+class BookingDetailView(APIView):
+    """One booking by id, for opening it directly rather than hunting the list.
+
+    The booking form used to load a draft by fetching the whole drafts list and
+    searching it, which made resuming hostage to whatever scoping that list applies
+    — approver narrowing and the CP pool filter both silently returned nothing, and
+    the form sat on "Loading unit pricing…" with every field blank. Asking for the
+    one record by id removes that class of failure entirely.
+
+    Visible to the person whose booking it is, to a real admin, and to whoever
+    approves it — the same authority the approvals screen uses, via
+    _can_approve_booking, so a CP-sourced booking follows the CP list.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        company = _resolve_company(request)
+        b = (Booking.objects.filter(pk=pk, company=company)
+             .select_related('project', 'plot', 'stm').first())
+        if b is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        allowed = (
+            b.stm_id == request.user.id
+            or _is_hard_admin(request.user)
+            or _can_approve_booking(request.user, b.project_id, b.project_id,
+                                    b.lead_id, company, b.source)
+        )
+        if not allowed:
+            # 404 rather than 403: a booking you may not see should not be
+            # confirmed to exist by the error you get back.
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(BookingSerializer(b).data)
+
+
 class BookingDraftView(APIView):
     """Save an in-progress booking as a draft — same payload shape as
     BookingListCreateView.post, but with none of its completeness requirements (no
