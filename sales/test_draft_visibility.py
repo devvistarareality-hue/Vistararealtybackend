@@ -119,6 +119,25 @@ class CpUserSeesOwnDraftTests(APITestCase):
         """The regression: resume needs to find it, whatever its Source says."""
         self.assertIn('Own Draft', self._names())
 
+    def test_an_approver_still_finds_their_own_draft_with_mine(self):
+        """Being an approver narrows the list to the projects you approve, which hid
+        the approver's own draft from themselves — the form then loaded nothing and
+        sat on "Loading unit pricing…". The resume fetch asks for `mine=1`, which
+        skips that narrowing, so this is the query it actually makes."""
+        self.project.cp_booking_approvers = [self.cp.id]
+        self.project.save(update_fields=['cp_booking_approvers'])
+        other_project = Project.objects.create(company=self.co, name='Not Mine')
+        mine_elsewhere = Booking.objects.create(
+            company=self.co, project=other_project, stm=self.cp, status='draft',
+            source='walk-in', client_name='Draft Elsewhere', phone='9000000020')
+
+        # without mine=1 the approver scoping drops it
+        self.assertNotIn('Draft Elsewhere', self._names('/api/sales/bookings/?status=draft'))
+        # with mine=1 — what the booking form sends — it comes back
+        self.assertIn('Draft Elsewhere',
+                      self._names('/api/sales/bookings/?status=draft&mine=1'))
+        self.assertTrue(Booking.objects.filter(pk=mine_elsewhere.pk).exists())
+
     def test_and_still_sees_their_cp_draft(self):
         self.assertIn('Own CP Draft', self._names())
 
