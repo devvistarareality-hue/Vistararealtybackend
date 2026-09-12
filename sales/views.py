@@ -3858,13 +3858,27 @@ class BookingListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
-        # Drafts are private scratch work, not something an approver/manager should
-        # browse mid-edit — exclude anyone else's draft unconditionally, regardless of
-        # which status filter (or none at all, e.g. the "All" tab) is requested. This
-        # has to run before every other visibility rule below, since those exist to
-        # broaden access (to a whole company, an approver's projects, etc.) and would
-        # otherwise leak drafts right back in.
-        qs = qs.exclude(Q(status='draft') & ~Q(stm=request.user))
+        # Drafts are half-finished commercial terms, so they are not browsable by
+        # every manager the way a submitted booking is. Visible to their author, to a
+        # real admin, and to whoever approves that project's bookings — the same people
+        # who can already cancel a drafted unit from the plot map, so the two agree.
+        #
+        # Which approver list governs follows the booking's own routing, as approve and
+        # reject do: a Channel-Partner-sourced deal answers to cp_booking_approvers,
+        # everything else to booking_approvers. A regular approver therefore does not
+        # see CP drafts on their project, or the separation would be undone here.
+        #
+        # This runs before every other visibility rule below, since those exist to
+        # broaden access and would otherwise let drafts back in by another route.
+        if not _is_hard_admin(request.user):
+            cp_sourced = (Q(source__iexact='Channel Partner')
+                          | Q(lead__in=Lead.objects.filter(cp_lead_q())))
+            visible_draft = (
+                Q(stm=request.user)
+                | (Q(project_id__in=_approver_project_ids(request.user, company)) & ~cp_sourced)
+                | (Q(project_id__in=_cp_approver_project_ids(request.user, company)) & cp_sourced)
+            )
+            qs = qs.exclude(Q(status='draft') & ~visible_draft)
         # Naming someone a project's booking approver is a narrowing statement: they
         # review those projects and no others. It therefore takes precedence over the
         # broad org-tree visibility a Manager may otherwise have (a top-of-tree head
