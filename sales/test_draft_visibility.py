@@ -125,9 +125,17 @@ class CpUserSeesOwnDraftTests(APITestCase):
     def test_the_exemption_does_not_leak_anyone_elses(self):
         self.assertNotIn('Other Draft', self._names())
 
-    def test_submitted_non_cp_bookings_stay_filtered_out(self):
-        """Only drafts are exempt — the CP list is still the CP pool otherwise."""
+    def test_own_submitted_non_cp_bookings_are_visible_too(self):
+        """Source records where the client came from, not who did the paperwork — a
+        CP rep booking a walk-in still needs it in their own list."""
         Booking.objects.create(company=self.co, project=self.project, stm=self.cp,
                                status='pending', source='walk-in',
                                client_name='Own Submitted', phone='9000000013')
-        self.assertNotIn('Own Submitted', self._names('/api/sales/bookings/'))
+        self.assertIn('Own Submitted', self._names('/api/sales/bookings/?mine=1'))
+
+    def test_someone_elses_non_cp_booking_is_still_filtered_out(self):
+        """The exemption is stm=self only — the CP pool is otherwise unchanged."""
+        Booking.objects.create(company=self.co, project=self.project, stm=self.other,
+                               status='pending', source='walk-in',
+                               client_name='Other Submitted', phone='9000000014')
+        self.assertNotIn('Other Submitted', self._names('/api/sales/bookings/'))

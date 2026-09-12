@@ -3921,13 +3921,19 @@ class BookingListCreateView(APIView):
             # already routes its approval to the CP approvers — it was
             # authorized but invisible to the person meant to approve it.
             #
-            # Your own draft is exempt. A draft is uncategorised work-in-progress —
-            # it only counts as CP-sourced once a lead or a Source says so, and a rep
-            # who saves straight after picking a unit has set neither yet. Filtering
-            # it out hid a CP user's own draft from their own list, so resuming it
-            # loaded nothing at all and the form sat on "Loading unit pricing…"
-            # forever. Scoped to stm=self, so this reveals nobody else's work.
-            qs = qs.filter(is_cp_booking_q | (Q(status='draft') & Q(stm=request.user)))
+            # Your own work is exempt, whatever its Source says. A booking a CP user
+            # made themselves is theirs to see: the Source field records where the
+            # client came from, not who did the paperwork, so a CP rep booking a
+            # walk-in still needs it in their own list. It also covers drafts, which
+            # are uncategorised until a lead or Source says otherwise — filtering
+            # those out hid a CP user's own draft from their own list, so resuming it
+            # loaded nothing and the form sat on "Loading unit pricing…" forever.
+            #
+            # Scoped to stm=self, so this reveals nobody else's work, and it widens
+            # only this pool filter: the approver scoping above still applies, so it
+            # does not put anyone's bookings in front of an approver who should not
+            # see them.
+            qs = qs.filter(is_cp_booking_q | Q(stm=request.user))
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):
