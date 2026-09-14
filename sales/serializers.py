@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
@@ -91,13 +92,19 @@ def _plot_draft_map(project_id):
 
 
 def _plot_pending_map(project_id):
-    """{plot_id: pending Booking id} for every unit whose booking is submitted and
-    waiting on a manager. Plot.status is 'hold' for this and for a bare map selection
-    alike — the two are told apart only by held_by, which submission clears — so the
-    picker needs this to colour "waiting for approval" separately from "someone is
-    still choosing". One query per project, same shape as _plot_draft_map."""
+    """{plot_id: pending Booking id} for every unit whose booking is waiting on
+    SOMEONE's approval — either still awaiting Sales/CP (status='pending'), or
+    Sales/CP has approved it but it's now awaiting the separate Accounts-stage
+    sign-off (status='sold', accounts_status='pending'; see AccountsBookingActionView
+    — that stage leaves the plot on 'hold' too, not 'sold', until it clears it).
+    Plot.status is 'hold' for both of these and for a bare map selection alike —
+    they're told apart only by held_by, which submission clears — so the picker
+    needs this to colour "waiting for approval" separately from "someone is still
+    choosing". One query per project, same shape as _plot_draft_map."""
     out = {}
-    rows = Booking.objects.filter(project_id=project_id, status='pending').only('id', 'plot_id', 'plot_ids')
+    rows = Booking.objects.filter(project_id=project_id).filter(
+        Q(status='pending') | Q(status='sold', accounts_status='pending')
+    ).only('id', 'plot_id', 'plot_ids')
     for b in rows:
         for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
             out[pid] = b.id
