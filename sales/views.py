@@ -4161,7 +4161,13 @@ class BookingListCreateView(APIView):
             elif data.get('plot') and str(data['plot']).isdigit():
                 requested_plot_ids = {int(data['plot'])}
             if requested_plot_ids:
-                active = Booking.objects.filter(company=company, status__in=['pending', 'approved'])
+                # 'sold' is the stored status of an approved booking — there is no
+                # 'approved' row anywhere in the table. Looking for one meant the guard
+                # only ever caught a second submission while the first was still
+                # pending, and waved through every unit that had already been sold.
+                # Six units in production ended up with two live approved bookings to
+                # two different buyers, five of them on one project.
+                active = Booking.objects.filter(company=company, status__in=['pending', 'sold'])
                 for b in active.only('id', 'plot_id', 'plot_ids', 'client_name', 'status'):
                     b_plot_ids = set(b.plot_ids or [])
                     if b.plot_id:
@@ -5004,8 +5010,16 @@ def _ensure_lead_and_site_visit_for_booking(b):
     if timezone.is_naive(visited):
         visited = timezone.make_aware(visited, timezone.get_current_timezone())
 
+    # The telecaller who worked this lead keeps the credit for the visit. Conversion
+    # reporting counts a site visit through referred_by_telecaller — MQL→SV, SV Done,
+    # the telecaller's own portal — so leaving it null quietly dropped every visit
+    # created this way out of their numbers, and the visit read as if the STM had
+    # sourced the buyer themselves.
+    tc_id = Lead.objects.filter(pk=lead_id).values_list('telecaller_id', flat=True).first()
+
     sv = SiteVisit.objects.create(
         lead_id=lead_id, project_id=b.project_id, stm=b.stm,
+        referred_by_telecaller_id=tc_id,
         scheduled_at=visited, visited_at=visited,
         status='completed', outcome='hot',
         remarks='Recorded automatically from booking #%s on approval.' % b.pk,
@@ -5047,6 +5061,33 @@ class BookingActionView(APIView):
             # find the plot already 'sold' from an earlier round — pull it back to
             # 'hold' to match accounts_status being reset to pending below.
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            # Checking again here, not only at submission. Two bookings can sit pending
+            # on one unit and each be approved in turn, and a unit's status can be lost
+            # to a re-import or a reset between the two — neither of which the
+            # submission-time check can see. A revision legitimately reuses its own
+            # unit, so the chain it belongs to is excluded.
+            if _pids and not b.revision_of_id:
+                chain = _revision_chain_ids(b.id, company)
+                wanted = set(_pids)
+                clash = None
+                # plot_ids is JSON, not a Postgres array, so the overlap is worked out
+                # here rather than in the query — the same way the submission-time
+                # guard above does it, and portable to the test database.
+                for other in (Booking.objects.filter(company=company, status='sold')
+                              .exclude(id__in=chain)
+                              .only('id', 'plot_id', 'plot_ids', 'client_name')):
+                    held = set(other.plot_ids or [])
+                    if other.plot_id:
+                        held.add(other.plot_id)
+                    if held & wanted:
+                        clash = other
+                        break
+                if clash:
+                    return Response(
+                        {'detail': f'This unit is already sold to {clash.client_name} '
+                                   f'(booking #{clash.id}). Cancel that booking first.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
             if _pids:
                 Plot.objects.filter(id__in=_pids).update(status='hold')
             b.status = 'sold'
