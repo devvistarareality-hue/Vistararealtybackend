@@ -34,7 +34,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
-            'cp_booking_approvers',
+            'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
@@ -238,6 +238,51 @@ class BookingSerializer(serializers.ModelSerializer):
         return bool(_can_approve_booking(
             user, obj.project_id, obj.project_id, obj.lead_id,
             getattr(user, 'company', None), obj.source))
+
+    accounts_approved_by_name = serializers.SerializerMethodField()
+
+    def get_accounts_approved_by_name(self, obj):
+        return obj.accounts_approved_by.name if obj.accounts_approved_by_id else None
+
+    accounts_rejected_by_name = serializers.SerializerMethodField()
+
+    def get_accounts_rejected_by_name(self, obj):
+        return obj.accounts_rejected_by.name if obj.accounts_rejected_by_id else None
+
+    # Whether the requesting user may act on this booking's Accounts-stage
+    # approval right now — mirrors PlotSerializer.can_cancel_hold's per-viewer
+    # pattern, so the frontend can show Approve/Reject only to someone who'd
+    # actually get a 200 back from AccountsBookingActionView.
+    can_accounts_approve = serializers.SerializerMethodField()
+
+    def get_can_accounts_approve(self, obj):
+        if obj.status != 'sold' or obj.accounts_status != 'pending':
+            return False
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        # Computed once per list (not once per booking) — same instance-level cache
+        # pattern as PlotSerializer's _agent_cache, since AccountsBookingActionView's
+        # own gate re-queries per-project anyway; this just keeps a 1000-row list from
+        # firing two Project queries for every single row.
+        cache = getattr(self, '_accounts_approve_cache', None)
+        if cache is None:
+            from .views import _is_hard_admin, _accounts_approver_project_ids, _accounts_cp_approver_project_ids, _resolve_company
+            company = _resolve_company(request) if request is not None else getattr(user, 'company', None)
+            cache = {
+                'hard_admin': _is_hard_admin(user),
+                'reg_ids': set(_accounts_approver_project_ids(user, company)),
+                'cp_ids': set(_accounts_cp_approver_project_ids(user, company)),
+            }
+            self._accounts_approve_cache = cache
+        if cache['hard_admin']:
+            return True
+        if not obj.project_id:
+            return True
+        from .views import _is_cp_sourced_booking
+        is_cp = _is_cp_sourced_booking(obj.lead_id, obj.source)
+        return obj.project_id in (cache['cp_ids'] if is_cp else cache['reg_ids'])
 
     class Meta:
         model = Booking

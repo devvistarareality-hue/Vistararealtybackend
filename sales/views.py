@@ -289,6 +289,56 @@ def _can_approve_booking(user, project_id, project, lead_id, company, booking_so
     return _can_approve_project(user, project, company)
 
 
+def _accounts_approver_project_ids(user, company):
+    """Ids of projects where `user` is a configured ACCOUNTS approver — mirrors
+    _approver_project_ids, but for the separate accounts-stage sign-off a sold
+    booking now needs before it counts as approved in the Accounts module."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'accounts_booking_approvers')
+        if user.id in (p.accounts_booking_approvers or [])
+    ]
+
+
+def _can_approve_accounts_project(user, project, company):
+    """Whether `user` is a configured Accounts approver for `project`'s bookings.
+    Mirrors _can_approve_project exactly, against accounts_booking_approvers —
+    a separate list, so being a Sales/CP approver does not itself grant
+    Accounts-stage authority. Real admins are exempt, same as Sales."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _accounts_approver_project_ids(user, company)
+
+
+def _accounts_cp_approver_project_ids(user, company):
+    """CP-sourced-booking counterpart of _accounts_approver_project_ids, reading
+    accounts_cp_booking_approvers."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'accounts_cp_booking_approvers')
+        if user.id in (p.accounts_cp_booking_approvers or [])
+    ]
+
+
+def _can_approve_accounts_cp_project(user, project, company):
+    """Mirrors _can_approve_accounts_project for Channel-Partner-sourced bookings,
+    against the separate accounts_cp_booking_approvers list."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _accounts_cp_approver_project_ids(user, company)
+
+
+def _can_approve_accounts_booking(user, project_id, project, lead_id, company, booking_source=None):
+    """Which ACCOUNTS approver list gates a booking's accounts-stage sign-off —
+    mirrors _can_approve_booking's CP/regular dispatch exactly, against the
+    separate accounts_* approver lists instead of the Sales/CP ones."""
+    if not project_id:
+        return True
+    if _is_cp_sourced_booking(lead_id, booking_source):
+        return _can_approve_accounts_cp_project(user, project, company)
+    return _can_approve_accounts_project(user, project, company)
+
+
 def can_assign_leads(user):
     """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
     else (admins/managers/Sales CRM)."""
@@ -1561,6 +1611,16 @@ class ProjectDetailView(APIView):
                 {'detail': 'Only an administrator can change booking approvers.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Same idea for the Accounts-stage approver lists, but gated by Accounts &
+        # Finance admin-module rights instead of Sales' — a Sales admin should not
+        # be able to name who signs off for Accounts, and vice versa.
+        if (('accounts_booking_approvers' in request.data or 'accounts_cp_booking_approvers' in request.data) and not (
+            _is_hard_admin(request.user) or 'Accounts & Finance' in (getattr(request.user, 'admin_modules', None) or [])
+        )):
+            return Response(
+                {'detail': 'Only an administrator can change Accounts approvers.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             project = scope_to_company(Project.objects.all(), request.user).get(pk=pk)
         except Project.DoesNotExist:
@@ -2248,6 +2308,19 @@ class TelecallerListView(APIView):
             # cross-cutting permission checks in this file.
             users = sorted(
                 (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                key=lambda u: u.name or '',
+            )
+        elif crm_role == 'accounts_module':
+            # Everyone with access to the Accounts & Finance module — admins/
+            # staff, an Accounts Admin-Modules user, and anyone granted the
+            # 'Accounts & Finance' module (employee-level `modules` or
+            # manager-level `manager_modules`) — the pool the Accounts
+            # Approvers picker offers, mirroring cp_module above.
+            users = sorted(
+                (u for u in base_qs if _is_hard_admin(u)
+                 or 'Accounts & Finance' in (getattr(u, 'admin_modules', None) or [])
+                 or 'Accounts & Finance' in (getattr(u, 'modules', None) or [])
+                 or 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])),
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'sales_cp':
@@ -4640,7 +4713,8 @@ class BookingAllView(APIView):
         qs = _drop_superseded_revisions(
             Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
         ).order_by('-created_at')
-        return Response(BookingSerializer(qs[:1000], many=True).data)
+        # context: can_accounts_approve is per-viewer, so the serializer needs the request.
+        return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
 
 
 def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):
@@ -4788,6 +4862,72 @@ def _notify_accounts_managers(company, ntype, title, body, data=None):
         logging.getLogger(__name__).exception('_notify_accounts_managers failed')
 
 
+def _notify_accounts_approvers(company, booking):
+    """Tell whoever is actually configured to approve `booking` at the Accounts
+    stage (accounts_booking_approvers / accounts_cp_booking_approvers, picked
+    the same way _notify_booking_approvers picks the Sales/CP ones) that it is
+    waiting on them. A project naming nobody gets no targeted notification here
+    — only a real admin can act on it, and _notify_accounts_managers's broadcast
+    still reaches every Accounts manager regardless. Best-effort — never raises."""
+    try:
+        from notifications import notify
+        if not booking.project_id:
+            return
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        approver_field = 'accounts_cp_booking_approvers' if is_cp else 'accounts_booking_approvers'
+        ids = getattr(booking.project, approver_field, None) or []
+        if not ids:
+            return
+        recipients = User.objects.filter(id__in=ids, company=company, is_active=True)
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        title = 'Accounts approval needed%s' % rev
+        msg = '%s · %s Unit %s · ₹%s — awaiting your approval' % (
+            booking.client_name or '—', booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0),
+        )
+        seen = set()
+        for u in recipients:
+            if u.id not in seen:
+                seen.add(u.id)
+                notify(u, 'accounts_booking_approval', title, msg, {'booking_id': booking.id})
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('_notify_accounts_approvers failed')
+
+
+def _notify_accounts_rejection_to_sales(company, booking, rejecting_user, reason):
+    """On an ACCOUNTS-stage rejection, tell whoever holds Sales/CP approval
+    authority for this booking's project — deliberately NOT the Accounts
+    broadcast (_notify_accounts_managers), which is the wrong direction here;
+    this is Accounts telling Sales/CP, not the other way round. Falls back to
+    the STM's reporting chain if the project names no Sales/CP approver, same
+    fallback _notify_closure_cancellation/_notify_booking_approvers use.
+    Best-effort — never raises."""
+    try:
+        from notifications import notify_many, reporting_chain
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        approver_field = 'cp_booking_approvers' if is_cp else 'booking_approvers'
+        ids = (getattr(booking.project, approver_field, None) if booking.project_id else None) or []
+        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
+        if not recipients and booking.stm_id:
+            recipients = reporting_chain(booking.stm)
+        if not recipients:
+            return
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        notify_many(
+            recipients, 'accounts_booking_rejected', 'Rejected by Accounts',
+            '%s · %s Unit %s was rejected by Accounts (%s): %s' % (
+                booking.client_name or 'Booking', booking.project.name if booking.project_id else '',
+                unit, getattr(rejecting_user, 'name', '') or 'Accounts', reason,
+            ),
+            {'booking_id': booking.id},
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('_notify_accounts_rejection_to_sales failed')
+
+
 def _ensure_lead_and_site_visit_for_booking(b):
     """On a booking's first approval, guarantee it exists in the pipeline as a lead
     with a completed site visit dated on the booking date.
@@ -4906,9 +5046,22 @@ class BookingActionView(APIView):
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
             b.approved_at = timezone.now()
+            # Sales/CP approval alone no longer makes this real to Accounts — it now
+            # waits on a configured Accounts approver too (see AccountsBookingActionView).
+            # Reset on every approval, including a revision: the amount may have
+            # changed, so Accounts should sign off on it again rather than keeping
+            # whatever stale accounts_status an earlier approval left behind.
+            b.accounts_status = 'pending'
+            b.accounts_rejected_reason = ''
+            b.accounts_approved_by = None
+            b.accounts_approved_at = None
+            b.accounts_rejected_by = None
+            b.accounts_rejected_at = None
             if b.closure_id:
                 # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status', 'approved_at'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'accounts_status',
+                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                       'accounts_rejected_by', 'accounts_rejected_at'])
                 Closure.objects.filter(id=b.closure_id).update(
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
             else:
@@ -4932,7 +5085,9 @@ class BookingActionView(APIView):
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
                 b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure', 'accounts_status',
+                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                       'accounts_rejected_by', 'accounts_rejected_at'])
                 # The sale is now real, so make sure the pipeline shows how it got
                 # here: a lead, and a completed site visit dated on the booking date.
                 try:
@@ -4959,6 +5114,10 @@ class BookingActionView(APIView):
                 f'{b.client_name or "Booking"} · {b.project.name if b.project_id else ""} Unit {_unit} · ₹{int(b.final_amount or 0)} — approved',
                 {'booking_id': b.id},
             )
+            # And separately, tell whoever is actually configured to approve it at
+            # the Accounts stage — the broadcast above reaches every Accounts
+            # manager, but only these people can act on it.
+            _notify_accounts_approvers(company, b)
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
@@ -4979,6 +5138,75 @@ class BookingActionView(APIView):
                 _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
                 notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
                        f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
+        else:
+            return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(BookingSerializer(b).data)
+
+
+class AccountsBookingActionView(APIView):
+    """Approve / reject a booking's separate ACCOUNTS-stage sign-off — distinct
+    from BookingActionView, which is the Sales/CP approval. A booking only
+    reaches here once Sales/CP has already approved it (status='sold'); this
+    endpoint is gated by the accounts_booking_approvers / accounts_cp_booking_approvers
+    lists on the project, configured the same way as Sales' own approver lists
+    (see _can_approve_accounts_booking). Rejecting requires a remarks string —
+    it releases the plot(s) exactly like a Sales-level rejection does (same
+    _release_plots) and notifies the Sales/CP approver(s) for the project."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        company = _resolve_company(request)
+        try:
+            b = Booking.objects.select_related('project', 'plot', 'stm').get(pk=pk, company=company)
+        except Booking.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_approve_accounts_booking(request.user, b.project_id, b.project, b.lead_id, company, b.source):
+            return Response(
+                {'detail': 'You are not an Accounts approver for this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if b.status != 'sold':
+            return Response({'detail': 'This booking has not been approved by Sales/CP yet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if b.accounts_status != 'pending':
+            return Response({'detail': 'This booking has already been processed by Accounts.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        action = request.data.get('action')
+        if action == 'approve':
+            b.accounts_status = 'approved'
+            b.accounts_approved_by = request.user
+            b.accounts_approved_at = timezone.now()
+            b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
+            from notifications import notify
+            if b.stm:
+                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                notify(b.stm, 'accounts_booking_approved', 'Approved by Accounts',
+                       f'{b.client_name or "Your booking"} · Unit {unit} was approved by Accounts.', {'booking_id': b.id})
+        elif action == 'reject':
+            reason = (request.data.get('reason') or '').strip()
+            if not reason:
+                return Response({'detail': 'Remarks are required to reject.'}, status=status.HTTP_400_BAD_REQUEST)
+            b.accounts_status = 'rejected'
+            b.accounts_rejected_reason = reason
+            b.accounts_rejected_by = request.user
+            b.accounts_rejected_at = timezone.now()
+            # Same fate as a Sales-level rejection: the plot(s) free up and the
+            # booking itself is marked rejected, not just its accounts stage.
+            b.status = 'rejected'
+            if b.loi_document:
+                try: b.loi_document.delete(save=False)
+                except Exception: pass
+            b.save(update_fields=['accounts_status', 'accounts_rejected_reason', 'accounts_rejected_by',
+                                   'accounts_rejected_at', 'status', 'loi_document'])
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            _release_plots(_pids)
+            if b.closure_id:
+                Closure.objects.filter(id=b.closure_id).delete()
+            from notifications import notify
+            if b.stm:
+                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                notify(b.stm, 'accounts_booking_rejected', 'Rejected by Accounts',
+                       f'{b.client_name or "Your booking"} · Unit {unit} was rejected by Accounts: {reason}', {'booking_id': b.id})
+            _notify_accounts_rejection_to_sales(company, b, request.user, reason)
         else:
             return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)

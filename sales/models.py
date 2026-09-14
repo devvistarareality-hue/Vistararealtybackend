@@ -116,6 +116,13 @@ class Project(models.Model):
     # above (see _can_approve_cp_project), so the two routes can name different
     # people without one overriding the other.
     cp_booking_approvers = models.JSONField(default=list, blank=True)
+    # Accounts & Finance approval — mirrors booking_approvers/cp_booking_approvers
+    # above, but gates the SEPARATE accounts-stage sign-off a booking now needs
+    # after Sales/CP have already approved it (see Booking.accounts_status). Two
+    # lists for the same reason as above: a CP-sourced deal's accounts approval
+    # can be routed to different people than a regular one.
+    accounts_booking_approvers = models.JSONField(default=list, blank=True)
+    accounts_cp_booking_approvers = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     tagline = models.CharField(max_length=300, blank=True)
     rera = models.CharField(max_length=100, blank=True)
@@ -561,6 +568,24 @@ class Booking(models.Model):
     # would drift away from the true approval moment if the booking is ever
     # touched again afterwards (e.g. LOI regenerated).
     approved_at     = models.DateTimeField(null=True, blank=True)
+
+    # ── Accounts & Finance approval stage ───────────────────────────────────
+    # A booking that Sales/CP approved (status='sold') used to count as "in
+    # Accounts" immediately. Now it only becomes real to Accounts once one of
+    # THEIR configured approvers (Project.accounts_booking_approvers /
+    # accounts_cp_booking_approvers) signs off — this is that separate stage.
+    # Meaningless while status != 'sold'. Default is 'approved' rather than
+    # 'pending' so every booking already sold before this field existed is
+    # grandfathered in as already-accounts-approved (no retroactive queue) —
+    # BookingActionView.post explicitly sets 'pending' on every NEW approval
+    # from here on, so only future bookings actually wait on Accounts.
+    ACCOUNTS_STATUS = [('pending', 'Pending Accounts Approval'), ('approved', 'Approved'), ('rejected', 'Rejected')]
+    accounts_status = models.CharField(max_length=10, choices=ACCOUNTS_STATUS, default='approved', blank=True)
+    accounts_rejected_reason = models.TextField(blank=True, default='')
+    accounts_approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='accounts_approved_bookings')
+    accounts_approved_at = models.DateTimeField(null=True, blank=True)
+    accounts_rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='accounts_rejected_bookings')
+    accounts_rejected_at = models.DateTimeField(null=True, blank=True)
     revision_no     = models.IntegerField(default=0)
     # The booking this one revises. The client has always posted `revision_of` but it
     # was never stored, leaving revision chains to be inferred from closure/unit —
