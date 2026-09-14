@@ -4262,8 +4262,12 @@ def _can_view_booking(user, booking, company):
 
 
 class BookingRevisionsView(APIView):
-    """Every version of one deal, oldest first — R0, R1, R2 — each with its own
-    figures and its own signed LOI.
+    """Every version of one deal, newest first — the current one, then back through
+    R1, R0 — each with its own figures and its own signed LOI.
+
+    Newest first because the current terms are what is usually being checked, and the
+    history is read backwards from them: what does this deal say now, and what did it
+    say before.
 
     Only the latest version is listed anywhere, which is right: a deal should appear
     once and at its current terms. But the earlier ones are what was signed at the
@@ -4282,7 +4286,7 @@ class BookingRevisionsView(APIView):
         if b is None or not _can_view_booking(request.user, b, company):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         qs = (Booking.objects.filter(id__in=_revision_chain_ids(b.id, company), company=company)
-              .select_related('project', 'plot', 'stm').order_by('revision_no', 'id'))
+              .select_related('project', 'plot', 'stm').order_by('-revision_no', '-id'))
         return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
 
 

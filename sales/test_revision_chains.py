@@ -245,11 +245,13 @@ class RevisionHistoryEndpointTests(APITestCase):
         auth(self.client, user)
         return self.client.get(f'/api/sales/bookings/{pk}/revisions/')
 
-    def test_every_version_comes_back_oldest_first(self):
+    def test_every_version_comes_back_newest_first(self):
+        # The current terms are what is usually being checked, and the history reads
+        # backwards from them: what does this deal say now, and what did it say before.
         r = self._get(self.stm, self.r2.id)
         self.assertEqual(r.status_code, 200)
         self.assertEqual([(b['id'], b['revision_no']) for b in r.data],
-                         [(self.r0.id, 0), (self.r1.id, 1), (self.r2.id, 2)])
+                         [(self.r2.id, 2), (self.r1.id, 1), (self.r0.id, 0)])
 
     def test_a_rejected_version_is_part_of_the_history(self):
         ids = [b['id'] for b in self._get(self.stm, self.r2.id).data]
@@ -311,7 +313,7 @@ class RevisionHistoryReachTests(APITestCase):
     def test_a_manager_can_open_the_history_of_their_reports_booking(self):
         r = self._get(self.director, self.r1.id)
         self.assertEqual(r.status_code, 200)
-        self.assertEqual([b['id'] for b in r.data], [self.r0.id, self.r1.id])
+        self.assertEqual([b['id'] for b in r.data], [self.r1.id, self.r0.id])
 
     def test_someone_outside_the_tree_still_cannot(self):
         self.assertEqual(self._get(self.outsider, self.r1.id).status_code, 404)
@@ -351,4 +353,4 @@ class AccountsRevisionHistoryTests(APITestCase):
         auth(self.client, self.reviewer)
         r = self.client.get(f'/api/sales/bookings/{self.r1.id}/revisions/')
         self.assertEqual(r.status_code, 200)
-        self.assertEqual([b['id'] for b in r.data], [self.r0.id, self.r1.id])
+        self.assertEqual([b['id'] for b in r.data], [self.r1.id, self.r0.id])
