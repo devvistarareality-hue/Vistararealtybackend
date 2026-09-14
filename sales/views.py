@@ -5040,9 +5040,15 @@ class BookingActionView(APIView):
         is_rev = b.revision_no and b.revision_no > 0
 
         if action == 'approve':
+            # The plot itself is NOT marked sold here — Sales/CP approval alone no
+            # longer finalises the unit on the map; it stays 'hold' (spoken for, not
+            # yet gone) until Accounts also signs off (see AccountsBookingActionView,
+            # which is the only place that sets 'sold'). A revision re-approval can
+            # find the plot already 'sold' from an earlier round — pull it back to
+            # 'hold' to match accounts_status being reset to pending below.
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
             if _pids:
-                Plot.objects.filter(id__in=_pids).update(status='sold')
+                Plot.objects.filter(id__in=_pids).update(status='hold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
             b.approved_at = timezone.now()
@@ -5172,6 +5178,11 @@ class AccountsBookingActionView(APIView):
 
         action = request.data.get('action')
         if action == 'approve':
+            # This is the ONLY point a unit actually becomes sold — Sales/CP approval
+            # leaves it 'hold' precisely so the map doesn't show it as final until now.
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            if _pids:
+                Plot.objects.filter(id__in=_pids).update(status='sold')
             b.accounts_status = 'approved'
             b.accounts_approved_by = request.user
             b.accounts_approved_at = timezone.now()
