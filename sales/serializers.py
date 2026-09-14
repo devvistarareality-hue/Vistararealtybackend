@@ -199,6 +199,27 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_loi_document(self, obj):
         return obj.loi_document.name if obj.loi_document else ''
 
+    # Whether this viewer may approve or reject this particular booking. Routing is
+    # per-booking, not per-person: a Channel-Partner-sourced deal answers to the
+    # project's CP approvers and everything else to its regular ones, so a CP manager
+    # looking at a walk-in they booked themselves cannot action it. Without this the
+    # CP module offered Approve and Reject on every pending row it listed and the
+    # click failed silently, which reads as the button being broken rather than as
+    # the booking not being theirs to decide.
+    can_approve = serializers.SerializerMethodField()
+
+    def get_can_approve(self, obj):
+        if obj.status != 'pending':
+            return False
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        from .views import _can_approve_booking
+        return bool(_can_approve_booking(
+            user, obj.project_id, obj.project_id, obj.lead_id,
+            getattr(user, 'company', None), obj.source))
+
     class Meta:
         model = Booking
         fields = '__all__'

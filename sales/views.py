@@ -3953,7 +3953,7 @@ class BookingListCreateView(APIView):
             # last one whatever its Source says, since Source records where the client
             # came from, not who did the paperwork.
             qs = qs.filter(is_cp_booking_q | Q(stm_id__in=own_and_team))
-        return Response(BookingSerializer(qs, many=True).data)
+        return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
 
     def post(self, request):
         company = _resolve_company(request)
