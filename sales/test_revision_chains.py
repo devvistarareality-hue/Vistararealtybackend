@@ -1,12 +1,16 @@
 """Only the latest revision of a deal is listed — however the chain was formed."""
 from datetime import date
 
+from django.core.cache import cache
 from django.test import TestCase
+from rest_framework.test import APITestCase
 
 from accounts.models import User
 from companies.models import Company
 from sales.models import Booking, Closure, Lead, Plot, Project
 from sales.views import _drop_superseded_revisions
+
+from sales.tests import auth
 
 
 class RevisionChains(TestCase):
@@ -149,3 +153,59 @@ class RevisionInheritsItsParent(TestCase):
         rev_id = res.data['id']
         kept = {b.id for b in _drop_superseded_revisions(Booking.objects.filter(project=p))}
         self.assertEqual(kept, {rev_id}, 'the superseded EOI should drop out')
+
+
+class SupersededAcrossVisibilityTests(APITestCase):
+    """A replaced booking must stay hidden even from someone who cannot see what
+    replaced it.
+
+    Chains used to be detected inside the viewer's own slice, so staleness depended
+    on who was looking: a CP cluster head still had booking #478 listed as a live
+    approved deal because its replacement was booked by someone outside his module.
+    His figure read 108 where the same slice read 107 in Sales, and the extra row
+    carried commercial terms that had since been revised.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='SUP', name='Supersede Co')
+        cls.director = User.objects.create(email='sup_dir@x.com', company=cls.co, role='Director',
+                                           designation='DIRECTOR', user_code='S0', name='Director')
+        cls.cp = User.objects.create(email='sup_cp@x.com', company=cls.co, role='Manager',
+                                     designation='CP CLUSTER HEAD', user_code='S1', name='Cp Head',
+                                     reporting_manager=cls.director)
+        # Books the replacement, and is invisible to the CP head: a sibling branch,
+        # and their work is not partner-sourced so the CP pool does not carry it.
+        cls.outsider = User.objects.create(email='sup_out@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='S2', name='Outsider',
+                                           reporting_manager=cls.director)
+        cls.project = Project.objects.create(company=cls.co, name='Supersede Tower')
+        cls.original = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.cp, status='sold',
+            source='Channel Partner', client_name='Same Client', phone='9000000080',
+            plot_numbers='A-1', revision_no=0)
+        cls.revision = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.outsider, status='sold',
+            source='Reference', client_name='Same Client', phone='9000000080',
+            plot_numbers='A-1', revision_no=1, revision_of=cls.original)
+
+    def setUp(self):
+        cache.clear()
+
+    def _ids(self, user, url):
+        auth(self.client, user)
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        return [b['id'] for b in r.data]
+
+    def test_the_replaced_booking_is_hidden_even_when_its_replacement_is_not_visible(self):
+        ids = self._ids(self.cp, '/api/sales/bookings/?mine=1&cp_only=true&status=sold')
+        self.assertNotIn(self.original.id, ids)
+        # And it is not swapped for the replacement either — that booking belongs to
+        # someone else's branch and is genuinely not this viewer's to see.
+        self.assertNotIn(self.revision.id, ids)
+
+    def test_someone_who_sees_both_gets_the_live_one_only(self):
+        ids = self._ids(self.director, '/api/sales/bookings/?mine=1&status=sold')
+        self.assertIn(self.revision.id, ids)
+        self.assertNotIn(self.original.id, ids)

@@ -3945,7 +3945,9 @@ class BookingListCreateView(APIView):
                 # tagged Source = "Channel Partner" routes to the CP approvers, so it
                 # has to be visible to them or it is authorized but unreachable.
                 qs = qs.filter(is_cp_booking_q)
-        qs = _drop_superseded_revisions(qs)
+        # Chains are resolved against the whole company, not this viewer's slice —
+        # otherwise whether a replaced booking still shows depends on who is looking.
+        qs = _drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
@@ -4397,7 +4399,7 @@ class BookingNextEOIView(APIView):
         return Response({'eoi_no': _next_eoi_no(company, pid, block=block)})
 
 
-def _drop_superseded_revisions(qs):
+def _drop_superseded_revisions(qs, scope=None):
     """Hide bookings that a later revision has replaced, so a deal appears once.
 
     Revising a booking creates a NEW row carrying revision_no + 1, and approving that
@@ -4422,9 +4424,17 @@ def _drop_superseded_revisions(qs):
     belonging in the Rejected tab rather than folded into a live chain. Ties on
     revision_no fall to the newest row, which happens where a booking was revised twice
     from the same parent.
+
+    `scope` is where chains are detected, and should be every booking in the company
+    even when `qs` is one person's slice of them. Detecting within the slice alone
+    made staleness depend on what the viewer happens to see: a CP cluster head still
+    had booking #478 listed as a live approved deal because its replacement, #482,
+    was booked by someone outside his module — so his figure read 108 where the same
+    slice read 107 in Sales, and the extra row carried superseded commercial terms.
     """
-    rows = [r for r in qs.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
-                                 'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
+    rows = [r for r in (scope if scope is not None else qs)
+            .values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
+                    'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
             if r['status'] != 'rejected']
 
     parent = {r['id']: r['id'] for r in rows}
