@@ -4229,15 +4229,34 @@ class BookingListCreateView(APIView):
 
 
 def _can_view_booking(user, booking, company):
-    """Who may open one booking: the person whose it is, a real admin, and whoever
-    approves it — the same authority the approvals screen uses, via
-    _can_approve_booking, so a CP-sourced booking follows the CP list."""
-    return bool(
-        booking.stm_id == user.id
-        or _is_hard_admin(user)
-        or _can_approve_booking(user, booking.project_id, booking.project_id,
-                                booking.lead_id, company, booking.source)
-    )
+    """Who may open one booking.
+
+    The person whose it is, a real admin, and whoever approves it — the same
+    authority the approvals screen uses, via _can_approve_booking, so a CP-sourced
+    booking follows the CP list.
+
+    Beyond that, anything the viewer's own list already shows them: their reporting
+    tree, and in the CP module the partner-sourced pool. Without this a director
+    could read a booking in My Bookings and be refused when opening it — which is
+    what happened to the revision history, since approving no projects is normal for
+    someone who sees everything through the tree instead.
+
+    A draft stops at the narrow rule. Half-finished commercial terms are deliberately
+    not browsable by every manager (see the draft rule in BookingListCreateView), and
+    widening the general case must not quietly undo that.
+    """
+    if (booking.stm_id == user.id
+            or _is_hard_admin(user)
+            or _can_approve_booking(user, booking.project_id, booking.project_id,
+                                    booking.lead_id, company, booking.source)):
+        return True
+    if booking.status == 'draft':
+        return False
+    if booking.stm_id in _visible_user_ids(user):
+        return True
+    if is_cp_designated(user) and _is_cp_sourced_booking(booking.lead_id, booking.source):
+        return True
+    return bool(_sees_all_company(user, include_manager_role=False))
 
 
 class BookingRevisionsView(APIView):

@@ -270,3 +270,53 @@ class RevisionHistoryEndpointTests(APITestCase):
                                       role='Admin', designation='Admin', user_code='H3',
                                       name='Foreign Admin')
         self.assertEqual(self._get(foreign, self.r2.id).status_code, 404)
+
+
+class RevisionHistoryReachTests(APITestCase):
+    """Whoever can see a booking in their list can open its history.
+
+    A director saw the booking in My Bookings through the reporting tree and was then
+    refused when opening it: the check asked only for ownership, admin, or approver,
+    and approving no projects is normal for someone whose visibility comes from the
+    tree instead. The card said "Couldn't load the history."
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='RHR', name='Reach Co')
+        cls.director = User.objects.create(email='rr_dir@x.com', company=cls.co, role='Director',
+                                           designation='DIRECTOR', user_code='K0', name='Director')
+        cls.stm = User.objects.create(email='rr_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='K1', name='Stm',
+                                      reporting_manager=cls.director)
+        cls.outsider = User.objects.create(email='rr_out@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='K2', name='Outsider')
+        cls.project = Project.objects.create(company=cls.co, name='Reach Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Trupti Akshay Patel', phone='9925174692', plot_numbers='EOI-1')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=2500000, **common)
+        cls.r1 = Booking.objects.create(status='sold', revision_no=1, final_amount=2600000,
+                                        revision_of=cls.r0, **common)
+        cls.draft = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.stm, status='draft', revision_no=1,
+            client_name='Half Done', phone='9925174693', plot_numbers='EOI-9')
+
+    def setUp(self):
+        cache.clear()
+
+    def _get(self, user, pk):
+        auth(self.client, user)
+        return self.client.get(f'/api/sales/bookings/{pk}/revisions/')
+
+    def test_a_manager_can_open_the_history_of_their_reports_booking(self):
+        r = self._get(self.director, self.r1.id)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([b['id'] for b in r.data], [self.r0.id, self.r1.id])
+
+    def test_someone_outside_the_tree_still_cannot(self):
+        self.assertEqual(self._get(self.outsider, self.r1.id).status_code, 404)
+
+    def test_a_reports_draft_stays_out_of_reach(self):
+        # Half-finished commercial terms are deliberately not browsable by every
+        # manager; widening the general rule must not quietly undo that.
+        self.assertEqual(self._get(self.director, self.draft.id).status_code, 404)
