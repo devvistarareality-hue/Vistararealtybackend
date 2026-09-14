@@ -3900,6 +3900,14 @@ class BookingListCreateView(APIView):
             qs = qs.filter(
                 (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
                 | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
+                # Your own work is never narrowed away. Approver scoping answers
+                # "what do I review", which is a different question from "what have I
+                # sold", and collapsing the two hid a CP Cluster Head's own bookings
+                # from their own module — 51 of Kunal's 107 vanished, because they
+                # sat in projects he does not approve or were not CP-sourced. The
+                # `mine` exemption above was the same intent, applied only where the
+                # caller happened to ask for it.
+                | Q(stm=request.user)
             )
         elif not _sees_all_company(request.user, request, include_manager_role=False):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
