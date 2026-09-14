@@ -632,7 +632,7 @@ class StatsView(APIView):
         # way Closures means "closed in this period".
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         # Same CP/non-CP split as leads_qs above — these are independent queries
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
@@ -847,7 +847,7 @@ class StatsTrendView(APIView):
         )
 
         # Closures per day (by closure_date) — for the STM/CP reports charts.
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
@@ -1756,6 +1756,29 @@ class PlotDetailView(APIView):
         ser = PlotSerializer(plot, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Freeing a unit here does not cancel the booking that holds it, so a unit
+        # edited back to available could be sold again while the first sale stayed
+        # live and approved. Six units ended up with two live sales that way — both
+        # sides APPROVED, both closures intact, no cancellation recorded anywhere.
+        # Cancelling is a real operation: it voids the signed LOI, deletes the
+        # closure, reopens the lead and notifies the chain. It has to go through that
+        # path, not through a status dropdown.
+        new_status = str(request.data.get('status') or '').strip()
+        if new_status and new_status != plot.status and new_status in ('available', 'resale'):
+            holder = next(
+                (b for b in Booking.objects.filter(company=plot.project.company,
+                                                   status__in=('pending', 'sold'))
+                 .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                 if plot.id in set(b.plot_ids or []) | ({b.plot_id} if b.plot_id else set())),
+                None)
+            if holder:
+                return Response(
+                    {'detail': f'{plot.number} is held by a {holder.status} booking for '
+                               f'{holder.client_name} (#{holder.id}). Cancel that booking '
+                               f'first — freeing the unit here would leave the sale standing.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
         before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
         saved = ser.save()
         # The price is computed from the areas, so a change to them has to reach the
@@ -3729,7 +3752,7 @@ class ReportsView(APIView):
         user      = request.user
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
-        closure_qs = scope_to_company(Closure.objects.all(), user, 'company')
+        closure_qs = scope_to_company(Closure.objects.all(), user, 'company').exclude(status='cancelled')
         company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(user):
             leads_qs   = leads_qs.filter(company_id=company_id)
@@ -3898,7 +3921,8 @@ class MyTeamView(APIView):
             for row in Lead.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
                 lead_counts[row[fld]] = lead_counts.get(row[fld], 0) + row['c']
         for fld in ('stm_id', 'referred_by_telecaller_id'):
-            for row in Closure.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+            for row in (Closure.objects.filter(company=company, **{f'{fld}__in': ids})
+                        .exclude(status='cancelled').values(fld).annotate(c=Count('id'))):
                 closure_counts[row[fld]] = closure_counts.get(row[fld], 0) + row['c']
         data = [{
             'id':                u.id,
@@ -4071,8 +4095,18 @@ class BookingListCreateView(APIView):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
             qs = qs.filter(plot_id=request.query_params['plot'])
-        if request.query_params.get('status'):
-            qs = qs.filter(status=request.query_params['status'])
+        # A cancelled booking and a rejected one both sit at status='rejected' — the
+        # difference is in approval_status, and they are different events: one was
+        # refused before it counted, the other was a live sale that came off the
+        # books and keeps its signed LOI. The tabs ask for them separately, so the
+        # filter separates them rather than lumping both under Rejected.
+        st = request.query_params.get('status')
+        if st == 'cancelled':
+            qs = qs.filter(status='rejected', approval_status__icontains='CANCEL')
+        elif st == 'rejected':
+            qs = qs.filter(status='rejected').exclude(approval_status__icontains='CANCEL')
+        elif st:
+            qs = qs.filter(status=st)
         # The visibility rules above are ORed conditions that reach through `lead`
         # into the CP directory and the source table. Those are forward foreign keys
         # today, so a booking matching two arms still comes back once — but that is a
@@ -5378,18 +5412,24 @@ class ClosureCancelView(APIView):
         if linked_booking:
             notif_extra['booking_id'] = linked_booking.pk
 
+        # A cancellation is a record, not an erasure. The signed LOI stays in storage
+        # and stays linked: it is the evidence of what the buyer agreed to, and
+        # Accounts needs the cancelled deal and its PDF to reconcile against. Deleting
+        # the document left nothing to show the day someone disputes a cancellation,
+        # which is the one day it matters.
         for b in Booking.objects.filter(closure=closure):
-            if b.loi_document:
-                try: b.loi_document.delete(save=False)
-                except Exception: pass
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
             _release_plots(_pids)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
-            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+            b.save(update_fields=['status', 'approval_status'])
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
-        closure.delete()
+        # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
+        # Conversion counts exclude it (see the closure querysets in the dashboards),
+        # so the numbers are unchanged while the row survives for Accounts.
+        closure.status = 'cancelled'
+        closure.save(update_fields=['status'])
 
         _notify_closure_cancellation(
             notif_stm, notif_project, company,
@@ -5935,6 +5975,23 @@ class PlotBulkDeleteView(APIView):
             return Response({'detail': 'project_id is required.'}, status=400)
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Project not found.'}, status=404)
+        # Wiping the map does not cancel anything. Booking.plot is SET_NULL, so every
+        # live sale would survive pointing at no unit, and rebuilding the floor would
+        # bring those units back as available to be sold a second time — the same
+        # double-sale this project has already seen, through a different door.
+        # project_id is already scoped to the caller's company by _project_in_scope.
+        held = [b for b in Booking.objects.filter(project_id=project_id,
+                                                  status__in=('pending', 'sold'))
+                .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                if b.plot_id or b.plot_ids]
+        if held:
+            first = held[0]
+            return Response(
+                {'detail': f'{len(held)} unit(s) in this project are held by a live booking — '
+                           f'{first.client_name} (#{first.id}) among them. Cancel those bookings '
+                           f'first; deleting the map would leave the sales standing with no unit.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         deleted, _ = Plot.objects.filter(project_id=project_id).delete()
         Project.objects.filter(pk=project_id).update(total_plots=0)
         return Response({'deleted': deleted})

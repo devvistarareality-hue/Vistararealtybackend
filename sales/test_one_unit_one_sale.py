@@ -93,3 +93,103 @@ class OneUnitOneSaleTests(APITestCase):
         auth(self.client, self.admin)
         r = self.client.post(f'/api/sales/bookings/{revision.id}/action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
+
+
+class FreeingAUnitRequiresCancellingItsBookingTests(APITestCase):
+    """A unit cannot be freed from the plot editor while a live booking holds it.
+
+    Cancelling is a real operation — it voids the signed LOI, deletes the closure,
+    reopens the lead and notifies the chain. Editing the unit's status back to
+    available does none of that, so the sale stays live and approved while the unit
+    goes back on the map to be sold again. That is how six units came to have two
+    live sales each, with no cancellation recorded anywhere.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='FRU', name='Free Co')
+        cls.admin = User.objects.create(email='fru@x.com', company=cls.co, role='Admin',
+                                        designation='Admin', user_code='F0', name='Admin')
+        cls.project = Project.objects.create(company=cls.co, name='Free Tower')
+        cls.plot = Plot.objects.create(project=cls.project, number='504', status='sold',
+                                       size='84 sqyrd')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+
+    def _free(self):
+        return self.client.patch(f'/api/sales/plots/{self.plot.id}/',
+                                 {'status': 'available'}, format='json')
+
+    def test_a_sold_unit_cannot_be_freed_from_the_plot_editor(self):
+        b = Booking.objects.create(company=self.co, project=self.project, plot=self.plot,
+                                   plot_ids=[self.plot.id], status='sold',
+                                   client_name='Bhanubhai Kalabhai Parmar', phone='9000000097')
+        r = self._free()
+        self.assertEqual(r.status_code, 409, r.data)
+        self.assertIn(str(b.id), str(r.data))
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'sold')
+
+    def test_a_cancelled_booking_no_longer_holds_the_unit(self):
+        # What the cancel endpoint leaves behind: rejected + CANCELLED. The unit is
+        # then free, and re-booking it is exactly what should happen next.
+        Booking.objects.create(company=self.co, project=self.project, plot=self.plot,
+                               plot_ids=[self.plot.id], status='rejected',
+                               approval_status='CANCELLED',
+                               client_name='Cancelled Buyer', phone='9000000098')
+        self.assertEqual(self._free().status_code, 200)
+
+    def test_other_edits_to_a_sold_unit_still_work(self):
+        # The rule is about freeing the unit, not about touching it at all.
+        Booking.objects.create(company=self.co, project=self.project, plot=self.plot,
+                               plot_ids=[self.plot.id], status='sold',
+                               client_name='Held', phone='9000000099')
+        r = self.client.patch(f'/api/sales/plots/{self.plot.id}/',
+                              {'size': '90 sqyrd'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+
+
+class DeletingTheMapRequiresCancellingItsBookingsTests(APITestCase):
+    """"Delete All Plots" must not run over a project that has live sales.
+
+    Booking.plot is SET_NULL, so wiping the map leaves every sale standing with no
+    unit attached — and rebuilding the floor brings those units back as available, to
+    be sold a second time.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='DEL', name='Delete Co')
+        cls.admin = User.objects.create(email='del@x.com', company=cls.co, role='Admin',
+                                        designation='Admin', user_code='D0', name='Admin')
+        cls.project = Project.objects.create(company=cls.co, name='Delete Tower')
+        cls.plot = Plot.objects.create(project=cls.project, number='504', status='sold')
+        Plot.objects.create(project=cls.project, number='505', status='available')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+
+    def _wipe(self):
+        return self.client.delete('/api/sales/plots/bulk-delete/',
+                                  {'project_id': self.project.id}, format='json')
+
+    def test_a_project_with_a_live_sale_cannot_be_wiped(self):
+        b = Booking.objects.create(company=self.co, project=self.project, plot=self.plot,
+                                   plot_ids=[self.plot.id], status='sold',
+                                   client_name='Bhurasingh Pawar', phone='9000000100')
+        r = self._wipe()
+        self.assertEqual(r.status_code, 409, r.data)
+        self.assertIn(str(b.id), str(r.data))
+        self.assertEqual(Plot.objects.filter(project=self.project).count(), 2)
+
+    def test_a_project_with_no_live_sales_still_wipes(self):
+        Booking.objects.create(company=self.co, project=self.project, plot=self.plot,
+                               plot_ids=[self.plot.id], status='rejected',
+                               approval_status='CANCELLED',
+                               client_name='Cancelled', phone='9000000101')
+        r = self._wipe()
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(Plot.objects.filter(project=self.project).count(), 0)
