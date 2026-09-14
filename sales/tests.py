@@ -650,7 +650,10 @@ class ProjectApproverScopeTests(APITestCase):
         auth(self.client, self.sachin)
         res = self.client.post(f'/api/sales/closures/{c.id}/cancel/')
         self.assertEqual(res.status_code, 200)
-        self.assertFalse(Closure.objects.filter(id=c.id).exists())
+        # Cancelling marks the closure rather than deleting it — Accounts reconciles
+        # against cancelled deals, so the row and its signed LOI both survive.
+        c.refresh_from_db()
+        self.assertEqual(c.status, 'cancelled')
 
     def test_approval_notification_only_reaches_actual_approvers(self):
         """An 'approval needed' push is a request to act, so it must not go to someone

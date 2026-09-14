@@ -582,7 +582,7 @@ class StatsView(APIView):
         # way Closures means "closed in this period".
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         # Same CP/non-CP split as leads_qs above — these are independent queries
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
@@ -797,7 +797,7 @@ class StatsTrendView(APIView):
         )
 
         # Closures per day (by closure_date) — for the STM/CP reports charts.
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
@@ -3679,7 +3679,7 @@ class ReportsView(APIView):
         user      = request.user
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
-        closure_qs = scope_to_company(Closure.objects.all(), user, 'company')
+        closure_qs = scope_to_company(Closure.objects.all(), user, 'company').exclude(status='cancelled')
         company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(user):
             leads_qs   = leads_qs.filter(company_id=company_id)
@@ -3848,7 +3848,8 @@ class MyTeamView(APIView):
             for row in Lead.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
                 lead_counts[row[fld]] = lead_counts.get(row[fld], 0) + row['c']
         for fld in ('stm_id', 'referred_by_telecaller_id'):
-            for row in Closure.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+            for row in (Closure.objects.filter(company=company, **{f'{fld}__in': ids})
+                        .exclude(status='cancelled').values(fld).annotate(c=Count('id'))):
                 closure_counts[row[fld]] = closure_counts.get(row[fld], 0) + row['c']
         data = [{
             'id':                u.id,
@@ -5162,18 +5163,24 @@ class ClosureCancelView(APIView):
         if linked_booking:
             notif_extra['booking_id'] = linked_booking.pk
 
+        # A cancellation is a record, not an erasure. The signed LOI stays in storage
+        # and stays linked: it is the evidence of what the buyer agreed to, and
+        # Accounts needs the cancelled deal and its PDF to reconcile against. Deleting
+        # the document left nothing to show the day someone disputes a cancellation,
+        # which is the one day it matters.
         for b in Booking.objects.filter(closure=closure):
-            if b.loi_document:
-                try: b.loi_document.delete(save=False)
-                except Exception: pass
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
             _release_plots(_pids)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
-            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+            b.save(update_fields=['status', 'approval_status'])
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
-        closure.delete()
+        # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
+        # Conversion counts exclude it (see the closure querysets in the dashboards),
+        # so the numbers are unchanged while the row survives for Accounts.
+        closure.status = 'cancelled'
+        closure.save(update_fields=['status'])
 
         _notify_closure_cancellation(
             notif_stm, notif_project, company,
