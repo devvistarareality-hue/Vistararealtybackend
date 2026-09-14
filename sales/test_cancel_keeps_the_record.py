@@ -83,3 +83,46 @@ class CancelKeepsTheRecordTests(APITestCase):
         for member in r.data:
             if member['id'] == self.stm.id:
                 self.assertEqual(member['closures'], 0)
+
+
+class CancelledIsItsOwnTabTests(APITestCase):
+    """`?status=cancelled` and `?status=rejected` are different questions.
+
+    Both sit at status='rejected' in the table; the difference is approval_status. One
+    was refused before it counted for anything, the other was a live sale that came
+    off the books and keeps its signed LOI — so the tabs ask for them separately.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='CTB', name='Tab Co')
+        cls.admin = User.objects.create(email='ctb@x.com', company=cls.co, role='Admin',
+                                        designation='Admin', user_code='T0', name='Admin')
+        cls.project = Project.objects.create(company=cls.co, name='Tab Tower')
+        cls.cancelled = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.admin, status='rejected',
+            approval_status='CANCELLED', client_name='Came Off The Books', phone='9000000120')
+        cls.refused = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.admin, status='rejected',
+            approval_status='REJECTED', client_name='Refused Up Front', phone='9000000121')
+        cls.live = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.admin, status='sold',
+            approval_status='APPROVED', client_name='Standing', phone='9000000122')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+
+    def _ids(self, status):
+        r = self.client.get(f'/api/sales/bookings/?mine=1&status={status}')
+        self.assertEqual(r.status_code, 200)
+        return [b['id'] for b in r.data]
+
+    def test_cancelled_returns_only_cancelled(self):
+        self.assertEqual(self._ids('cancelled'), [self.cancelled.id])
+
+    def test_rejected_no_longer_carries_cancelled_with_it(self):
+        self.assertEqual(self._ids('rejected'), [self.refused.id])
+
+    def test_approved_is_untouched(self):
+        self.assertEqual(self._ids('sold'), [self.live.id])

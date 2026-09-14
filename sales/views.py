@@ -4022,8 +4022,18 @@ class BookingListCreateView(APIView):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
             qs = qs.filter(plot_id=request.query_params['plot'])
-        if request.query_params.get('status'):
-            qs = qs.filter(status=request.query_params['status'])
+        # A cancelled booking and a rejected one both sit at status='rejected' — the
+        # difference is in approval_status, and they are different events: one was
+        # refused before it counted, the other was a live sale that came off the
+        # books and keeps its signed LOI. The tabs ask for them separately, so the
+        # filter separates them rather than lumping both under Rejected.
+        st = request.query_params.get('status')
+        if st == 'cancelled':
+            qs = qs.filter(status='rejected', approval_status__icontains='CANCEL')
+        elif st == 'rejected':
+            qs = qs.filter(status='rejected').exclude(approval_status__icontains='CANCEL')
+        elif st:
+            qs = qs.filter(status=st)
         # The visibility rules above are ORed conditions that reach through `lead`
         # into the CP directory and the source table. Those are forward foreign keys
         # today, so a booking matching two arms still comes back once — but that is a
