@@ -100,6 +100,18 @@ TERRACE_RATE = 12000
 # Shops keep the original's charge rules (6% stamp on loan, 5% GST, AUDA 400/sq.ft,
 # 50% loan) but price on a size band of their own: the smaller the shop, the higher
 # the per-sq.ft rate.
+def area_of(raw):
+    """'60 sqyrd' / '60' / 60 -> 60.0. None when there is no number in there.
+
+    Areas are stored as free text on the Plot row, so every caller that turns one
+    into a price has to agree on how it is read.
+    """
+    if raw is None:
+        return None
+    m = re.search(r'\d+(?:\.\d+)?', str(raw))
+    return float(m.group()) if m else None
+
+
 SHOP_RATE_SMALL = 12000      # Rs per sq.ft, under SHOP_SMALL_BELOW
 SHOP_RATE_LARGE = 11000      # Rs per sq.ft, at or above it
 SHOP_SMALL_BELOW = 500       # sq.ft

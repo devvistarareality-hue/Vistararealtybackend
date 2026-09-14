@@ -1642,6 +1642,47 @@ class PlotListView(APIView):
         return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
 
 
+def _resync_generated_price_book(plot, before):
+    """Keep a generated price book in step with the areas it was generated from.
+
+    A unit's price book is computed from its `size`, so editing the size afterwards
+    left the two disagreeing — and nothing said so. Four Pratishtha 2 shops drifted
+    that way: D-SHOP18 showed 425 sq.ft on the unit map and priced at 415 in the
+    booking form, a ₹1.2 lakh difference on a ₹51 lakh shop, with the form quoting
+    the stale figure.
+
+    Regenerated only when the stored book is provably the generator's own output for
+    the areas it had before — recompute it from the old values and require an exact
+    match. A hand-written or differently-generated book fails that test and is left
+    untouched rather than silently replaced by a guess.
+    """
+    from .pricing import pratishtha2
+    keys = ('size', 'terrace_area', 'facing', 'floor')
+    if all(getattr(plot, k) == before.get(k) for k in keys):
+        return
+    stored = plot.price_book or {}
+    if not stored:
+        return
+
+    def generated(size, terrace, facing, floor):
+        area = pratishtha2.area_of(size)
+        return pratishtha2.price_book_for(
+            plot.number, flat_area=area, terrace_area=pratishtha2.area_of(terrace) or 0,
+            sq_feet=area, facing=facing, floor=floor)
+
+    try:
+        was = generated(before.get('size'), before.get('terrace_area'),
+                        before.get('facing'), before.get('floor'))
+        if not was or was != stored:
+            return                      # not this generator's book — leave it alone
+        now = generated(plot.size, plot.terrace_area, plot.facing, plot.floor)
+    except Exception:
+        return
+    if now and now != stored:
+        plot.price_book = now
+        plot.save(update_fields=['price_book'])
+
+
 class PlotDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1655,7 +1696,12 @@ class PlotDetailView(APIView):
         ser = PlotSerializer(plot, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(PlotSerializer(ser.save(), context={'request': request}).data)
+        before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
+        saved = ser.save()
+        # The price is computed from the areas, so a change to them has to reach the
+        # price book or the booking form goes on quoting the old one.
+        _resync_generated_price_book(saved, before)
+        return Response(PlotSerializer(saved, context={'request': request}).data)
 
 
 class PlotHoldView(APIView):
