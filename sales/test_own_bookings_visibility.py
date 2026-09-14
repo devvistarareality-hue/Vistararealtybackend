@@ -100,3 +100,52 @@ class MyBookingsScopeTests(APITestCase):
         """The rule is own work plus the reporting tree — not the whole company."""
         self.assertNotIn('Others Elsewhere',
                          self._names('/api/sales/bookings/?status=sold&mine=1'))
+
+
+class NoDuplicateRowsTests(APITestCase):
+    """A booking must appear once, however many of the visibility rules it satisfies.
+
+    The rules are ORed and reach through `lead` into the CP directory and the source
+    table, which is exactly the shape that starts returning a row per matching join.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='DUP', name='Dup Co')
+        cls.cp = User.objects.create(email='dup_cp@x.com', company=cls.co, role='Manager',
+                                     designation='CP CLUSTER HEAD', user_code='D1')
+        cls.reportee = User.objects.create(email='dup_rep@x.com', company=cls.co, role='STM',
+                                           designation='CP EXECUTIVE', user_code='D2',
+                                           reporting_manager=cls.cp)
+        cls.project = Project.objects.create(company=cls.co, name='Tower',
+                                             cp_booking_approvers=[cls.cp.id])
+        # Satisfies every arm at once: his own, CP-sourced, in a project he approves.
+        Booking.objects.create(company=cls.co, project=cls.project, stm=cls.cp,
+                               status='sold', source='Channel Partner',
+                               client_name='Every Rule', phone='9000000060')
+        # Satisfies two: a reportee's, and CP-sourced.
+        Booking.objects.create(company=cls.co, project=cls.project, stm=cls.reportee,
+                               status='sold', source='Channel Partner',
+                               client_name='Two Rules', phone='9000000061')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.cp)
+
+    def _ids(self, url):
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        return [b['id'] for b in r.data]
+
+    def test_my_bookings_lists_each_booking_once(self):
+        ids = self._ids('/api/sales/bookings/?status=sold&mine=1&cp_only=true')
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(len(ids), 2)
+
+    def test_approvals_lists_each_booking_once(self):
+        ids = self._ids('/api/sales/bookings/?status=sold&cp_only=true')
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_sales_my_bookings_lists_each_booking_once(self):
+        ids = self._ids('/api/sales/bookings/?status=sold&mine=1')
+        self.assertEqual(len(ids), len(set(ids)))

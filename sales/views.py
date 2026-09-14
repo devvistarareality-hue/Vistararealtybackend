@@ -3942,7 +3942,15 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
+        # The visibility rules above are ORed conditions that reach through `lead`
+        # into the CP directory and the source table. Those are forward foreign keys
+        # today, so a booking matching two arms still comes back once — but that is a
+        # property of the current joins, not of the query, and one reverse or
+        # many-to-many relation added to cp_lead_q would start listing bookings twice
+        # with nothing to signal it. Cheap to assert here, and the alternative is a
+        # duplicate showing up in someone's sales figures.
+        return Response(
+            BookingSerializer(qs.distinct(), many=True, context={'request': request}).data)
 
     def post(self, request):
         company = _resolve_company(request)
