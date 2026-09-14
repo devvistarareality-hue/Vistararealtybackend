@@ -110,20 +110,19 @@ class CpUserSeesOwnDraftTests(APITestCase):
         cache.clear()
         auth(self.client, self.cp)
 
-    def _names(self, url='/api/sales/bookings/?status=draft'):
+    def _names(self, url='/api/sales/bookings/?status=draft&mine=1&cp_only=true'):
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         return sorted(b['client_name'] for b in r.data)
 
     def test_a_cp_user_sees_their_own_non_cp_draft(self):
-        """The regression: resume needs to find it, whatever its Source says."""
+        """Their own work, whatever its Source says."""
         self.assertIn('Own Draft', self._names())
 
-    def test_an_approver_finds_their_own_draft_either_way(self):
-        """Approver scoping used to narrow the list to the projects you approve, which
-        hid an approver's own draft from themselves. Own work is now exempt from that
-        narrowing, so this holds with or without `mine=1` — the resume fetch no longer
-        depends on which of the two it asks for."""
+    def test_an_approver_finds_their_own_draft_on_my_bookings(self):
+        """Approver scoping narrows the approvals screen to the projects you approve,
+        which is right there and wrong for your own work — so own drafts are found
+        through My Bookings, and resuming loads by id rather than either list."""
         self.project.cp_booking_approvers = [self.cp.id]
         self.project.save(update_fields=['cp_booking_approvers'])
         other_project = Project.objects.create(company=self.co, name='Not Mine')
@@ -131,9 +130,10 @@ class CpUserSeesOwnDraftTests(APITestCase):
             company=self.co, project=other_project, stm=self.cp, status='draft',
             source='walk-in', client_name='Draft Elsewhere', phone='9000000020')
 
-        self.assertIn('Draft Elsewhere', self._names('/api/sales/bookings/?status=draft'))
         self.assertIn('Draft Elsewhere',
                       self._names('/api/sales/bookings/?status=draft&mine=1'))
+        self.assertIn('Draft Elsewhere',
+                      self._names('/api/sales/bookings/?status=draft&mine=1&cp_only=true'))
 
     def test_and_still_sees_their_cp_draft(self):
         self.assertIn('Own CP Draft', self._names())

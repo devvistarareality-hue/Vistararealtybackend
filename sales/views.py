@@ -3889,15 +3889,8 @@ class BookingListCreateView(APIView):
         # Own id plus everyone reporting to the requester, transitively — the pool a
         # manager sees when no approver list narrows things.
         own_and_team = _visible_user_ids(request.user)
-        # The CP module is a team view: a CP manager is meant to see what their people
-        # have sold as well as the CP pool they approve. The Sales side is deliberately
-        # the opposite — naming a manager as a project's approver narrows them to that
-        # project even for bookings by their own reports (ProjectApproverScopeTests
-        # pins this). So the reporting tree is only exempted from the narrowing for CP,
-        # and everywhere else it stays at the requester alone.
         cp_scoped = (request.query_params.get('cp_only') == 'true'
                      or is_cp_designated(request.user))
-        never_narrow = own_and_team if cp_scoped else {request.user.id}
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
         # A Channel-Partner-sourced booking is gated by its own approver list, so
         # someone named a CP approver (but not a regular one) still needs to see
@@ -3908,22 +3901,40 @@ class BookingListCreateView(APIView):
         # cp_lead_q) or its own free-text Source field — see
         # _is_cp_sourced_booking, mirrored here in query form.
         is_cp_booking_q = cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner')
-        if (approver_project_ids or cp_approver_project_ids) and not request.query_params.get('mine'):
-            qs = qs.filter(
-                (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
-                | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
-                # Your own work is never narrowed away, and in the CP module your
-                # team's is not either. Approver scoping answers "what do I review",
-                # which is a different question from "what have I sold" — collapsing
-                # the two hid a CP Cluster Head's own bookings from his own module,
-                # 51 of Kunal's 107 vanishing because they sat in projects he does not
-                # approve or were not CP-sourced.
-                | Q(stm_id__in=never_narrow)
-            )
-        elif not _sees_all_company(request.user, request, include_manager_role=False):
-            qs = qs.filter(stm__in=_visible_user_ids(request.user))
-        if request.query_params.get('mine'):           # "My Bookings" — only this user's
-            qs = qs.filter(stm=request.user)
+
+        # Two screens, two questions, and conflating them is what made this drift.
+        #
+        #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
+        #   reporting tree, and in the CP module the CP pool as well, since that is
+        #   the business the module exists to track.
+        #
+        #   otherwise — "Approvals": what I am named to decide, and nothing else.
+        #   Deliberately NOT widened to my own work: a booking I made but cannot
+        #   approve does not belong on the screen where the verdict is given. It shows
+        #   under My Bookings instead.
+        if request.query_params.get('mine'):
+            mine_q = Q(stm_id__in=own_and_team)
+            # The CP pool belongs to My Bookings only in the CP module, so this reads
+            # the explicit flag rather than the viewer's designation: a CP manager
+            # looking at Sales My Bookings should see their own and their team's work,
+            # not every partner-sourced deal in the company.
+            if request.query_params.get('cp_only') == 'true':
+                mine_q |= is_cp_booking_q
+            qs = qs.filter(mine_q)
+        else:
+            if approver_project_ids or cp_approver_project_ids:
+                qs = qs.filter(
+                    (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
+                    | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
+                )
+            elif not _sees_all_company(request.user, request, include_manager_role=False):
+                qs = qs.filter(stm_id__in=own_and_team)
+            if cp_scoped:
+                # The CP module's approvals are the CP pool, full stop. Reuse
+                # is_cp_booking_q rather than cp_lead_q alone: a Sales-module booking
+                # tagged Source = "Channel Partner" routes to the CP approvers, so it
+                # has to be visible to them or it is authorized but unreachable.
+                qs = qs.filter(is_cp_booking_q)
         qs = _drop_superseded_revisions(qs)
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
@@ -3931,28 +3942,6 @@ class BookingListCreateView(APIView):
             qs = qs.filter(plot_id=request.query_params['plot'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            # Reuse is_cp_booking_q (computed above), not cp_lead_q alone — a
-            # booking counts as CP-sourced either through its lead OR its own
-            # free-text Source field (see _is_cp_sourced_booking). Filtering on
-            # cp_lead_q alone dropped a Sales-module booking tagged Source =
-            # "Channel Partner" from this list even though _can_approve_booking
-            # already routes its approval to the CP approvers — it was
-            # authorized but invisible to the person meant to approve it.
-            #
-            # Your own work is exempt, whatever its Source says. A booking a CP user
-            # made themselves is theirs to see: the Source field records where the
-            # client came from, not who did the paperwork, so a CP rep booking a
-            # walk-in still needs it in their own list. It also covers drafts, which
-            # are uncategorised until a lead or Source says otherwise — filtering
-            # those out hid a CP user's own draft from their own list, so resuming it
-            # loaded nothing and the form sat on "Loading unit pricing…" forever.
-            #
-            # The three things a CP manager is meant to see: anything CP-sourced,
-            # anything their people sold, and anything they sold themselves — that
-            # last one whatever its Source says, since Source records where the client
-            # came from, not who did the paperwork.
-            qs = qs.filter(is_cp_booking_q | Q(stm_id__in=own_and_team))
         return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
 
     def post(self, request):

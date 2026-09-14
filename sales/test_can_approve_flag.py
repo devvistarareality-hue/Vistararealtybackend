@@ -46,9 +46,16 @@ class CanApproveFlagTests(APITestCase):
         self.assertEqual(r.status_code, 200)
         return {b['client_name']: b['can_approve'] for b in r.data}
 
-    def test_a_cp_approver_may_not_action_a_walk_in_they_booked(self):
-        """The reported case: it routes to the Sales approvers, not to him."""
-        self.assertIs(self._flags(self.cp_approver).get('Walk-in Deal'), False)
+    def test_a_walk_in_is_not_on_the_cp_approvers_screen_at_all(self):
+        """It routes to the Sales approvers, so it is not his to decide — and
+        Approvals shows only what you are named to decide, even for your own work."""
+        self.assertNotIn('Walk-in Deal', self._flags(self.cp_approver))
+
+    def test_but_it_is_on_his_my_bookings(self):
+        """He sold it, so it belongs there — just not on the approvals screen."""
+        auth(self.client, self.cp_approver)
+        r = self.client.get('/api/sales/bookings/?status=pending&mine=1&cp_only=true')
+        self.assertIn('Walk-in Deal', [b['client_name'] for b in r.data])
 
     def test_a_cp_approver_may_action_the_cp_deal(self):
         self.assertIs(self._flags(self.cp_approver).get('CP Deal'), True)

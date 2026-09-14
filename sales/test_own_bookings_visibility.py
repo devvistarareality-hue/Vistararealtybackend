@@ -1,12 +1,13 @@
-"""Being an approver must not hide your own bookings from you.
+"""What "My Bookings" shows, in each module.
 
-Approver scoping answers "what do I review". That is a different question from
-"what have I sold", and collapsing the two hid a CP Cluster Head's own bookings
-from their own module: of Kunal's 107, only 56 survived, because the rest sat in
-projects he does not approve or were not Channel-Partner-sourced.
+Two screens ask two different questions, and conflating them is what made this
+drift. My Bookings is "what I and my people have sold" — own work plus the
+reporting tree, and in the CP module the partner-sourced pool as well. Approvals
+is "what am I named to decide", and is covered by test_can_approve_flag.
 
-The `mine=1` exemption already in the view was the same intent, applied only when
-the caller happened to ask for it — every other screen got the narrowed list.
+A CP Cluster Head's own bookings had been vanishing from his own module: of
+Kunal's 107, only 56 survived, the rest sitting in projects he does not approve or
+simply not being Channel-Partner-sourced.
 """
 from django.core.cache import cache
 from rest_framework.test import APITestCase
@@ -18,7 +19,7 @@ from sales.models import Booking, Project
 from sales.tests import auth
 
 
-class OwnBookingsSurviveApproverScopingTests(APITestCase):
+class MyBookingsScopeTests(APITestCase):
     @classmethod
     def setUpTestData(cls):
         cls.co = Company.objects.create(code='OWN', name='Own Co')
@@ -57,7 +58,7 @@ class OwnBookingsSurviveApproverScopingTests(APITestCase):
         cache.clear()
         auth(self.client, self.cp)
 
-    def _names(self, url='/api/sales/bookings/?status=sold&cp_only=true'):
+    def _names(self, url='/api/sales/bookings/?status=sold&mine=1&cp_only=true'):
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         return sorted(b['client_name'] for b in r.data)
@@ -72,24 +73,30 @@ class OwnBookingsSurviveApproverScopingTests(APITestCase):
         """The exact shape of the ones that went missing."""
         self.assertIn('Own Elsewhere', self._names())
 
-    def test_the_cp_pool_i_approve_is_still_listed(self):
+    def test_the_cp_pool_is_listed_in_the_cp_module(self):
+        """The module tracks partner business, so the pool belongs here too."""
         self.assertIn('Others CP Here', self._names())
+
+    def test_the_cp_pool_is_not_listed_in_sales(self):
+        """Same screen in Sales is own work and the team's, nothing more."""
+        self.assertNotIn('Others CP Here',
+                         self._names('/api/sales/bookings/?status=sold&mine=1'))
 
     def test_someone_elses_work_outside_my_remit_is_not(self):
         """The exemption is stm=self — it must not widen into a company-wide list."""
         self.assertNotIn('Others Elsewhere', self._names())
 
-    def test_mine_still_returns_only_mine(self):
+    def test_sales_my_bookings_is_own_work_and_the_team(self):
         self.assertEqual(
             self._names('/api/sales/bookings/?status=sold&mine=1'),
-            ['Own CP Here', 'Own Elsewhere', 'Own Walk-in Here'])
+            ['Own CP Here', 'Own Elsewhere', 'Own Walk-in Here', 'Reportee Walk-in'])
 
     def test_a_reportees_booking_is_listed_whatever_its_source(self):
         """A CP manager sees what the people reporting to them have sold, not only
         what came through a channel partner."""
         self.assertIn('Reportee Walk-in', self._names())
 
-    def test_a_reportees_work_is_not_returned_by_mine(self):
-        """`mine` means mine — the team rule widens the module, not that query."""
-        self.assertNotIn('Reportee Walk-in',
+    def test_someone_outside_the_tree_is_never_returned(self):
+        """The rule is own work plus the reporting tree — not the whole company."""
+        self.assertNotIn('Others Elsewhere',
                          self._names('/api/sales/bookings/?status=sold&mine=1'))
