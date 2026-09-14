@@ -3725,6 +3725,7 @@ class MyTeamView(APIView):
         module = (request.query_params.get('module') or '').strip()  # department/module org chart
         scope  = request.query_params.get('scope')                   # 'all' → full company org
         admin_view = request.query_params.get('admin_view') == '1'
+        cp_chart = request.query_params.get('cp') == '1'             # Channel Partner org chart
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
         is_admin = _sees_all_company(user, request, include_manager_role=False)
 
@@ -3741,7 +3742,16 @@ class MyTeamView(APIView):
                 .distinct().select_related('reporting_manager').order_by('name')
             )
 
-        if is_admin and module:
+        if is_admin and cp_chart:
+            # The Channel Partner org chart. Scoped by designation rather than by
+            # `module`, because there is no "Channel Partner" module to assign anyone
+            # to — CP staff sit in Sales and are marked by a CP designation, which is
+            # the same test that decides who gets into the module at all.
+            all_users = (User.objects.filter(company=company, is_active=True)
+                         .select_related('reporting_manager').order_by('name'))
+            members = [u for u in all_users if is_cp_designated(u)]
+            ids = {u.id for u in members}
+        elif is_admin and module:
             # Department/module org chart — users assigned to this module.
             all_users = (User.objects.filter(company=company, is_active=True)
                          .select_related('reporting_manager').order_by('name'))
