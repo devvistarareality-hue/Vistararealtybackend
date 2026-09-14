@@ -1696,6 +1696,29 @@ class PlotDetailView(APIView):
         ser = PlotSerializer(plot, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Freeing a unit here does not cancel the booking that holds it, so a unit
+        # edited back to available could be sold again while the first sale stayed
+        # live and approved. Six units ended up with two live sales that way — both
+        # sides APPROVED, both closures intact, no cancellation recorded anywhere.
+        # Cancelling is a real operation: it voids the signed LOI, deletes the
+        # closure, reopens the lead and notifies the chain. It has to go through that
+        # path, not through a status dropdown.
+        new_status = str(request.data.get('status') or '').strip()
+        if new_status and new_status != plot.status and new_status in ('available', 'resale'):
+            holder = next(
+                (b for b in Booking.objects.filter(company=plot.project.company,
+                                                   status__in=('pending', 'sold'))
+                 .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                 if plot.id in set(b.plot_ids or []) | ({b.plot_id} if b.plot_id else set())),
+                None)
+            if holder:
+                return Response(
+                    {'detail': f'{plot.number} is held by a {holder.status} booking for '
+                               f'{holder.client_name} (#{holder.id}). Cancel that booking '
+                               f'first — freeing the unit here would leave the sale standing.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
         before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
         saved = ser.save()
         # The price is computed from the areas, so a change to them has to reach the
