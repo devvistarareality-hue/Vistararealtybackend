@@ -6,7 +6,7 @@ from datetime import datetime, time as dt_time, timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Count, OuterRef, Subquery, Case, When, Value, F
+from django.db.models import Q, Count, OuterRef, Subquery, Case, When, Value, F, BooleanField
 from django.utils import timezone
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -3949,6 +3949,13 @@ class BookingListCreateView(APIView):
         # many-to-many relation added to cp_lead_q would start listing bookings twice
         # with nothing to signal it. Cheap to assert here, and the alternative is a
         # duplicate showing up in someone's sales figures.
+        # Resolved once for the whole page rather than per row: the CP test reaches
+        # into the lead's partner and source, so the serializer computing it alone
+        # would be a query per booking. Powers the 'Source: CP' filter in the CP
+        # module, and it is the same predicate that routes approvals.
+        qs = qs.annotate(cp_sourced_ann=Case(
+            When(is_cp_booking_q, then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
         return Response(
             BookingSerializer(qs.distinct(), many=True, context={'request': request}).data)
 

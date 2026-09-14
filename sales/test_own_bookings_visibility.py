@@ -14,7 +14,7 @@ from rest_framework.test import APITestCase
 
 from companies.models import Company
 from accounts.models import User
-from sales.models import Booking, Project
+from sales.models import Booking, Lead, LeadSource, Project
 
 from sales.tests import auth
 
@@ -149,3 +149,72 @@ class NoDuplicateRowsTests(APITestCase):
     def test_sales_my_bookings_lists_each_booking_once(self):
         ids = self._ids('/api/sales/bookings/?status=sold&mine=1')
         self.assertEqual(len(ids), len(set(ids)))
+
+
+class CpSourcedFlagTests(APITestCase):
+    """`is_cp_sourced` on each booking — what the CP module's "Source: CP" filter reads.
+
+    It has to come from the server. The rule is "the lead is CP-attributed OR the
+    booking's own Source says so", and the lead half never reaches the client: a UI
+    guessing from the fields it does have — Source plus the free-text cp_name —
+    called 107 of a real cluster head's 133 bookings CP-sourced where the server
+    counts 68, because a Reference deal can still name a partner in cp_name.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='CPF', name='Flag Co')
+        cls.user = User.objects.create(email='flag@x.com', company=cls.co, role='Manager',
+                                       designation='CP CLUSTER HEAD', user_code='F1')
+        cls.project = Project.objects.create(company=cls.co, name='Flag Tower')
+        cp_source = LeadSource.objects.create(company=cls.co, name='Channel Partner')
+        ref_source = LeadSource.objects.create(company=cls.co, name='Reference')
+
+        # 1. Partner-sourced by the booking's own free-text Source.
+        cls.by_source = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.user, status='sold',
+            source='Channel Partner', client_name='By Source', phone='9000000070')
+        # 2. Partner-sourced through the lead, with the booking's Source saying
+        #    something else entirely — the case a client-side guess cannot see.
+        lead = Lead.objects.create(company=cls.co, name='Via Lead', phone='9000000071',
+                                   source=cp_source, stm=cls.user)
+        cls.by_lead = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.user, status='sold', lead=lead,
+            source='Reference', client_name='Via Lead', phone='9000000071')
+        # 3. Not partner-sourced, but names a partner in the free-text cp_name. This
+        #    is the row a client-side guess gets wrong.
+        ref_lead = Lead.objects.create(company=cls.co, name='Plain Ref', phone='9000000072',
+                                       source=ref_source, stm=cls.user)
+        cls.plain = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.user, status='sold', lead=ref_lead,
+            source='Reference', cp_name='SOME PARTNER NAME',
+            client_name='Plain Ref', phone='9000000072')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.user)
+
+    def _flags(self):
+        r = self.client.get('/api/sales/bookings/?status=sold&mine=1&cp_only=true')
+        self.assertEqual(r.status_code, 200)
+        return {b['id']: b['is_cp_sourced'] for b in r.data}
+
+    def test_booking_source_marks_it_cp(self):
+        self.assertIs(self._flags()[self.by_source.id], True)
+
+    def test_lead_source_marks_it_cp_even_when_the_booking_says_otherwise(self):
+        self.assertIs(self._flags()[self.by_lead.id], True)
+
+    def test_a_named_partner_alone_does_not_make_it_cp(self):
+        # cp_name is free text on a Reference deal — the money did not come through
+        # the partner, and the filter must not claim it did.
+        self.assertIs(self._flags()[self.plain.id], False)
+
+    def test_the_flag_survives_without_the_list_annotation(self):
+        # The detail endpoint doesn't annotate, so the serializer computes it. The
+        # two paths have to agree or the filter and the opened booking contradict.
+        listed = self._flags()
+        for b in (self.by_source, self.by_lead, self.plain):
+            r = self.client.get(f'/api/sales/bookings/{b.id}/')
+            self.assertEqual(r.status_code, 200)
+            self.assertIs(r.data['is_cp_sourced'], listed[b.id])

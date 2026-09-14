@@ -208,6 +208,25 @@ class BookingSerializer(serializers.ModelSerializer):
     # the booking not being theirs to decide.
     can_approve = serializers.SerializerMethodField()
 
+    # Whether this deal came through a channel partner. Deliberately server-side:
+    # the rule is "the lead is CP-attributed OR the booking's own Source says so",
+    # and the lead half is invisible to the client. A UI guessing from the fields it
+    # does have — Source plus the free-text cp_name — called 107 of Kunal's 133
+    # bookings CP-sourced where the server counts 68, because a Reference deal can
+    # still name a partner in cp_name. Same predicate that routes approvals, so the
+    # filter and the approver list can never disagree.
+    is_cp_sourced = serializers.SerializerMethodField()
+
+    def get_is_cp_sourced(self, obj):
+        # The list view annotates this (one query for the whole page); everywhere
+        # else falls back to computing it, which costs a lead lookup per object and
+        # is only ever reached for a single booking.
+        annotated = getattr(obj, 'cp_sourced_ann', None)
+        if annotated is not None:
+            return bool(annotated)
+        from .views import _is_cp_sourced_booking
+        return bool(_is_cp_sourced_booking(obj.lead_id, obj.source))
+
     def get_can_approve(self, obj):
         if obj.status != 'pending':
             return False
@@ -224,7 +243,7 @@ class BookingSerializer(serializers.ModelSerializer):
         model = Booking
         fields = '__all__'
         read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
-                            'project_name', 'plot_number', 'stm_name']
+                            'project_name', 'plot_number', 'stm_name', 'is_cp_sourced']
 
 
 class LeadUserSerializer(serializers.Serializer):
