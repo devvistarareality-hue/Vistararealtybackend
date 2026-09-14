@@ -320,3 +320,35 @@ class RevisionHistoryReachTests(APITestCase):
         # Half-finished commercial terms are deliberately not browsable by every
         # manager; widening the general rule must not quietly undo that.
         self.assertEqual(self._get(self.director, self.draft.id).status_code, 404)
+
+
+class AccountsRevisionHistoryTests(APITestCase):
+    """Accounts & Finance reads every approved booking, so it may read their history.
+
+    Their visibility comes from the module they are in, not from owning the booking,
+    approving it, or sitting above anyone — so the narrower checks all miss them.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='ACR', name='Accounts Co')
+        cls.reviewer = User.objects.create(email='ar_acc@x.com', company=cls.co, role='Employee',
+                                           designation='ACCOUNTANT', user_code='A1',
+                                           name='Reviewer', modules=['Accounts & Finance'])
+        cls.stm = User.objects.create(email='ar_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='A2', name='Stm')
+        cls.project = Project.objects.create(company=cls.co, name='Accounts Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Vidhi Kher', phone='9898060667', plot_numbers='Karuna23')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=21100000, **common)
+        cls.r1 = Booking.objects.create(status='sold', revision_no=1, final_amount=21100000,
+                                        revision_of=cls.r0, **common)
+
+    def setUp(self):
+        cache.clear()
+
+    def test_an_accounts_reviewer_can_open_the_history(self):
+        auth(self.client, self.reviewer)
+        r = self.client.get(f'/api/sales/bookings/{self.r1.id}/revisions/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([b['id'] for b in r.data], [self.r0.id, self.r1.id])

@@ -4256,7 +4256,9 @@ def _can_view_booking(user, booking, company):
         return True
     if is_cp_designated(user) and _is_cp_sourced_booking(booking.lead_id, booking.source):
         return True
-    return bool(_sees_all_company(user, include_manager_role=False))
+    # Company-wide viewers, and the Accounts & Finance reviewers who already read
+    # every approved booking in their own list — the same test that screen uses.
+    return bool(_can_view_all_bookings(user))
 
 
 class BookingRevisionsView(APIView):
