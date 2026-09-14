@@ -209,3 +209,64 @@ class SupersededAcrossVisibilityTests(APITestCase):
         ids = self._ids(self.director, '/api/sales/bookings/?mine=1&status=sold')
         self.assertIn(self.revision.id, ids)
         self.assertNotIn(self.original.id, ids)
+
+
+class RevisionHistoryEndpointTests(APITestCase):
+    """GET /api/sales/bookings/<pk>/revisions/ — every version of one deal.
+
+    Only the latest version is listed anywhere, which is right: a deal should appear
+    once and at its current terms. But the earlier ones are what was signed at the
+    time, and until now nothing in the product could reach them.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='RHE', name='History Co')
+        cls.other_co = Company.objects.create(code='RHX', name='Other Co')
+        cls.stm = User.objects.create(email='rh_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='H1', name='Stm')
+        cls.stranger = User.objects.create(email='rh_str@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='H2', name='Stranger')
+        cls.project = Project.objects.create(company=cls.co, name='History Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Jignesh Rami', phone='9824818649', plot_numbers='EOI-1')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=4680000, **common)
+        # A rejected middle version: excluded from "what is live", but it is exactly
+        # what someone opening the history wants to see.
+        cls.r1 = Booking.objects.create(status='rejected', revision_no=1, final_amount=4700000,
+                                        revision_of=cls.r0, **common)
+        cls.r2 = Booking.objects.create(status='sold', revision_no=2, final_amount=4750000,
+                                        revision_of=cls.r1, **common)
+
+    def setUp(self):
+        cache.clear()
+
+    def _get(self, user, pk):
+        auth(self.client, user)
+        return self.client.get(f'/api/sales/bookings/{pk}/revisions/')
+
+    def test_every_version_comes_back_oldest_first(self):
+        r = self._get(self.stm, self.r2.id)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([(b['id'], b['revision_no']) for b in r.data],
+                         [(self.r0.id, 0), (self.r1.id, 1), (self.r2.id, 2)])
+
+    def test_a_rejected_version_is_part_of_the_history(self):
+        ids = [b['id'] for b in self._get(self.stm, self.r2.id).data]
+        self.assertIn(self.r1.id, ids)
+
+    def test_asking_from_any_version_gives_the_same_chain(self):
+        frm_r0 = [b['id'] for b in self._get(self.stm, self.r0.id).data]
+        frm_r2 = [b['id'] for b in self._get(self.stm, self.r2.id).data]
+        self.assertEqual(frm_r0, frm_r2)
+
+    def test_someone_with_no_claim_on_the_booking_gets_nothing(self):
+        # 404 rather than 403: a booking you may not see should not be confirmed to
+        # exist by the error you get back.
+        self.assertEqual(self._get(self.stranger, self.r2.id).status_code, 404)
+
+    def test_a_booking_in_another_company_is_not_reachable(self):
+        foreign = User.objects.create(email='rh_foreign@x.com', company=self.other_co,
+                                      role='Admin', designation='Admin', user_code='H3',
+                                      name='Foreign Admin')
+        self.assertEqual(self._get(foreign, self.r2.id).status_code, 404)

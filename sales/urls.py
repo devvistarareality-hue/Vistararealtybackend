@@ -32,6 +32,7 @@ urlpatterns = [
     path('bookings/<int:pk>/action/',  views.BookingActionView.as_view()),
     path('bookings/<int:pk>/',         views.BookingDetailView.as_view()),
     path('bookings/<int:pk>/loi-url/', views.BookingLOIUrlView.as_view()),
+    path('bookings/<int:pk>/revisions/', views.BookingRevisionsView.as_view()),
     path('bookings/<int:pk>/discard/', views.BookingDiscardDraftView.as_view()),
     path('media/upload/',              views.MediaUploadView.as_view()),
     path('media/delete/',              views.MediaDeleteView.as_view()),

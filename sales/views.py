@@ -4228,6 +4228,43 @@ class BookingListCreateView(APIView):
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 
+def _can_view_booking(user, booking, company):
+    """Who may open one booking: the person whose it is, a real admin, and whoever
+    approves it — the same authority the approvals screen uses, via
+    _can_approve_booking, so a CP-sourced booking follows the CP list."""
+    return bool(
+        booking.stm_id == user.id
+        or _is_hard_admin(user)
+        or _can_approve_booking(user, booking.project_id, booking.project_id,
+                                booking.lead_id, company, booking.source)
+    )
+
+
+class BookingRevisionsView(APIView):
+    """Every version of one deal, oldest first — R0, R1, R2 — each with its own
+    figures and its own signed LOI.
+
+    Only the latest version is listed anywhere, which is right: a deal should appear
+    once and at its current terms. But the earlier ones are what was signed at the
+    time, and until now there was no way to reach them from the product at all.
+
+    Gated exactly as opening the booking is. The earlier versions are the same deal,
+    so seeing the current one is the authority to see how it got there.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        company = _resolve_company(request)
+        b = Booking.objects.filter(pk=pk, company=company).first()
+        # 404 rather than 403: a booking you may not see should not be confirmed to
+        # exist by the error you get back.
+        if b is None or not _can_view_booking(request.user, b, company):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        qs = (Booking.objects.filter(id__in=_revision_chain_ids(b.id, company), company=company)
+              .select_related('project', 'plot', 'stm').order_by('revision_no', 'id'))
+        return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
+
+
 class BookingDetailView(APIView):
     """One booking by id, for opening it directly rather than hunting the list.
 
@@ -4249,13 +4286,7 @@ class BookingDetailView(APIView):
              .select_related('project', 'plot', 'stm').first())
         if b is None:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        allowed = (
-            b.stm_id == request.user.id
-            or _is_hard_admin(request.user)
-            or _can_approve_booking(request.user, b.project_id, b.project_id,
-                                    b.lead_id, company, b.source)
-        )
-        if not allowed:
+        if not _can_view_booking(request.user, b, company):
             # 404 rather than 403: a booking you may not see should not be
             # confirmed to exist by the error you get back.
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -4432,9 +4463,22 @@ def _drop_superseded_revisions(qs, scope=None):
     was booked by someone outside his module — so his figure read 108 where the same
     slice read 107 in Sales, and the extra row carried superseded commercial terms.
     """
-    rows = [r for r in (scope if scope is not None else qs)
-            .values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
-                    'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
+    groups = _revision_groups(scope if scope is not None else qs)
+    drop = set()
+    for g in groups.values():
+        if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
+            continue
+        keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
+        drop.update(x['id'] for x in g if x['id'] != keep['id'])
+    return qs.exclude(id__in=drop) if drop else qs
+
+
+def _revision_groups(scope):
+    """The rows of `scope`, gathered into one group per deal. See
+    _drop_superseded_revisions for how rows are connected; this is that grouping on
+    its own, so the revision history can reuse it rather than restate it."""
+    rows = [r for r in scope.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
+                                    'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
             if r['status'] != 'rejected']
 
     parent = {r['id']: r['id'] for r in rows}
@@ -4471,13 +4515,36 @@ def _drop_superseded_revisions(qs, scope=None):
     groups = {}
     for r in rows:
         groups.setdefault(find(r['id']), []).append(r)
-    drop = set()
-    for g in groups.values():
-        if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
-            continue
-        keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
-        drop.update(x['id'] for x in g if x['id'] != keep['id'])
-    return qs.exclude(id__in=drop) if drop else qs
+    return groups
+
+
+def _revision_chain_ids(booking_id, company):
+    """Every booking that is a version of this same deal, this one included.
+
+    Starts from the grouping the listing uses, then walks `revision_of` in both
+    directions to pull in rejected versions too: a rejected R1 is excluded from "what
+    is live", which is right for a list, but it is exactly what someone opening the
+    history wants to see.
+    """
+    ids = {booking_id}
+    for g in _revision_groups(Booking.objects.filter(company=company)).values():
+        group_ids = {r['id'] for r in g}
+        if booking_id in group_ids:
+            ids |= group_ids
+            break
+    links = list(Booking.objects.filter(company=company, revision_of__isnull=False)
+                 .values_list('id', 'revision_of_id'))
+    adjacent = {}
+    for child, par in links:
+        adjacent.setdefault(child, set()).add(par)
+        adjacent.setdefault(par, set()).add(child)
+    queue = list(ids)
+    while queue:
+        for nxt in adjacent.get(queue.pop(), ()):
+            if nxt not in ids:
+                ids.add(nxt)
+                queue.append(nxt)
+    return ids
 
 
 def _can_view_all_bookings(user):
