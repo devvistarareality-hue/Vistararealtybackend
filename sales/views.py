@@ -5719,6 +5719,23 @@ class PlotBulkDeleteView(APIView):
             return Response({'detail': 'project_id is required.'}, status=400)
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Project not found.'}, status=404)
+        # Wiping the map does not cancel anything. Booking.plot is SET_NULL, so every
+        # live sale would survive pointing at no unit, and rebuilding the floor would
+        # bring those units back as available to be sold a second time — the same
+        # double-sale this project has already seen, through a different door.
+        # project_id is already scoped to the caller's company by _project_in_scope.
+        held = [b for b in Booking.objects.filter(project_id=project_id,
+                                                  status__in=('pending', 'sold'))
+                .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                if b.plot_id or b.plot_ids]
+        if held:
+            first = held[0]
+            return Response(
+                {'detail': f'{len(held)} unit(s) in this project are held by a live booking — '
+                           f'{first.client_name} (#{first.id}) among them. Cancel those bookings '
+                           f'first; deleting the map would leave the sales standing with no unit.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         deleted, _ = Plot.objects.filter(project_id=project_id).delete()
         Project.objects.filter(pk=project_id).update(total_plots=0)
         return Response({'deleted': deleted})
