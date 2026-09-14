@@ -3886,6 +3886,18 @@ class BookingListCreateView(APIView):
         # projects he is named on). `?mine` is the user's own bookings list, so it is
         # left on the normal scoping or an approver loses sight of their own bookings
         # in projects they don't approve. Real admins are exempt entirely.
+        # Own id plus everyone reporting to the requester, transitively — the pool a
+        # manager sees when no approver list narrows things.
+        own_and_team = _visible_user_ids(request.user)
+        # The CP module is a team view: a CP manager is meant to see what their people
+        # have sold as well as the CP pool they approve. The Sales side is deliberately
+        # the opposite — naming a manager as a project's approver narrows them to that
+        # project even for bookings by their own reports (ProjectApproverScopeTests
+        # pins this). So the reporting tree is only exempted from the narrowing for CP,
+        # and everywhere else it stays at the requester alone.
+        cp_scoped = (request.query_params.get('cp_only') == 'true'
+                     or is_cp_designated(request.user))
+        never_narrow = own_and_team if cp_scoped else {request.user.id}
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
         # A Channel-Partner-sourced booking is gated by its own approver list, so
         # someone named a CP approver (but not a regular one) still needs to see
@@ -3900,14 +3912,13 @@ class BookingListCreateView(APIView):
             qs = qs.filter(
                 (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
                 | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
-                # Your own work is never narrowed away. Approver scoping answers
-                # "what do I review", which is a different question from "what have I
-                # sold", and collapsing the two hid a CP Cluster Head's own bookings
-                # from their own module — 51 of Kunal's 107 vanished, because they
-                # sat in projects he does not approve or were not CP-sourced. The
-                # `mine` exemption above was the same intent, applied only where the
-                # caller happened to ask for it.
-                | Q(stm=request.user)
+                # Your own work is never narrowed away, and in the CP module your
+                # team's is not either. Approver scoping answers "what do I review",
+                # which is a different question from "what have I sold" — collapsing
+                # the two hid a CP Cluster Head's own bookings from his own module,
+                # 51 of Kunal's 107 vanishing because they sat in projects he does not
+                # approve or were not CP-sourced.
+                | Q(stm_id__in=never_narrow)
             )
         elif not _sees_all_company(request.user, request, include_manager_role=False):
             qs = qs.filter(stm__in=_visible_user_ids(request.user))
@@ -3937,11 +3948,11 @@ class BookingListCreateView(APIView):
             # those out hid a CP user's own draft from their own list, so resuming it
             # loaded nothing and the form sat on "Loading unit pricing…" forever.
             #
-            # Scoped to stm=self, so this reveals nobody else's work, and it widens
-            # only this pool filter: the approver scoping above still applies, so it
-            # does not put anyone's bookings in front of an approver who should not
-            # see them.
-            qs = qs.filter(is_cp_booking_q | Q(stm=request.user))
+            # The three things a CP manager is meant to see: anything CP-sourced,
+            # anything their people sold, and anything they sold themselves — that
+            # last one whatever its Source says, since Source records where the client
+            # came from, not who did the paperwork.
+            qs = qs.filter(is_cp_booking_q | Q(stm_id__in=own_and_team))
         return Response(BookingSerializer(qs, many=True).data)
 
     def post(self, request):

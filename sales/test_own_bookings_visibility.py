@@ -26,6 +26,10 @@ class OwnBookingsSurviveApproverScopingTests(APITestCase):
                                      designation='CP CLUSTER HEAD', user_code='O1')
         cls.other = User.objects.create(email='own_other@x.com', company=cls.co, role='STM',
                                         designation='STM', user_code='O2')
+        # Reports to the CP manager, so their work is his to see as well.
+        cls.reportee = User.objects.create(email='own_rep@x.com', company=cls.co,
+                                           role='STM', designation='CP EXECUTIVE',
+                                           user_code='O3', reporting_manager=cls.cp)
         # He approves this one...
         cls.approved_project = Project.objects.create(
             company=cls.co, name='Mine To Approve', cp_booking_approvers=[cls.cp.id])
@@ -46,6 +50,8 @@ class OwnBookingsSurviveApproverScopingTests(APITestCase):
                                 phone='9000000043')
         cls.others_elsewhere = mk(project=cls.elsewhere, stm=cls.other, source='walk-in',
                                   client_name='Others Elsewhere', phone='9000000044')
+        cls.reportee_walkin = mk(project=cls.elsewhere, stm=cls.reportee, source='walk-in',
+                                 client_name='Reportee Walk-in', phone='9000000045')
 
     def setUp(self):
         cache.clear()
@@ -77,3 +83,13 @@ class OwnBookingsSurviveApproverScopingTests(APITestCase):
         self.assertEqual(
             self._names('/api/sales/bookings/?status=sold&mine=1'),
             ['Own CP Here', 'Own Elsewhere', 'Own Walk-in Here'])
+
+    def test_a_reportees_booking_is_listed_whatever_its_source(self):
+        """A CP manager sees what the people reporting to them have sold, not only
+        what came through a channel partner."""
+        self.assertIn('Reportee Walk-in', self._names())
+
+    def test_a_reportees_work_is_not_returned_by_mine(self):
+        """`mine` means mine — the team rule widens the module, not that query."""
+        self.assertNotIn('Reportee Walk-in',
+                         self._names('/api/sales/bookings/?status=sold&mine=1'))
