@@ -11,7 +11,7 @@ from rest_framework.test import APITestCase
 
 from companies.models import Company
 from accounts.models import User
-from sales.models import Booking, Plot, Project
+from sales.models import Booking, Closure, Lead, Plot, Project
 
 from sales.tests import auth
 
@@ -193,3 +193,64 @@ class DeletingTheMapRequiresCancellingItsBookingsTests(APITestCase):
         r = self._wipe()
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(Plot.objects.filter(project=self.project).count(), 0)
+
+
+class ReleasingAUnitRespectsOtherSalesTests(APITestCase):
+    """Releasing a unit must not free one that another live booking still holds.
+
+    Pratishtha 102 read as available on the unit map while Umesh's approved sale stood
+    on it. An older booking on the same unit had been cancelled, and its release put
+    the unit straight back on the map — a rep then drafted on it, and the map showed
+    the unit In Progress for somebody else while the real sale sat approved.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='REL', name='Release Co')
+        cls.admin = User.objects.create(email='rel@x.com', company=cls.co, role='Admin',
+                                        designation='Admin', user_code='R0', name='Admin')
+        cls.project = Project.objects.create(company=cls.co, name='Release Tower',
+                                             booking_approvers=[cls.admin.id])
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+        self.plot = Plot.objects.create(project=self.project, number='102', status='sold')
+        self.lead = Lead.objects.create(company=self.co, name='Older', phone='9000000140')
+        self.live = Booking.objects.create(
+            company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
+            status='sold', approval_status='APPROVED', client_name='Umesh', phone='9000000141')
+
+    def test_cancelling_another_booking_does_not_free_the_unit(self):
+        closure = Closure.objects.create(company=self.co, lead=self.lead, project=self.project,
+                                         stm=self.admin, client_name='Older', status='booked',
+                                         closure_date='2026-08-01', unit_no='102')
+        older = Booking.objects.create(
+            company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
+            lead=self.lead, closure=closure, status='sold', approval_status='APPROVED',
+            client_name='Devendra sinh Rajput', phone='9000000142')
+        r = self.client.post(f'/api/sales/closures/{closure.id}/cancel/', {}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        older.refresh_from_db()
+        self.assertEqual(older.approval_status, 'CANCELLED')
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'sold', "Umesh's sale still holds this unit")
+
+    def test_discarding_a_draft_does_not_free_a_sold_unit(self):
+        draft = Booking.objects.create(
+            company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
+            stm=self.admin, status='draft', client_name='Umesh Tomar', phone='9000000143')
+        r = self.client.post(f'/api/sales/bookings/{draft.id}/discard/')
+        self.assertIn(r.status_code, (200, 204), getattr(r, 'data', None))
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'sold')
+
+    def test_a_unit_with_no_other_claim_is_still_released(self):
+        # The ordinary case has to keep working: nothing else holds it, so it goes back.
+        free_plot = Plot.objects.create(project=self.project, number='103', status='hold')
+        draft = Booking.objects.create(
+            company=self.co, project=self.project, plot=free_plot, plot_ids=[free_plot.id],
+            stm=self.admin, status='draft', client_name='Someone', phone='9000000144')
+        self.client.post(f'/api/sales/bookings/{draft.id}/discard/')
+        free_plot.refresh_from_db()
+        self.assertEqual(free_plot.status, 'available')

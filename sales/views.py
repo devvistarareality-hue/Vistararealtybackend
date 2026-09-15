@@ -1647,17 +1647,38 @@ class ProjectDetailView(APIView):
 PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
 
 
-def _release_plots(plot_ids):
+def _release_plots(plot_ids, booking=None):
     """Release held plots back to whatever they were before the hold —
     'resale' if pre_hold_status says so, else 'available'. Every release path
     (self-release, expiry, discard draft, booking reject, closure cancel)
     goes through this, so a previously-sold unit put up for resale that gets
     tentatively held — someone testing whether it can be rebooked, or a
     booking attempt that didn't go through — returns to resale on release
-    instead of silently losing that flag and defaulting to available."""
+    instead of silently losing that flag and defaulting to available.
+
+    A unit another live booking still holds is NOT freed. Releasing blindly is how
+    Pratishtha 102 came to read as available while Umesh's approved sale stood on it:
+    an older cancelled booking on the same unit let its release put the unit back on
+    the map, and a rep then drafted on it. `booking` is the one being released — its
+    own revision chain is ignored, since a revision legitimately shares the unit with
+    the version it replaces.
+    """
     if not plot_ids:
         return 0
-    return Plot.objects.filter(id__in=plot_ids).update(
+    wanted = set(plot_ids)
+    live = Booking.objects.filter(status__in=('pending', 'sold'))
+    if booking is not None:
+        live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company))
+    still_held = set()
+    for b in live.only('id', 'plot_id', 'plot_ids'):
+        held = set(b.plot_ids or [])
+        if b.plot_id:
+            held.add(b.plot_id)
+        still_held |= held & wanted
+    free = wanted - still_held
+    if not free:
+        return 0
+    return Plot.objects.filter(id__in=free).update(
         status=Case(When(pre_hold_status='resale', then=Value('resale')), default=Value('available')),
         held_by=None, held_at=None, pre_hold_status='',
     )
@@ -4593,7 +4614,10 @@ class BookingDiscardDraftView(APIView):
         if not _is_hard_admin(request.user) and b.stm_id not in _visible_user_ids(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-        _release_plots(pids)
+        # A draft is not a live booking, so it never protects a unit itself — but the
+        # unit may belong to somebody else's live sale, and discarding the draft must
+        # not hand it back to the map.
+        _release_plots(pids, booking=b)
         b.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -5213,7 +5237,7 @@ class BookingActionView(APIView):
                                   'rejected_by', 'rejected_at'])
             if not is_rev:
                 _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-                _release_plots(_pids)
+                _release_plots(_pids, booking=b)
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
             from notifications import notify
@@ -5288,7 +5312,7 @@ class AccountsBookingActionView(APIView):
             b.save(update_fields=['accounts_status', 'accounts_rejected_reason', 'accounts_rejected_by',
                                    'accounts_rejected_at', 'status', 'loi_document'])
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            _release_plots(_pids)
+            _release_plots(_pids, booking=b)
             if b.closure_id:
                 Closure.objects.filter(id=b.closure_id).delete()
             from notifications import notify
@@ -5427,7 +5451,7 @@ class ClosureCancelView(APIView):
         # which is the one day it matters.
         for b in Booking.objects.filter(closure=closure):
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            _release_plots(_pids)
+            _release_plots(_pids, booking=b)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
             b.cancelled_by = request.user
