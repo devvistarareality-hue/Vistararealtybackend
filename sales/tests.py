@@ -1235,3 +1235,19 @@ class BookingExportTests(APITestCase):
         self.client.patch(f'/api/auth/users/{stm.id}/', {'can_export_bookings': False}, format='json')
         auth(self.client, stm)
         self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 403)
+
+    def test_rows_come_out_in_unit_order(self):
+        """Unit order as a person reads it: 401 before 1102, Shop4 before Shop10."""
+        from datetime import date
+        from sales.models import Booking
+        co, admin, stm, p1, *_ = self._seed()
+        Booking.objects.filter(company=co).delete()
+        for unit in ['Shop10', '1102', 'Shop4', '401', '106', '1004', 'EOI-23', 'EOI-3']:
+            Booking.objects.create(company=co, project=p1, stm=stm, status='sold',
+                                   client_name=f'C {unit}', booking_date=date.today(),
+                                   final_amount=1000, plot_numbers=unit, source='Reference')
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
+        self.assertEqual(
+            self._column(ws, 'Unit'),
+            ['106', '401', '1004', '1102', 'EOI-3', 'EOI-23', 'Shop4', 'Shop10'])

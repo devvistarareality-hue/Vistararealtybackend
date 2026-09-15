@@ -4993,6 +4993,23 @@ BOOKING_EXPORT_COLUMNS = [
 ]
 
 
+def _unit_sort_key(unit):
+    """Order unit numbers the way a person reads them, not the way strings sort.
+
+    Plain alphabetical puts 1004 before 101 and Shop10 before Shop4. This splits the
+    label into text and number runs and compares the numbers as numbers, so 101, 102,
+    … 1004, 1102 come out in order and Shop4 sorts before Shop10. Units that start
+    with a number (flats, plots) lead; the prefixed ones (Shop-, EOI-) follow, each
+    prefix grouped together.
+    """
+    text = str(unit or '').strip()
+    if not text:
+        return (2, [])                      # a booking with no unit label goes last
+    parts = [p for p in re.split(r'(\d+)', text.upper()) if p]
+    return (0 if text[:1].isdigit() else 1,
+            [(1, int(p)) if p.isdigit() else (0, p) for p in parts])
+
+
 class BookingExportView(APIView):
     """Every approved booking in the company as an .xlsx, for the Sales module.
 
@@ -5031,7 +5048,11 @@ class BookingExportView(APIView):
               .defer(*PROJECT_BLOBS)
               .order_by('project__name', 'booking_date', 'id'))
 
-        rows = [self._row(b) for b in qs]
+        # Unit order within each project — what someone reading the sheet expects, and
+        # not something the database can do: the unit label is text ("401", "Shop4",
+        # "EOI-23") and sorting it as text puts 1004 before 101.
+        rows = sorted((self._row(b) for b in qs),
+                      key=lambda r: (r['project_name'], _unit_sort_key(r['unit'])))
         wb = self._workbook(rows, company, project)
 
         stamp = timezone.now().strftime('%Y-%m-%d')
