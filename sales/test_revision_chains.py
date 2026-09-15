@@ -1,12 +1,16 @@
 """Only the latest revision of a deal is listed — however the chain was formed."""
 from datetime import date
 
+from django.core.cache import cache
 from django.test import TestCase
+from rest_framework.test import APITestCase
 
 from accounts.models import User
 from companies.models import Company
 from sales.models import Booking, Closure, Lead, Plot, Project
 from sales.views import _drop_superseded_revisions
+
+from sales.tests import auth
 
 
 class RevisionChains(TestCase):
@@ -149,3 +153,204 @@ class RevisionInheritsItsParent(TestCase):
         rev_id = res.data['id']
         kept = {b.id for b in _drop_superseded_revisions(Booking.objects.filter(project=p))}
         self.assertEqual(kept, {rev_id}, 'the superseded EOI should drop out')
+
+
+class SupersededAcrossVisibilityTests(APITestCase):
+    """A replaced booking must stay hidden even from someone who cannot see what
+    replaced it.
+
+    Chains used to be detected inside the viewer's own slice, so staleness depended
+    on who was looking: a CP cluster head still had booking #478 listed as a live
+    approved deal because its replacement was booked by someone outside his module.
+    His figure read 108 where the same slice read 107 in Sales, and the extra row
+    carried commercial terms that had since been revised.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='SUP', name='Supersede Co')
+        cls.director = User.objects.create(email='sup_dir@x.com', company=cls.co, role='Director',
+                                           designation='DIRECTOR', user_code='S0', name='Director')
+        cls.cp = User.objects.create(email='sup_cp@x.com', company=cls.co, role='Manager',
+                                     designation='CP CLUSTER HEAD', user_code='S1', name='Cp Head',
+                                     reporting_manager=cls.director)
+        # Books the replacement, and is invisible to the CP head: a sibling branch,
+        # and their work is not partner-sourced so the CP pool does not carry it.
+        cls.outsider = User.objects.create(email='sup_out@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='S2', name='Outsider',
+                                           reporting_manager=cls.director)
+        cls.project = Project.objects.create(company=cls.co, name='Supersede Tower')
+        cls.original = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.cp, status='sold',
+            source='Channel Partner', client_name='Same Client', phone='9000000080',
+            plot_numbers='A-1', revision_no=0)
+        cls.revision = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.outsider, status='sold',
+            source='Reference', client_name='Same Client', phone='9000000080',
+            plot_numbers='A-1', revision_no=1, revision_of=cls.original)
+
+    def setUp(self):
+        cache.clear()
+
+    def _ids(self, user, url):
+        auth(self.client, user)
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        return [b['id'] for b in r.data]
+
+    def test_the_replaced_booking_is_hidden_even_when_its_replacement_is_not_visible(self):
+        ids = self._ids(self.cp, '/api/sales/bookings/?mine=1&cp_only=true&status=sold')
+        self.assertNotIn(self.original.id, ids)
+        # And it is not swapped for the replacement either — that booking belongs to
+        # someone else's branch and is genuinely not this viewer's to see.
+        self.assertNotIn(self.revision.id, ids)
+
+    def test_someone_who_sees_both_gets_the_live_one_only(self):
+        ids = self._ids(self.director, '/api/sales/bookings/?mine=1&status=sold')
+        self.assertIn(self.revision.id, ids)
+        self.assertNotIn(self.original.id, ids)
+
+
+class RevisionHistoryEndpointTests(APITestCase):
+    """GET /api/sales/bookings/<pk>/revisions/ — every version of one deal.
+
+    Only the latest version is listed anywhere, which is right: a deal should appear
+    once and at its current terms. But the earlier ones are what was signed at the
+    time, and until now nothing in the product could reach them.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='RHE', name='History Co')
+        cls.other_co = Company.objects.create(code='RHX', name='Other Co')
+        cls.stm = User.objects.create(email='rh_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='H1', name='Stm')
+        cls.stranger = User.objects.create(email='rh_str@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='H2', name='Stranger')
+        cls.project = Project.objects.create(company=cls.co, name='History Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Jignesh Rami', phone='9824818649', plot_numbers='EOI-1')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=4680000, **common)
+        # A rejected middle version: excluded from "what is live", but it is exactly
+        # what someone opening the history wants to see.
+        cls.r1 = Booking.objects.create(status='rejected', revision_no=1, final_amount=4700000,
+                                        revision_of=cls.r0, **common)
+        cls.r2 = Booking.objects.create(status='sold', revision_no=2, final_amount=4750000,
+                                        revision_of=cls.r1, **common)
+
+    def setUp(self):
+        cache.clear()
+
+    def _get(self, user, pk):
+        auth(self.client, user)
+        return self.client.get(f'/api/sales/bookings/{pk}/revisions/')
+
+    def test_every_version_comes_back_newest_first(self):
+        # The current terms are what is usually being checked, and the history reads
+        # backwards from them: what does this deal say now, and what did it say before.
+        r = self._get(self.stm, self.r2.id)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([(b['id'], b['revision_no']) for b in r.data],
+                         [(self.r2.id, 2), (self.r1.id, 1), (self.r0.id, 0)])
+
+    def test_a_rejected_version_is_part_of_the_history(self):
+        ids = [b['id'] for b in self._get(self.stm, self.r2.id).data]
+        self.assertIn(self.r1.id, ids)
+
+    def test_asking_from_any_version_gives_the_same_chain(self):
+        frm_r0 = [b['id'] for b in self._get(self.stm, self.r0.id).data]
+        frm_r2 = [b['id'] for b in self._get(self.stm, self.r2.id).data]
+        self.assertEqual(frm_r0, frm_r2)
+
+    def test_someone_with_no_claim_on_the_booking_gets_nothing(self):
+        # 404 rather than 403: a booking you may not see should not be confirmed to
+        # exist by the error you get back.
+        self.assertEqual(self._get(self.stranger, self.r2.id).status_code, 404)
+
+    def test_a_booking_in_another_company_is_not_reachable(self):
+        foreign = User.objects.create(email='rh_foreign@x.com', company=self.other_co,
+                                      role='Admin', designation='Admin', user_code='H3',
+                                      name='Foreign Admin')
+        self.assertEqual(self._get(foreign, self.r2.id).status_code, 404)
+
+
+class RevisionHistoryReachTests(APITestCase):
+    """Whoever can see a booking in their list can open its history.
+
+    A director saw the booking in My Bookings through the reporting tree and was then
+    refused when opening it: the check asked only for ownership, admin, or approver,
+    and approving no projects is normal for someone whose visibility comes from the
+    tree instead. The card said "Couldn't load the history."
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='RHR', name='Reach Co')
+        cls.director = User.objects.create(email='rr_dir@x.com', company=cls.co, role='Director',
+                                           designation='DIRECTOR', user_code='K0', name='Director')
+        cls.stm = User.objects.create(email='rr_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='K1', name='Stm',
+                                      reporting_manager=cls.director)
+        cls.outsider = User.objects.create(email='rr_out@x.com', company=cls.co, role='Employee',
+                                           designation='STM', user_code='K2', name='Outsider')
+        cls.project = Project.objects.create(company=cls.co, name='Reach Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Trupti Akshay Patel', phone='9925174692', plot_numbers='EOI-1')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=2500000, **common)
+        cls.r1 = Booking.objects.create(status='sold', revision_no=1, final_amount=2600000,
+                                        revision_of=cls.r0, **common)
+        cls.draft = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.stm, status='draft', revision_no=1,
+            client_name='Half Done', phone='9925174693', plot_numbers='EOI-9')
+
+    def setUp(self):
+        cache.clear()
+
+    def _get(self, user, pk):
+        auth(self.client, user)
+        return self.client.get(f'/api/sales/bookings/{pk}/revisions/')
+
+    def test_a_manager_can_open_the_history_of_their_reports_booking(self):
+        r = self._get(self.director, self.r1.id)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([b['id'] for b in r.data], [self.r1.id, self.r0.id])
+
+    def test_someone_outside_the_tree_still_cannot(self):
+        self.assertEqual(self._get(self.outsider, self.r1.id).status_code, 404)
+
+    def test_a_reports_draft_stays_out_of_reach(self):
+        # Half-finished commercial terms are deliberately not browsable by every
+        # manager; widening the general rule must not quietly undo that.
+        self.assertEqual(self._get(self.director, self.draft.id).status_code, 404)
+
+
+class AccountsRevisionHistoryTests(APITestCase):
+    """Accounts & Finance reads every approved booking, so it may read their history.
+
+    Their visibility comes from the module they are in, not from owning the booking,
+    approving it, or sitting above anyone — so the narrower checks all miss them.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='ACR', name='Accounts Co')
+        cls.reviewer = User.objects.create(email='ar_acc@x.com', company=cls.co, role='Employee',
+                                           designation='ACCOUNTANT', user_code='A1',
+                                           name='Reviewer', modules=['Accounts & Finance'])
+        cls.stm = User.objects.create(email='ar_stm@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='A2', name='Stm')
+        cls.project = Project.objects.create(company=cls.co, name='Accounts Tower')
+        common = dict(company=cls.co, project=cls.project, stm=cls.stm,
+                      client_name='Vidhi Kher', phone='9898060667', plot_numbers='Karuna23')
+        cls.r0 = Booking.objects.create(status='sold', revision_no=0, final_amount=21100000, **common)
+        cls.r1 = Booking.objects.create(status='sold', revision_no=1, final_amount=21100000,
+                                        revision_of=cls.r0, **common)
+
+    def setUp(self):
+        cache.clear()
+
+    def test_an_accounts_reviewer_can_open_the_history(self):
+        auth(self.client, self.reviewer)
+        r = self.client.get(f'/api/sales/bookings/{self.r1.id}/revisions/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([b['id'] for b in r.data], [self.r1.id, self.r0.id])

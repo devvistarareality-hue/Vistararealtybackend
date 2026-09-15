@@ -79,6 +79,32 @@ class UserListSerializer(serializers.ModelSerializer):
         ]
 
 
+# Roles that can sit at the top of the tree: leadership, and the unattended kiosk
+# account, which belongs to no one by design. Everyone else — STM, Telecaller, CP
+# Executive — must report to somebody.
+TOP_LEVEL_ROLES = {'Admin', 'Director', 'General Manager', 'Manager', 'Kiosk'}
+
+_NO_MANAGER = (
+    'Select a Reporting Manager. Visibility runs on the reporting tree, so someone '
+    'at this level with no manager is invisible to every manager in the company — '
+    'their leads and bookings appear in nobody\'s list.'
+)
+
+
+def validate_reporting_manager(role, reporting_manager_id, is_active=True):
+    """A non-leadership user with no manager is a hole in the org tree, not a
+    preference. It cost us an STM with 78 bookings that no manager could see: his
+    work surfaced only where a rule reached past the hierarchy (the CP pool), which
+    is why the same figure read 67 in one module and 65 in another.
+
+    Deactivating is exempt — closing an account should not require fixing the tree
+    first, and an inactive user is outside every visibility rule anyway.
+    """
+    if not is_active or (role or '') in TOP_LEVEL_ROLES or reporting_manager_id:
+        return
+    raise serializers.ValidationError({'reporting_manager_id': _NO_MANAGER})
+
+
 class UserCreateSerializer(serializers.ModelSerializer):
     password              = serializers.CharField(write_only=True, min_length=6)
     user_code_prefix      = serializers.CharField(write_only=True, required=False, max_length=10, default='USR')
@@ -88,6 +114,10 @@ class UserCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
+
+    def validate(self, attrs):
+        validate_reporting_manager(attrs.get('role'), attrs.get('reporting_manager_id'))
+        return attrs
 
     def create(self, validated_data):
         from companies.models import Company as CompanyModel
@@ -158,6 +188,16 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         if User.objects.filter(company=company, user_code=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError('This user code is already taken.')
         return value
+
+    def validate(self, attrs):
+        # Whatever the row will look like once this payload lands, not what was sent.
+        validate_reporting_manager(
+            attrs.get('role', self.instance.role),
+            attrs['reporting_manager_id'] if 'reporting_manager_id' in attrs
+            else self.instance.reporting_manager_id,
+            attrs.get('is_active', self.instance.is_active),
+        )
+        return attrs
 
     def update(self, instance, validated_data):
         if 'reporting_manager_id' in validated_data:

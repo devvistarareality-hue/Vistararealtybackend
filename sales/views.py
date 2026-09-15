@@ -6,7 +6,7 @@ from datetime import datetime, time as dt_time, timedelta
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q, Count, OuterRef, Subquery, Case, When, Value, F
+from django.db.models import Q, Count, OuterRef, Subquery, Case, When, Value, F, BooleanField
 from django.utils import timezone
 from django.http import HttpResponse
 from rest_framework.views import APIView
@@ -289,10 +289,69 @@ def _can_approve_booking(user, project_id, project, lead_id, company, booking_so
     return _can_approve_project(user, project, company)
 
 
+def _accounts_approver_project_ids(user, company):
+    """Ids of projects where `user` is a configured ACCOUNTS approver — mirrors
+    _approver_project_ids, but for the separate accounts-stage sign-off a sold
+    booking now needs before it counts as approved in the Accounts module."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'accounts_booking_approvers')
+        if user.id in (p.accounts_booking_approvers or [])
+    ]
+
+
+def _can_approve_accounts_project(user, project, company):
+    """Whether `user` is a configured Accounts approver for `project`'s bookings.
+    Mirrors _can_approve_project exactly, against accounts_booking_approvers —
+    a separate list, so being a Sales/CP approver does not itself grant
+    Accounts-stage authority. Real admins are exempt, same as Sales."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _accounts_approver_project_ids(user, company)
+
+
+def _accounts_cp_approver_project_ids(user, company):
+    """CP-sourced-booking counterpart of _accounts_approver_project_ids, reading
+    accounts_cp_booking_approvers."""
+    return [
+        p.id for p in Project.objects.filter(company=company).only('id', 'accounts_cp_booking_approvers')
+        if user.id in (p.accounts_cp_booking_approvers or [])
+    ]
+
+
+def _can_approve_accounts_cp_project(user, project, company):
+    """Mirrors _can_approve_accounts_project for Channel-Partner-sourced bookings,
+    against the separate accounts_cp_booking_approvers list."""
+    if _is_hard_admin(user):
+        return True
+    project_id = getattr(project, 'id', project)
+    return project_id in _accounts_cp_approver_project_ids(user, company)
+
+
+def _can_approve_accounts_booking(user, project_id, project, lead_id, company, booking_source=None):
+    """Which ACCOUNTS approver list gates a booking's accounts-stage sign-off —
+    mirrors _can_approve_booking's CP/regular dispatch exactly, against the
+    separate accounts_* approver lists instead of the Sales/CP ones."""
+    if not project_id:
+        return True
+    if _is_cp_sourced_booking(lead_id, booking_source):
+        return _can_approve_accounts_cp_project(user, project, company)
+    return _can_approve_accounts_project(user, project, company)
+
+
 def can_assign_leads(user):
     """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
     else (admins/managers/Sales CRM)."""
     return not (is_telecaller(user) or is_stm(user) or is_cp(user))
+
+
+# A project's floor plans, site-map zones and unit-type plans are large JSON blobs —
+# 160 KB on Pratishtha 2 — and select_related('project') repeats the whole project row
+# on every joined row. Listing that project's 537 units was pulling 84 MB out of the
+# database to draw one unit map, which is where the ten-second wait came from. Nothing
+# that lists units, bookings or leads draws a site map, so the join leaves them behind;
+# the screens that do draw one load the project itself, which still carries everything.
+PROJECT_BLOBS = ('project__floor_plans', 'project__site_map_zones', 'project__plot_type_plans')
 
 
 def _dist_type_for(user):
@@ -582,7 +641,7 @@ class StatsView(APIView):
         # way Closures means "closed in this period".
         sv_qs = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company')
         sv_qs = sv_qs.filter(status='completed', visited_at__isnull=False)
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         # Same CP/non-CP split as leads_qs above — these are independent queries
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
@@ -678,7 +737,8 @@ class StatsView(APIView):
         avg_closure_days = round(sum(_diffs) / len(_diffs), 1) if _diffs else None
         # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
         # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
-        recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
+        recent = (leads_qs.select_related('project', 'source', 'telecaller', 'stm')
+                  .defer(*PROJECT_BLOBS).order_by('-created_at')[:8])
         payload = {
             'total_leads':        agg['total_leads'],
             'new_leads':          agg['new_leads'],
@@ -797,7 +857,7 @@ class StatsTrendView(APIView):
         )
 
         # Closures per day (by closure_date) — for the STM/CP reports charts.
-        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company')
+        cl_qs = scope_to_company(Closure.objects.all(), request.user, 'company').exclude(status='cancelled')
         if not _sees_all_company(request.user, request):
             ids = _visible_user_ids(request.user)
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
@@ -908,7 +968,7 @@ class LeadListView(APIView):
     def get(self, request):
         # Defer heavy text blobs not needed for list view
         qs = scope_to_company(
-            Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+            Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(*PROJECT_BLOBS),
             request.user,
         ).defer(
             'telecaller_remarks', 'stm_remarks', 'requirement',
@@ -1292,7 +1352,7 @@ class LeadDetailView(APIView):
     def _get_lead(self, request, pk):
         try:
             qs = scope_to_company(
-                Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+                Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(*PROJECT_BLOBS),
                 request.user,
             )
             # Telecallers / STMs can only open leads assigned to them.
@@ -1520,7 +1580,18 @@ class ProjectListView(APIView):
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             projects = projects.filter(company_id=request.query_params['company_id'])
-        return Response(ProjectSerializer(projects, many=True).data)
+        data = ProjectSerializer(projects, many=True).data
+        # The floor plans and site-map zones are the bulk of this response — 90% of it
+        # on a company with drawn site maps — and nothing that lists projects draws a
+        # site map. The screens that do (Manage Plots, the closure viewer, the project
+        # edit form) each load one project from ProjectDetailView, which still returns
+        # everything. ?full=1 asks for them here anyway, for any caller that needs the
+        # whole record straight from the list.
+        if request.query_params.get('full') != '1':
+            for row in data:
+                row.pop('floor_plans', None)
+                row.pop('site_map_zones', None)
+        return Response(data)
 
     def post(self, request):
         if not is_admin_or_manager(request.user):
@@ -1561,6 +1632,17 @@ class ProjectDetailView(APIView):
                 {'detail': 'Only an administrator can change booking approvers.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Same idea for the Accounts-stage approver lists, but restricted tighter
+        # than Sales' own approver setup: a real admin only, not an Accounts
+        # Admin-Modules user — deciding who signs off at the money stage doesn't
+        # extend to whoever was merely granted admin rights over that module.
+        if (('accounts_booking_approvers' in request.data or 'accounts_cp_booking_approvers' in request.data) and not (
+            _is_hard_admin(request.user)
+        )):
+            return Response(
+                {'detail': 'Only an administrator can change Accounts approvers.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             project = scope_to_company(Project.objects.all(), request.user).get(pk=pk)
         except Project.DoesNotExist:
@@ -1587,20 +1669,89 @@ class ProjectDetailView(APIView):
 PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
 
 
-def _release_plots(plot_ids):
+def _release_plots(plot_ids, booking=None):
     """Release held plots back to whatever they were before the hold —
     'resale' if pre_hold_status says so, else 'available'. Every release path
     (self-release, expiry, discard draft, booking reject, closure cancel)
     goes through this, so a previously-sold unit put up for resale that gets
     tentatively held — someone testing whether it can be rebooked, or a
     booking attempt that didn't go through — returns to resale on release
-    instead of silently losing that flag and defaulting to available."""
+    instead of silently losing that flag and defaulting to available.
+
+    A unit another live booking still holds is NOT freed. Releasing blindly is how
+    Pratishtha 102 came to read as available while Umesh's approved sale stood on it:
+    an older cancelled booking on the same unit let its release put the unit back on
+    the map, and a rep then drafted on it. `booking` is the one being released — its
+    own revision chain is ignored, since a revision legitimately shares the unit with
+    the version it replaces.
+    """
     if not plot_ids:
         return 0
-    return Plot.objects.filter(id__in=plot_ids).update(
+    wanted = set(plot_ids)
+    live = Booking.objects.filter(status__in=('pending', 'sold'))
+    if booking is not None:
+        # strict: only recorded revisions of this booking, never rows that merely look
+        # alike. Freeing a unit is not the place for a guess.
+        live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company, strict=True))
+    still_held = set()
+    for b in live.only('id', 'plot_id', 'plot_ids'):
+        held = set(b.plot_ids or [])
+        if b.plot_id:
+            held.add(b.plot_id)
+        still_held |= held & wanted
+    free = wanted - still_held
+    if not free:
+        return 0
+    return Plot.objects.filter(id__in=free).update(
         status=Case(When(pre_hold_status='resale', then=Value('resale')), default=Value('available')),
         held_by=None, held_at=None, pre_hold_status='',
     )
+
+
+def _reclaim_units_with_a_live_sale(plots_qs):
+    """Self-healing: a unit a live booking holds must never read as available.
+
+    Three separate paths had freed a sold unit — a cancelled sibling booking's release,
+    a discarded draft, a status edit in the plot editor — and each was fixed where it
+    stood. This is the net under all of them, and under whatever is written next: the
+    unit map reconciles itself on read, so a unit that slips back onto the map is
+    corrected the moment anyone looks at the project rather than being sold twice.
+
+    Only 'available' is reclaimed. 'resale' is a deliberate decision to offer a sold
+    unit again and keeps its old booking on purpose, so it is left exactly alone.
+    """
+    loose = list(plots_qs.filter(status='available').values_list('id', flat=True))
+    if not loose:
+        return 0
+    loose_set = set(loose)
+    # Only this tenant's bookings can hold these units, so the scan stops at the
+    # company line instead of reading every live booking on the platform — which is
+    # what it did on every single unit-map load, for every company there is.
+    company_ids = set(
+        Project.objects.filter(plots__id__in=loose).values_list('company_id', flat=True))
+    claimed = {}
+    for b in (Booking.objects.filter(status__in=('pending', 'sold'), company_id__in=company_ids)
+              .only('id', 'plot_id', 'plot_ids', 'status')):
+        held = set(b.plot_ids or [])
+        if b.plot_id:
+            held.add(b.plot_id)
+        for pid in held & loose_set:
+            # A completed sale outranks one still waiting on an approver.
+            if b.status == 'sold' or pid not in claimed:
+                claimed[pid] = b.status
+    fixed = 0
+    for want in ('sold', 'pending'):
+        ids = [pid for pid, st in claimed.items() if st == want]
+        if ids:
+            # A booking still pending leaves the unit spoken for, not gone.
+            fixed += Plot.objects.filter(id__in=ids).update(
+                status=('sold' if want == 'sold' else 'hold'),
+                held_by=None, held_at=None, pre_hold_status='')
+    if fixed:
+        logging.getLogger(__name__).warning(
+            'reclaimed %d unit(s) that read available while a live booking held them: %s',
+            fixed, sorted(claimed))
+    return fixed
 
 
 def _release_expired_holds(plots_qs):
@@ -1637,9 +1788,54 @@ class PlotListView(APIView):
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         _release_expired_holds(Plot.objects.filter(project_id=project_id))
-        plots = Plot.objects.filter(project_id=project_id).select_related('project')
+        # …and the other direction: a unit a live booking holds must not be sitting on
+        # the map as available, whatever put it there.
+        _reclaim_units_with_a_live_sale(Plot.objects.filter(project_id=project_id))
+        plots = (Plot.objects.filter(project_id=project_id)
+                 .select_related('project').defer(*PROJECT_BLOBS))
         # context: can_cancel_hold is per-viewer, so the serializer needs the request.
         return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
+
+
+def _resync_generated_price_book(plot, before):
+    """Keep a generated price book in step with the areas it was generated from.
+
+    A unit's price book is computed from its `size`, so editing the size afterwards
+    left the two disagreeing — and nothing said so. Four Pratishtha 2 shops drifted
+    that way: D-SHOP18 showed 425 sq.ft on the unit map and priced at 415 in the
+    booking form, a ₹1.2 lakh difference on a ₹51 lakh shop, with the form quoting
+    the stale figure.
+
+    Regenerated only when the stored book is provably the generator's own output for
+    the areas it had before — recompute it from the old values and require an exact
+    match. A hand-written or differently-generated book fails that test and is left
+    untouched rather than silently replaced by a guess.
+    """
+    from .pricing import pratishtha2
+    keys = ('size', 'terrace_area', 'facing', 'floor')
+    if all(getattr(plot, k) == before.get(k) for k in keys):
+        return
+    stored = plot.price_book or {}
+    if not stored:
+        return
+
+    def generated(size, terrace, facing, floor):
+        area = pratishtha2.area_of(size)
+        return pratishtha2.price_book_for(
+            plot.number, flat_area=area, terrace_area=pratishtha2.area_of(terrace) or 0,
+            sq_feet=area, facing=facing, floor=floor)
+
+    try:
+        was = generated(before.get('size'), before.get('terrace_area'),
+                        before.get('facing'), before.get('floor'))
+        if not was or was != stored:
+            return                      # not this generator's book — leave it alone
+        now = generated(plot.size, plot.terrace_area, plot.facing, plot.floor)
+    except Exception:
+        return
+    if now and now != stored:
+        plot.price_book = now
+        plot.save(update_fields=['price_book'])
 
 
 class PlotDetailView(APIView):
@@ -1655,7 +1851,35 @@ class PlotDetailView(APIView):
         ser = PlotSerializer(plot, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(PlotSerializer(ser.save(), context={'request': request}).data)
+        # Freeing a unit here does not cancel the booking that holds it, so a unit
+        # edited back to available could be sold again while the first sale stayed
+        # live and approved. Six units ended up with two live sales that way — both
+        # sides APPROVED, both closures intact, no cancellation recorded anywhere.
+        # Cancelling is a real operation: it voids the signed LOI, deletes the
+        # closure, reopens the lead and notifies the chain. It has to go through that
+        # path, not through a status dropdown.
+        new_status = str(request.data.get('status') or '').strip()
+        if new_status and new_status != plot.status and new_status in ('available', 'resale'):
+            holder = next(
+                (b for b in Booking.objects.filter(company=plot.project.company,
+                                                   status__in=('pending', 'sold'))
+                 .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                 if plot.id in set(b.plot_ids or []) | ({b.plot_id} if b.plot_id else set())),
+                None)
+            if holder:
+                return Response(
+                    {'detail': f'{plot.number} is held by a {holder.status} booking for '
+                               f'{holder.client_name} (#{holder.id}). Cancel that booking '
+                               f'first — freeing the unit here would leave the sale standing.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
+        saved = ser.save()
+        # The price is computed from the areas, so a change to them has to reach the
+        # price book or the booking form goes on quoting the old one.
+        _resync_generated_price_book(saved, before)
+        return Response(PlotSerializer(saved, context={'request': request}).data)
 
 
 class PlotHoldView(APIView):
@@ -1683,6 +1907,20 @@ class PlotHoldView(APIView):
                 if plot.status not in ('available', 'resale'):
                     reason = 'held_by_other' if (plot.held_by_id and plot.held_by_id != request.user.id) else plot.status
                     failed.append({'id': pid, 'number': plot.number, 'reason': reason})
+                    continue
+                # The plot's own status is not the last word. A unit whose status was
+                # wrongly freed still belongs to whoever bought it, and the rep picking
+                # it on the map is the first person who would find out — by drafting a
+                # booking on a unit that is already sold. Checked against the bookings
+                # themselves, so selection is safe even before the map reconciles.
+                claim = next(
+                    (b for b in Booking.objects.filter(company=plot.project.company,
+                                                       status__in=('pending', 'sold'))
+                     .only('id', 'plot_id', 'plot_ids', 'status')
+                     if plot.id == b.plot_id or plot.id in (b.plot_ids or [])),
+                    None)
+                if claim and plot.status != 'resale':
+                    failed.append({'id': pid, 'number': plot.number, 'reason': claim.status})
                     continue
                 plot.pre_hold_status = plot.status
                 plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
@@ -1729,7 +1967,7 @@ class PlotCancelHoldView(APIView):
             return Response({'detail': 'No units given.'}, status=status.HTTP_400_BAD_REQUEST)
 
         plots = list(Plot.objects.filter(id__in=ids, project__company=company)
-                     .select_related('project'))
+                     .select_related('project').defer(*PROJECT_BLOBS))
         if not plots:
             return Response({'detail': 'Unit not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1817,7 +2055,8 @@ class LeadCompanySearchView(APIView):
                 if needle in (nm or '').lower() or needle in (ph or '').lower()
             ]
             qs = qs.filter(id__in=hits)
-        qs = qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner').order_by('-created_at')[:25]
+        qs = (qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner')
+              .defer(*PROJECT_BLOBS).order_by('-created_at')[:25])
         return Response([
             {
                 'id': l.id,
@@ -2012,7 +2251,9 @@ class SiteVisitListView(APIView):
 
     def get(self, request):
         qs = scope_to_company(
-            SiteVisit.objects.select_related('lead', 'project', 'stm'),
+            SiteVisit.objects.select_related('lead', 'project', 'stm',
+                                             'referred_by_telecaller', 'lead__telecaller')
+                             .defer(*PROJECT_BLOBS),
             request.user, 'lead__company',
         )
         if not _sees_all_company(request.user, request):
@@ -2116,7 +2357,9 @@ class ClosureListView(APIView):
 
     def get(self, request):
         qs = scope_to_company(
-            Closure.objects.select_related('lead', 'project', 'stm'),
+            Closure.objects.select_related('lead', 'project', 'stm',
+                                           'referred_by_telecaller', 'lead__telecaller')
+                           .defer(*PROJECT_BLOBS),
             request.user, 'company',
         )
         if not _sees_all_company(request.user, request):
@@ -2202,6 +2445,19 @@ class TelecallerListView(APIView):
             # cross-cutting permission checks in this file.
             users = sorted(
                 (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                key=lambda u: u.name or '',
+            )
+        elif crm_role == 'accounts_module':
+            # Everyone with access to the Accounts & Finance module — admins/
+            # staff, an Accounts Admin-Modules user, and anyone granted the
+            # 'Accounts & Finance' module (employee-level `modules` or
+            # manager-level `manager_modules`) — the pool the Accounts
+            # Approvers picker offers, mirroring cp_module above.
+            users = sorted(
+                (u for u in base_qs if _is_hard_admin(u)
+                 or 'Accounts & Finance' in (getattr(u, 'admin_modules', None) or [])
+                 or 'Accounts & Finance' in (getattr(u, 'modules', None) or [])
+                 or 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])),
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'sales_cp':
@@ -3610,7 +3866,7 @@ class ReportsView(APIView):
         user      = request.user
         leads_qs  = scope_to_company(Lead.objects.all(), user)
         sv_qs     = scope_to_company(SiteVisit.objects.all(), user, 'lead__company')
-        closure_qs = scope_to_company(Closure.objects.all(), user, 'company')
+        closure_qs = scope_to_company(Closure.objects.all(), user, 'company').exclude(status='cancelled')
         company_id = request.query_params.get('company_id')
         if company_id and is_platform_admin(user):
             leads_qs   = leads_qs.filter(company_id=company_id)
@@ -3696,7 +3952,8 @@ class ReportsView(APIView):
             }
 
         def get_closures():
-            return closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
+            return (closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller')
+                    .defer(*PROJECT_BLOBS).order_by('-closure_date')[:20])
 
         # Run sequentially. These are indexed aggregates (fast); the previous
         # ThreadPoolExecutor opened 5 DB connections per request and didn't close
@@ -3725,6 +3982,7 @@ class MyTeamView(APIView):
         module = (request.query_params.get('module') or '').strip()  # department/module org chart
         scope  = request.query_params.get('scope')                   # 'all' → full company org
         admin_view = request.query_params.get('admin_view') == '1'
+        cp_chart = request.query_params.get('cp') == '1'             # Channel Partner org chart
         ids = _visible_user_ids(user) - {user.id}   # subtree, excluding self
         is_admin = _sees_all_company(user, request, include_manager_role=False)
 
@@ -3741,7 +3999,16 @@ class MyTeamView(APIView):
                 .distinct().select_related('reporting_manager').order_by('name')
             )
 
-        if is_admin and module:
+        if is_admin and cp_chart:
+            # The Channel Partner org chart. Scoped by designation rather than by
+            # `module`, because there is no "Channel Partner" module to assign anyone
+            # to — CP staff sit in Sales and are marked by a CP designation, which is
+            # the same test that decides who gets into the module at all.
+            all_users = (User.objects.filter(company=company, is_active=True)
+                         .select_related('reporting_manager').order_by('name'))
+            members = [u for u in all_users if is_cp_designated(u)]
+            ids = {u.id for u in members}
+        elif is_admin and module:
             # Department/module org chart — users assigned to this module.
             all_users = (User.objects.filter(company=company, is_active=True)
                          .select_related('reporting_manager').order_by('name'))
@@ -3769,7 +4036,8 @@ class MyTeamView(APIView):
             for row in Lead.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
                 lead_counts[row[fld]] = lead_counts.get(row[fld], 0) + row['c']
         for fld in ('stm_id', 'referred_by_telecaller_id'):
-            for row in Closure.objects.filter(company=company, **{f'{fld}__in': ids}).values(fld).annotate(c=Count('id')):
+            for row in (Closure.objects.filter(company=company, **{f'{fld}__in': ids})
+                        .exclude(status='cancelled').values(fld).annotate(c=Count('id'))):
                 closure_counts[row[fld]] = closure_counts.get(row[fld], 0) + row['c']
         data = [{
             'id':                u.id,
@@ -3857,14 +4125,31 @@ class BookingListCreateView(APIView):
 
     def get(self, request):
         company = _resolve_company(request)
-        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
-        # Drafts are private scratch work, not something an approver/manager should
-        # browse mid-edit — exclude anyone else's draft unconditionally, regardless of
-        # which status filter (or none at all, e.g. the "All" tab) is requested. This
-        # has to run before every other visibility rule below, since those exist to
-        # broaden access (to a whole company, an approver's projects, etc.) and would
-        # otherwise leak drafts right back in.
-        qs = qs.exclude(Q(status='draft') & ~Q(stm=request.user))
+        qs = (Booking.objects.filter(company=company)
+              .select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
+                              'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+              .defer(*PROJECT_BLOBS))
+        # Drafts are half-finished commercial terms, so they are not browsable by
+        # every manager the way a submitted booking is. Visible to their author, to a
+        # real admin, and to whoever approves that project's bookings — the same people
+        # who can already cancel a drafted unit from the plot map, so the two agree.
+        #
+        # Which approver list governs follows the booking's own routing, as approve and
+        # reject do: a Channel-Partner-sourced deal answers to cp_booking_approvers,
+        # everything else to booking_approvers. A regular approver therefore does not
+        # see CP drafts on their project, or the separation would be undone here.
+        #
+        # This runs before every other visibility rule below, since those exist to
+        # broaden access and would otherwise let drafts back in by another route.
+        if not _is_hard_admin(request.user):
+            cp_sourced = (Q(source__iexact='Channel Partner')
+                          | Q(lead__in=Lead.objects.filter(cp_lead_q())))
+            visible_draft = (
+                Q(stm=request.user)
+                | (Q(project_id__in=_approver_project_ids(request.user, company)) & ~cp_sourced)
+                | (Q(project_id__in=_cp_approver_project_ids(request.user, company)) & cp_sourced)
+            )
+            qs = qs.exclude(Q(status='draft') & ~visible_draft)
         # Naming someone a project's booking approver is a narrowing statement: they
         # review those projects and no others. It therefore takes precedence over the
         # broad org-tree visibility a Manager may otherwise have (a top-of-tree head
@@ -3872,6 +4157,11 @@ class BookingListCreateView(APIView):
         # projects he is named on). `?mine` is the user's own bookings list, so it is
         # left on the normal scoping or an approver loses sight of their own bookings
         # in projects they don't approve. Real admins are exempt entirely.
+        # Own id plus everyone reporting to the requester, transitively — the pool a
+        # manager sees when no approver list narrows things.
+        own_and_team = _visible_user_ids(request.user)
+        cp_scoped = (request.query_params.get('cp_only') == 'true'
+                     or is_cp_designated(request.user))
         approver_project_ids = [] if _is_hard_admin(request.user) else _approver_project_ids(request.user, company)
         # A Channel-Partner-sourced booking is gated by its own approver list, so
         # someone named a CP approver (but not a regular one) still needs to see
@@ -3882,32 +4172,75 @@ class BookingListCreateView(APIView):
         # cp_lead_q) or its own free-text Source field — see
         # _is_cp_sourced_booking, mirrored here in query form.
         is_cp_booking_q = cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner')
-        if (approver_project_ids or cp_approver_project_ids) and not request.query_params.get('mine'):
-            qs = qs.filter(
-                (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
-                | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
-            )
-        elif not _sees_all_company(request.user, request, include_manager_role=False):
-            qs = qs.filter(stm__in=_visible_user_ids(request.user))
-        if request.query_params.get('mine'):           # "My Bookings" — only this user's
-            qs = qs.filter(stm=request.user)
-        qs = _drop_superseded_revisions(qs)
+
+        # Two screens, two questions, and conflating them is what made this drift.
+        #
+        #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
+        #   reporting tree, and in the CP module the CP pool as well, since that is
+        #   the business the module exists to track.
+        #
+        #   otherwise — "Approvals": what I am named to decide, and nothing else.
+        #   Deliberately NOT widened to my own work: a booking I made but cannot
+        #   approve does not belong on the screen where the verdict is given. It shows
+        #   under My Bookings instead.
+        if request.query_params.get('mine'):
+            mine_q = Q(stm_id__in=own_and_team)
+            # The CP pool belongs to My Bookings only in the CP module, so this reads
+            # the explicit flag rather than the viewer's designation: a CP manager
+            # looking at Sales My Bookings should see their own and their team's work,
+            # not every partner-sourced deal in the company.
+            if request.query_params.get('cp_only') == 'true':
+                mine_q |= is_cp_booking_q
+            qs = qs.filter(mine_q)
+        else:
+            if approver_project_ids or cp_approver_project_ids:
+                qs = qs.filter(
+                    (Q(project_id__in=approver_project_ids) & ~is_cp_booking_q)
+                    | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
+                )
+            elif not _sees_all_company(request.user, request, include_manager_role=False):
+                qs = qs.filter(stm_id__in=own_and_team)
+            if cp_scoped:
+                # The CP module's approvals are the CP pool, full stop. Reuse
+                # is_cp_booking_q rather than cp_lead_q alone: a Sales-module booking
+                # tagged Source = "Channel Partner" routes to the CP approvers, so it
+                # has to be visible to them or it is authorized but unreachable.
+                qs = qs.filter(is_cp_booking_q)
+        # Chains are resolved against the whole company, not this viewer's slice —
+        # otherwise whether a replaced booking still shows depends on who is looking.
+        qs = _drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
             qs = qs.filter(plot_id=request.query_params['plot'])
-        if request.query_params.get('status'):
-            qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            # Reuse is_cp_booking_q (computed above), not cp_lead_q alone — a
-            # booking counts as CP-sourced either through its lead OR its own
-            # free-text Source field (see _is_cp_sourced_booking). Filtering on
-            # cp_lead_q alone dropped a Sales-module booking tagged Source =
-            # "Channel Partner" from this list even though _can_approve_booking
-            # already routes its approval to the CP approvers — it was
-            # authorized but invisible to the person meant to approve it.
-            qs = qs.filter(is_cp_booking_q)
-        return Response(BookingSerializer(qs, many=True).data)
+        # A cancelled booking and a rejected one both sit at status='rejected' — the
+        # difference is in approval_status, and they are different events: one was
+        # refused before it counted, the other was a live sale that came off the
+        # books and keeps its signed LOI. The tabs ask for them separately, so the
+        # filter separates them rather than lumping both under Rejected.
+        st = request.query_params.get('status')
+        if st == 'cancelled':
+            qs = qs.filter(status='rejected', approval_status__icontains='CANCEL')
+        elif st == 'rejected':
+            qs = qs.filter(status='rejected').exclude(approval_status__icontains='CANCEL')
+        elif st:
+            qs = qs.filter(status=st)
+        # The visibility rules above are ORed conditions that reach through `lead`
+        # into the CP directory and the source table. Those are forward foreign keys
+        # today, so a booking matching two arms still comes back once — but that is a
+        # property of the current joins, not of the query, and one reverse or
+        # many-to-many relation added to cp_lead_q would start listing bookings twice
+        # with nothing to signal it. Cheap to assert here, and the alternative is a
+        # duplicate showing up in someone's sales figures.
+        # Resolved once for the whole page rather than per row: the CP test reaches
+        # into the lead's partner and source, so the serializer computing it alone
+        # would be a query per booking. Powers the 'Source: CP' filter in the CP
+        # module, and it is the same predicate that routes approvals.
+        qs = qs.annotate(cp_sourced_ann=Case(
+            When(is_cp_booking_q, then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
+        return Response(
+            BookingSerializer(qs.distinct(), many=True, context={'request': request}).data)
 
     def post(self, request):
         company = _resolve_company(request)
@@ -3972,6 +4305,9 @@ class BookingListCreateView(APIView):
         # regardless of the exact client-side cause. Revisions (revision_of)
         # legitimately reuse the same plot, so they're excluded, as are EOIs
         # (no real plot reserved yet).
+        # Declared out here, not inside the branch below: a revision or an EOI skips
+        # that branch entirely and this is read further down regardless.
+        resale_of = None
         if not data.get('revision_of') and not data.get('eoi'):
             requested_plot_ids = set()
             raw_plot_ids = data.get('plot_ids')
@@ -3979,17 +4315,35 @@ class BookingListCreateView(APIView):
                 requested_plot_ids = {int(x) for x in raw_plot_ids if str(x).isdigit()}
             elif data.get('plot') and str(data['plot']).isdigit():
                 requested_plot_ids = {int(data['plot'])}
+            # A unit an admin has put back on the market carries its earlier sale on
+            # purpose — that sale is what is being resold, so it must not read as a
+            # clash. Without this the guard closed the resale flow outright: booking a
+            # resale unit answered "this plot already has a sold booking for …".
+            resale_pids = set(Plot.objects.filter(
+                id__in=requested_plot_ids, status='resale').values_list('id', flat=True))
             if requested_plot_ids:
-                active = Booking.objects.filter(company=company, status__in=['pending', 'approved'])
+                # 'sold' is the stored status of an approved booking — there is no
+                # 'approved' row anywhere in the table. Looking for one meant the guard
+                # only ever caught a second submission while the first was still
+                # pending, and waved through every unit that had already been sold.
+                # Six units in production ended up with two live approved bookings to
+                # two different buyers, five of them on one project.
+                active = Booking.objects.filter(company=company, status__in=['pending', 'sold'])
                 for b in active.only('id', 'plot_id', 'plot_ids', 'client_name', 'status'):
                     b_plot_ids = set(b.plot_ids or [])
                     if b.plot_id:
                         b_plot_ids.add(b.plot_id)
-                    if b_plot_ids & requested_plot_ids:
+                    overlap = b_plot_ids & requested_plot_ids
+                    if overlap - resale_pids:
                         return Response(
                             {'detail': f'This plot already has a {b.status} booking for {b.client_name} (#{b.id}).'},
                             status=status.HTTP_409_CONFLICT,
                         )
+                    if overlap and b.status == 'sold':
+                        # The sale being resold. Newest wins if a unit has been round
+                        # more than once.
+                        if resale_of is None or b.id > resale_of.id:
+                            resale_of = b
                 # A plot soft-held by a DIFFERENT rep (selected on the plot-map picker
                 # via PlotHoldView, not yet submitted) or already sold blocks submission
                 # too — closes the gap where someone bypasses the picker's lock (stale
@@ -4078,6 +4432,10 @@ class BookingListCreateView(APIView):
             pids = [booking.plot_id]
         else:
             pids = []
+        if resale_of is not None and not booking.is_resale:
+            booking.is_resale = True
+            booking.resale_of = resale_of
+            booking.save(update_fields=['is_resale', 'resale_of'])
         if pids:
             num_map = dict(Plot.objects.filter(id__in=pids).values_list('id', 'number'))
             booking.plot_ids = pids
@@ -4164,6 +4522,96 @@ class BookingListCreateView(APIView):
             'awaiting approval')
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+
+
+def _can_view_booking(user, booking, company):
+    """Who may open one booking.
+
+    The person whose it is, a real admin, and whoever approves it — the same
+    authority the approvals screen uses, via _can_approve_booking, so a CP-sourced
+    booking follows the CP list.
+
+    Beyond that, anything the viewer's own list already shows them: their reporting
+    tree, and in the CP module the partner-sourced pool. Without this a director
+    could read a booking in My Bookings and be refused when opening it — which is
+    what happened to the revision history, since approving no projects is normal for
+    someone who sees everything through the tree instead.
+
+    A draft stops at the narrow rule. Half-finished commercial terms are deliberately
+    not browsable by every manager (see the draft rule in BookingListCreateView), and
+    widening the general case must not quietly undo that.
+    """
+    if (booking.stm_id == user.id
+            or _is_hard_admin(user)
+            or _can_approve_booking(user, booking.project_id, booking.project_id,
+                                    booking.lead_id, company, booking.source)):
+        return True
+    if booking.status == 'draft':
+        return False
+    if booking.stm_id in _visible_user_ids(user):
+        return True
+    if is_cp_designated(user) and _is_cp_sourced_booking(booking.lead_id, booking.source):
+        return True
+    # Company-wide viewers, and the Accounts & Finance reviewers who already read
+    # every approved booking in their own list — the same test that screen uses.
+    return bool(_can_view_all_bookings(user))
+
+
+class BookingRevisionsView(APIView):
+    """Every version of one deal, newest first — the current one, then back through
+    R1, R0 — each with its own figures and its own signed LOI.
+
+    Newest first because the current terms are what is usually being checked, and the
+    history is read backwards from them: what does this deal say now, and what did it
+    say before.
+
+    Only the latest version is listed anywhere, which is right: a deal should appear
+    once and at its current terms. But the earlier ones are what was signed at the
+    time, and until now there was no way to reach them from the product at all.
+
+    Gated exactly as opening the booking is. The earlier versions are the same deal,
+    so seeing the current one is the authority to see how it got there.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        company = _resolve_company(request)
+        b = Booking.objects.filter(pk=pk, company=company).first()
+        # 404 rather than 403: a booking you may not see should not be confirmed to
+        # exist by the error you get back.
+        if b is None or not _can_view_booking(request.user, b, company):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        qs = (Booking.objects.filter(id__in=_revision_chain_ids(b.id, company), company=company)
+              .select_related('project', 'plot', 'stm').order_by('-revision_no', '-id'))
+        return Response(BookingSerializer(qs, many=True, context={'request': request}).data)
+
+
+class BookingDetailView(APIView):
+    """One booking by id, for opening it directly rather than hunting the list.
+
+    The booking form used to load a draft by fetching the whole drafts list and
+    searching it, which made resuming hostage to whatever scoping that list applies
+    — approver narrowing and the CP pool filter both silently returned nothing, and
+    the form sat on "Loading unit pricing…" with every field blank. Asking for the
+    one record by id removes that class of failure entirely.
+
+    Visible to the person whose booking it is, to a real admin, and to whoever
+    approves it — the same authority the approvals screen uses, via
+    _can_approve_booking, so a CP-sourced booking follows the CP list.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        company = _resolve_company(request)
+        b = (Booking.objects.filter(pk=pk, company=company)
+             .select_related('project', 'plot', 'stm').first())
+        if b is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_view_booking(request.user, b, company):
+            # 404 rather than 403: a booking you may not see should not be
+            # confirmed to exist by the error you get back.
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(BookingSerializer(b).data)
 
 
 class BookingDraftView(APIView):
@@ -4282,7 +4730,10 @@ class BookingDiscardDraftView(APIView):
         if not _is_hard_admin(request.user) and b.stm_id not in _visible_user_ids(request.user):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-        _release_plots(pids)
+        # A draft is not a live booking, so it never protects a unit itself — but the
+        # unit may belong to somebody else's live sale, and discarding the draft must
+        # not hand it back to the map.
+        _release_plots(pids, booking=b)
         b.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -4303,7 +4754,7 @@ class BookingNextEOIView(APIView):
         return Response({'eoi_no': _next_eoi_no(company, pid, block=block)})
 
 
-def _drop_superseded_revisions(qs):
+def _drop_superseded_revisions(qs, scope=None):
     """Hide bookings that a later revision has replaced, so a deal appears once.
 
     Revising a booking creates a NEW row carrying revision_no + 1, and approving that
@@ -4328,9 +4779,30 @@ def _drop_superseded_revisions(qs):
     belonging in the Rejected tab rather than folded into a live chain. Ties on
     revision_no fall to the newest row, which happens where a booking was revised twice
     from the same parent.
+
+    `scope` is where chains are detected, and should be every booking in the company
+    even when `qs` is one person's slice of them. Detecting within the slice alone
+    made staleness depend on what the viewer happens to see: a CP cluster head still
+    had booking #478 listed as a live approved deal because its replacement, #482,
+    was booked by someone outside his module — so his figure read 108 where the same
+    slice read 107 in Sales, and the extra row carried superseded commercial terms.
     """
-    rows = [r for r in qs.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
-                                 'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
+    groups = _revision_groups(scope if scope is not None else qs)
+    drop = set()
+    for g in groups.values():
+        if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
+            continue
+        keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
+        drop.update(x['id'] for x in g if x['id'] != keep['id'])
+    return qs.exclude(id__in=drop) if drop else qs
+
+
+def _revision_groups(scope):
+    """The rows of `scope`, gathered into one group per deal. See
+    _drop_superseded_revisions for how rows are connected; this is that grouping on
+    its own, so the revision history can reuse it rather than restate it."""
+    rows = [r for r in scope.values('id', 'project_id', 'phone', 'plot_numbers', 'plot__number',
+                                    'area', 'revision_no', 'status', 'closure_id', 'revision_of_id')
             if r['status'] != 'rejected']
 
     parent = {r['id']: r['id'] for r in rows}
@@ -4367,13 +4839,43 @@ def _drop_superseded_revisions(qs):
     groups = {}
     for r in rows:
         groups.setdefault(find(r['id']), []).append(r)
-    drop = set()
-    for g in groups.values():
-        if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
-            continue
-        keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
-        drop.update(x['id'] for x in g if x['id'] != keep['id'])
-    return qs.exclude(id__in=drop) if drop else qs
+    return groups
+
+
+def _revision_chain_ids(booking_id, company, strict=False):
+    """Every booking that is a version of this same deal, this one included.
+
+    Starts from the grouping the listing uses, then walks `revision_of` in both
+    directions to pull in rejected versions too: a rejected R1 is excluded from "what
+    is live", which is right for a list, but it is exactly what someone opening the
+    history wants to see.
+
+    `strict` drops the heuristic grouping and follows only recorded revision_of links.
+    The grouping joins rows that merely share a project, phone and unit, which is the
+    right guess for showing a history but far too loose for deciding whether a unit is
+    free: two genuinely separate bookings on one unit to the same buyer looked like one
+    deal, and discarding the draft released the unit out from under a live sale.
+    """
+    ids = {booking_id}
+    if not strict:
+        for g in _revision_groups(Booking.objects.filter(company=company)).values():
+            group_ids = {r['id'] for r in g}
+            if booking_id in group_ids:
+                ids |= group_ids
+                break
+    links = list(Booking.objects.filter(company=company, revision_of__isnull=False)
+                 .values_list('id', 'revision_of_id'))
+    adjacent = {}
+    for child, par in links:
+        adjacent.setdefault(child, set()).add(par)
+        adjacent.setdefault(par, set()).add(child)
+    queue = list(ids)
+    while queue:
+        for nxt in adjacent.get(queue.pop(), ()):
+            if nxt not in ids:
+                ids.add(nxt)
+                queue.append(nxt)
+    return ids
 
 
 def _can_view_all_bookings(user):
@@ -4396,9 +4898,18 @@ class BookingAllView(APIView):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
         qs = _drop_superseded_revisions(
-            Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+            Booking.objects.filter(company=company)
+            .select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
+                            'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+            .defer(*PROJECT_BLOBS)
         ).order_by('-created_at')
-        return Response(BookingSerializer(qs[:1000], many=True).data)
+        # is_cp_sourced reaches into the lead; resolved once for the page here rather
+        # than per row, the same way the sales list does it.
+        qs = qs.annotate(cp_sourced_ann=Case(
+            When(cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner'), then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
+        # context: can_accounts_approve is per-viewer, so the serializer needs the request.
+        return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
 
 
 def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):
@@ -4546,6 +5057,72 @@ def _notify_accounts_managers(company, ntype, title, body, data=None):
         logging.getLogger(__name__).exception('_notify_accounts_managers failed')
 
 
+def _notify_accounts_approvers(company, booking):
+    """Tell whoever is actually configured to approve `booking` at the Accounts
+    stage (accounts_booking_approvers / accounts_cp_booking_approvers, picked
+    the same way _notify_booking_approvers picks the Sales/CP ones) that it is
+    waiting on them. A project naming nobody gets no targeted notification here
+    — only a real admin can act on it, and _notify_accounts_managers's broadcast
+    still reaches every Accounts manager regardless. Best-effort — never raises."""
+    try:
+        from notifications import notify
+        if not booking.project_id:
+            return
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        approver_field = 'accounts_cp_booking_approvers' if is_cp else 'accounts_booking_approvers'
+        ids = getattr(booking.project, approver_field, None) or []
+        if not ids:
+            return
+        recipients = User.objects.filter(id__in=ids, company=company, is_active=True)
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        title = 'Accounts approval needed%s' % rev
+        msg = '%s · %s Unit %s · ₹%s — awaiting your approval' % (
+            booking.client_name or '—', booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0),
+        )
+        seen = set()
+        for u in recipients:
+            if u.id not in seen:
+                seen.add(u.id)
+                notify(u, 'accounts_booking_approval', title, msg, {'booking_id': booking.id})
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('_notify_accounts_approvers failed')
+
+
+def _notify_accounts_rejection_to_sales(company, booking, rejecting_user, reason):
+    """On an ACCOUNTS-stage rejection, tell whoever holds Sales/CP approval
+    authority for this booking's project — deliberately NOT the Accounts
+    broadcast (_notify_accounts_managers), which is the wrong direction here;
+    this is Accounts telling Sales/CP, not the other way round. Falls back to
+    the STM's reporting chain if the project names no Sales/CP approver, same
+    fallback _notify_closure_cancellation/_notify_booking_approvers use.
+    Best-effort — never raises."""
+    try:
+        from notifications import notify_many, reporting_chain
+        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+        approver_field = 'cp_booking_approvers' if is_cp else 'booking_approvers'
+        ids = (getattr(booking.project, approver_field, None) if booking.project_id else None) or []
+        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
+        if not recipients and booking.stm_id:
+            recipients = reporting_chain(booking.stm)
+        if not recipients:
+            return
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        notify_many(
+            recipients, 'accounts_booking_rejected', 'Rejected by Accounts',
+            '%s · %s Unit %s was rejected by Accounts (%s): %s' % (
+                booking.client_name or 'Booking', booking.project.name if booking.project_id else '',
+                unit, getattr(rejecting_user, 'name', '') or 'Accounts', reason,
+            ),
+            {'booking_id': booking.id},
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('_notify_accounts_rejection_to_sales failed')
+
+
 def _ensure_lead_and_site_visit_for_booking(b):
     """On a booking's first approval, guarantee it exists in the pipeline as a lead
     with a completed site visit dated on the booking date.
@@ -4622,8 +5199,16 @@ def _ensure_lead_and_site_visit_for_booking(b):
     if timezone.is_naive(visited):
         visited = timezone.make_aware(visited, timezone.get_current_timezone())
 
+    # The telecaller who worked this lead keeps the credit for the visit. Conversion
+    # reporting counts a site visit through referred_by_telecaller — MQL→SV, SV Done,
+    # the telecaller's own portal — so leaving it null quietly dropped every visit
+    # created this way out of their numbers, and the visit read as if the STM had
+    # sourced the buyer themselves.
+    tc_id = Lead.objects.filter(pk=lead_id).values_list('telecaller_id', flat=True).first()
+
     sv = SiteVisit.objects.create(
         lead_id=lead_id, project_id=b.project_id, stm=b.stm,
+        referred_by_telecaller_id=tc_id,
         scheduled_at=visited, visited_at=visited,
         status='completed', outcome='hot',
         remarks='Recorded automatically from booking #%s on approval.' % b.pk,
@@ -4658,15 +5243,62 @@ class BookingActionView(APIView):
         is_rev = b.revision_no and b.revision_no > 0
 
         if action == 'approve':
+            # The plot itself is NOT marked sold here — Sales/CP approval alone no
+            # longer finalises the unit on the map; it stays 'hold' (spoken for, not
+            # yet gone) until Accounts also signs off (see AccountsBookingActionView,
+            # which is the only place that sets 'sold'). A revision re-approval can
+            # find the plot already 'sold' from an earlier round — pull it back to
+            # 'hold' to match accounts_status being reset to pending below.
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            # Checking again here, not only at submission. Two bookings can sit pending
+            # on one unit and each be approved in turn, and a unit's status can be lost
+            # to a re-import or a reset between the two — neither of which the
+            # submission-time check can see. A revision legitimately reuses its own
+            # unit, so the chain it belongs to is excluded.
+            if _pids and not b.revision_of_id and not b.is_resale:
+                chain = _revision_chain_ids(b.id, company)
+                wanted = set(_pids)
+                clash = None
+                # plot_ids is JSON, not a Postgres array, so the overlap is worked out
+                # here rather than in the query — the same way the submission-time
+                # guard above does it, and portable to the test database.
+                for other in (Booking.objects.filter(company=company, status='sold')
+                              .exclude(id__in=chain)
+                              .only('id', 'plot_id', 'plot_ids', 'client_name')):
+                    held = set(other.plot_ids or [])
+                    if other.plot_id:
+                        held.add(other.plot_id)
+                    if held & wanted:
+                        clash = other
+                        break
+                if clash:
+                    return Response(
+                        {'detail': f'This unit is already sold to {clash.client_name} '
+                                   f'(booking #{clash.id}). Cancel that booking first.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
             if _pids:
-                Plot.objects.filter(id__in=_pids).update(status='sold')
+                Plot.objects.filter(id__in=_pids).update(status='hold')
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
             b.approved_at = timezone.now()
+            b.approved_by = request.user
+            # Sales/CP approval alone no longer makes this real to Accounts — it now
+            # waits on a configured Accounts approver too (see AccountsBookingActionView).
+            # Reset on every approval, including a revision: the amount may have
+            # changed, so Accounts should sign off on it again rather than keeping
+            # whatever stale accounts_status an earlier approval left behind.
+            b.accounts_status = 'pending'
+            b.accounts_rejected_reason = ''
+            b.accounts_approved_by = None
+            b.accounts_approved_at = None
+            b.accounts_rejected_by = None
+            b.accounts_rejected_at = None
             if b.closure_id:
                 # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status', 'approved_at'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'accounts_status',
+                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                       'accounts_rejected_by', 'accounts_rejected_at'])
                 Closure.objects.filter(id=b.closure_id).update(
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
             else:
@@ -4690,7 +5322,9 @@ class BookingActionView(APIView):
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
                 b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure'])
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'closure', 'accounts_status',
+                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                       'accounts_rejected_by', 'accounts_rejected_at'])
                 # The sale is now real, so make sure the pipeline shows how it got
                 # here: a lead, and a completed site visit dated on the booking date.
                 try:
@@ -4717,17 +5351,24 @@ class BookingActionView(APIView):
                 f'{b.client_name or "Booking"} · {b.project.name if b.project_id else ""} Unit {_unit} · ₹{int(b.final_amount or 0)} — approved',
                 {'booking_id': b.id},
             )
+            # And separately, tell whoever is actually configured to approve it at
+            # the Accounts stage — the broadcast above reaches every Accounts
+            # manager, but only these people can act on it.
+            _notify_accounts_approvers(company, b)
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
+            b.rejected_by = request.user
+            b.rejected_at = timezone.now()
             # Remove the rejected signed LOI PDF from Supabase storage.
             if b.loi_document:
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
-            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+            b.save(update_fields=['status', 'approval_status', 'loi_document',
+                                  'rejected_by', 'rejected_at'])
             if not is_rev:
                 _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-                _release_plots(_pids)
+                _release_plots(_pids, booking=b)
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
             from notifications import notify
@@ -4737,6 +5378,80 @@ class BookingActionView(APIView):
                 _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
                 notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
                        f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
+        else:
+            return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(BookingSerializer(b).data)
+
+
+class AccountsBookingActionView(APIView):
+    """Approve / reject a booking's separate ACCOUNTS-stage sign-off — distinct
+    from BookingActionView, which is the Sales/CP approval. A booking only
+    reaches here once Sales/CP has already approved it (status='sold'); this
+    endpoint is gated by the accounts_booking_approvers / accounts_cp_booking_approvers
+    lists on the project, configured the same way as Sales' own approver lists
+    (see _can_approve_accounts_booking). Rejecting requires a remarks string —
+    it releases the plot(s) exactly like a Sales-level rejection does (same
+    _release_plots) and notifies the Sales/CP approver(s) for the project."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        company = _resolve_company(request)
+        try:
+            b = Booking.objects.select_related('project', 'plot', 'stm').get(pk=pk, company=company)
+        except Booking.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_approve_accounts_booking(request.user, b.project_id, b.project, b.lead_id, company, b.source):
+            return Response(
+                {'detail': 'You are not an Accounts approver for this project.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if b.status != 'sold':
+            return Response({'detail': 'This booking has not been approved by Sales/CP yet.'}, status=status.HTTP_400_BAD_REQUEST)
+        if b.accounts_status != 'pending':
+            return Response({'detail': 'This booking has already been processed by Accounts.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        action = request.data.get('action')
+        if action == 'approve':
+            # This is the ONLY point a unit actually becomes sold — Sales/CP approval
+            # leaves it 'hold' precisely so the map doesn't show it as final until now.
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            if _pids:
+                Plot.objects.filter(id__in=_pids).update(status='sold')
+            b.accounts_status = 'approved'
+            b.accounts_approved_by = request.user
+            b.accounts_approved_at = timezone.now()
+            b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
+            from notifications import notify
+            if b.stm:
+                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                notify(b.stm, 'accounts_booking_approved', 'Approved by Accounts',
+                       f'{b.client_name or "Your booking"} · Unit {unit} was approved by Accounts.', {'booking_id': b.id})
+        elif action == 'reject':
+            reason = (request.data.get('reason') or '').strip()
+            if not reason:
+                return Response({'detail': 'Remarks are required to reject.'}, status=status.HTTP_400_BAD_REQUEST)
+            b.accounts_status = 'rejected'
+            b.accounts_rejected_reason = reason
+            b.accounts_rejected_by = request.user
+            b.accounts_rejected_at = timezone.now()
+            # Same fate as a Sales-level rejection: the plot(s) free up and the
+            # booking itself is marked rejected, not just its accounts stage.
+            b.status = 'rejected'
+            if b.loi_document:
+                try: b.loi_document.delete(save=False)
+                except Exception: pass
+            b.save(update_fields=['accounts_status', 'accounts_rejected_reason', 'accounts_rejected_by',
+                                   'accounts_rejected_at', 'status', 'loi_document'])
+            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+            _release_plots(_pids, booking=b)
+            if b.closure_id:
+                Closure.objects.filter(id=b.closure_id).delete()
+            from notifications import notify
+            if b.stm:
+                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                notify(b.stm, 'accounts_booking_rejected', 'Rejected by Accounts',
+                       f'{b.client_name or "Your booking"} · Unit {unit} was rejected by Accounts: {reason}', {'booking_id': b.id})
+            _notify_accounts_rejection_to_sales(company, b, request.user, reason)
         else:
             return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -4829,20 +5544,24 @@ class ClosureCancelView(APIView):
             request.user, 'company').first()
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        # Only an approver (admin/manager) may cancel a booking — same authority that
-        # approves/rejects it. The owning STM can no longer self-cancel.
-        if not is_admin_or_manager(request.user):
-            return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
-        # ...and only for a project they actually approve. Cancelling undoes an approval,
-        # frees the plots and deletes the signed LOI, so it cannot be laxer than approving.
         # A closure has no Source field of its own — pull it from the booking that
         # was approved into this closure, if any, so a CP-sourced deal still routes
         # to the CP approvers at cancel time too.
         booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
-        if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
-            return Response({'detail': 'You are not a booking approver for this project.'},
-                            status=status.HTTP_403_FORBIDDEN)
+        # Two independent routes to cancel authority: the Sales/CP approver for this
+        # project (admin/manager, same authority that approves/rejects it — the owning
+        # STM can no longer self-cancel), OR the Accounts approver who signed off on it
+        # at that separate stage — undoing either approval is cancelling the same sale,
+        # so either side's approver may void it once it's Accounts-approved.
+        is_accounts_approver = _can_approve_accounts_booking(
+            request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source)
+        if not is_accounts_approver:
+            if not is_admin_or_manager(request.user):
+                return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
+            if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
+                return Response({'detail': 'You are not a booking approver for this project.'},
+                                status=status.HTTP_403_FORBIDDEN)
 
         # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
         notif_stm      = closure.stm
@@ -4856,18 +5575,26 @@ class ClosureCancelView(APIView):
         if linked_booking:
             notif_extra['booking_id'] = linked_booking.pk
 
+        # A cancellation is a record, not an erasure. The signed LOI stays in storage
+        # and stays linked: it is the evidence of what the buyer agreed to, and
+        # Accounts needs the cancelled deal and its PDF to reconcile against. Deleting
+        # the document left nothing to show the day someone disputes a cancellation,
+        # which is the one day it matters.
         for b in Booking.objects.filter(closure=closure):
-            if b.loi_document:
-                try: b.loi_document.delete(save=False)
-                except Exception: pass
             _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            _release_plots(_pids)
+            _release_plots(_pids, booking=b)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
-            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+            b.cancelled_by = request.user
+            b.cancelled_at = timezone.now()
+            b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at'])
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
-        closure.delete()
+        # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
+        # Conversion counts exclude it (see the closure querysets in the dashboards),
+        # so the numbers are unchanged while the row survives for Accounts.
+        closure.status = 'cancelled'
+        closure.save(update_fields=['status'])
 
         _notify_closure_cancellation(
             notif_stm, notif_project, company,
@@ -5413,6 +6140,23 @@ class PlotBulkDeleteView(APIView):
             return Response({'detail': 'project_id is required.'}, status=400)
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Project not found.'}, status=404)
+        # Wiping the map does not cancel anything. Booking.plot is SET_NULL, so every
+        # live sale would survive pointing at no unit, and rebuilding the floor would
+        # bring those units back as available to be sold a second time — the same
+        # double-sale this project has already seen, through a different door.
+        # project_id is already scoped to the caller's company by _project_in_scope.
+        held = [b for b in Booking.objects.filter(project_id=project_id,
+                                                  status__in=('pending', 'sold'))
+                .only('id', 'plot_id', 'plot_ids', 'client_name', 'status')
+                if b.plot_id or b.plot_ids]
+        if held:
+            first = held[0]
+            return Response(
+                {'detail': f'{len(held)} unit(s) in this project are held by a live booking — '
+                           f'{first.client_name} (#{first.id}) among them. Cancel those bookings '
+                           f'first; deleting the map would leave the sales standing with no unit.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         deleted, _ = Plot.objects.filter(project_id=project_id).delete()
         Project.objects.filter(pk=project_id).update(total_plots=0)
         return Response({'deleted': deleted})
@@ -5647,7 +6391,8 @@ class LeadTransferListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = (LeadTransfer.objects.filter(company=company)
-              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by'))
+              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by')
+              .defer(*PROJECT_BLOBS))
         if not _is_hard_admin(request.user):
             approver_pids = _approver_project_ids(request.user, company)
             qs = qs.filter(

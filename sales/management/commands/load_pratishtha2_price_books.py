@@ -11,20 +11,14 @@ reported and skipped rather than written with a zero price.
     python manage.py load_pratishtha2_price_books --project "Pratishtha 2"
 """
 
-import re
-
 from django.core.management.base import BaseCommand
 
 from sales.models import Project, Plot
 from sales.pricing import pratishtha2
 
 
-def _area(raw):
-    """'60 sqyrd' / '60' / 60 -> 60.0. None when there is no number in there."""
-    if raw is None:
-        return None
-    m = re.search(r'\d+(?:\.\d+)?', str(raw))
-    return float(m.group()) if m else None
+# Shared with the plot-edit path, which has to read an area exactly as this does.
+_area = pratishtha2.area_of
 
 
 class Command(BaseCommand):

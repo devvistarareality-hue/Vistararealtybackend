@@ -1,3 +1,4 @@
+from django.db.models import Q
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
@@ -34,7 +35,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
-            'cp_booking_approvers',
+            'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
@@ -91,13 +92,19 @@ def _plot_draft_map(project_id):
 
 
 def _plot_pending_map(project_id):
-    """{plot_id: pending Booking id} for every unit whose booking is submitted and
-    waiting on a manager. Plot.status is 'hold' for this and for a bare map selection
-    alike — the two are told apart only by held_by, which submission clears — so the
-    picker needs this to colour "waiting for approval" separately from "someone is
-    still choosing". One query per project, same shape as _plot_draft_map."""
+    """{plot_id: pending Booking id} for every unit whose booking is waiting on
+    SOMEONE's approval — either still awaiting Sales/CP (status='pending'), or
+    Sales/CP has approved it but it's now awaiting the separate Accounts-stage
+    sign-off (status='sold', accounts_status='pending'; see AccountsBookingActionView
+    — that stage leaves the plot on 'hold' too, not 'sold', until it clears it).
+    Plot.status is 'hold' for both of these and for a bare map selection alike —
+    they're told apart only by held_by, which submission clears — so the picker
+    needs this to colour "waiting for approval" separately from "someone is still
+    choosing". One query per project, same shape as _plot_draft_map."""
     out = {}
-    rows = Booking.objects.filter(project_id=project_id, status='pending').only('id', 'plot_id', 'plot_ids')
+    rows = Booking.objects.filter(project_id=project_id).filter(
+        Q(status='pending') | Q(status='sold', accounts_status='pending')
+    ).only('id', 'plot_id', 'plot_ids')
     for b in rows:
         for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
             out[pid] = b.id
@@ -199,11 +206,166 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_loi_document(self, obj):
         return obj.loi_document.name if obj.loi_document else ''
 
+    # Whether this viewer may approve or reject this particular booking. Routing is
+    # per-booking, not per-person: a Channel-Partner-sourced deal answers to the
+    # project's CP approvers and everything else to its regular ones, so a CP manager
+    # looking at a walk-in they booked themselves cannot action it. Without this the
+    # CP module offered Approve and Reject on every pending row it listed and the
+    # click failed silently, which reads as the button being broken rather than as
+    # the booking not being theirs to decide.
+    can_approve = serializers.SerializerMethodField()
+
+    # Whether this deal came through a channel partner. Deliberately server-side:
+    # the rule is "the lead is CP-attributed OR the booking's own Source says so",
+    # and the lead half is invisible to the client. A UI guessing from the fields it
+    # does have — Source plus the free-text cp_name — called 107 of Kunal's 133
+    # bookings CP-sourced where the server counts 68, because a Reference deal can
+    # still name a partner in cp_name. Same predicate that routes approvals, so the
+    # filter and the approver list can never disagree.
+    is_cp_sourced = serializers.SerializerMethodField()
+
+    def _cp_sourced(self, obj):
+        """Is this booking Channel-Partner-sourced? Reads the list views' annotation
+        when it is there (one query for the whole page) and only falls back to a
+        per-row lead lookup for the single-object cases that have no annotation.
+        Every field that needs the answer goes through here, so a list never pays
+        for the same lookup three times."""
+        annotated = getattr(obj, 'cp_sourced_ann', None)
+        if annotated is not None:
+            return bool(annotated)
+        from .views import _is_cp_sourced_booking
+        return bool(_is_cp_sourced_booking(obj.lead_id, obj.source))
+
+    def get_is_cp_sourced(self, obj):
+        return self._cp_sourced(obj)
+
+    def get_can_approve(self, obj):
+        if obj.status != 'pending':
+            return False
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        # Same per-list cache as the Accounts gate below: the approver lists are per
+        # viewer and per company, not per booking, so resolving them once keeps a
+        # page of pending bookings from firing a Project query each.
+        cache = getattr(self, '_approve_cache', None)
+        if cache is None:
+            from .views import (_is_hard_admin, _approver_project_ids,
+                                _cp_approver_project_ids, _resolve_company)
+            company = _resolve_company(request) if request is not None else getattr(user, 'company', None)
+            cache = {
+                'hard_admin': _is_hard_admin(user),
+                'reg_ids': set(_approver_project_ids(user, company)),
+                'cp_ids': set(_cp_approver_project_ids(user, company)),
+            }
+            self._approve_cache = cache
+        if cache['hard_admin']:
+            return True
+        if not obj.project_id:
+            return True
+        return obj.project_id in (cache['cp_ids'] if self._cp_sourced(obj) else cache['reg_ids'])
+
+    accounts_approved_by_name = serializers.SerializerMethodField()
+
+    def get_accounts_approved_by_name(self, obj):
+        return obj.accounts_approved_by.name if obj.accounts_approved_by_id else None
+
+    accounts_rejected_by_name = serializers.SerializerMethodField()
+
+    def get_accounts_rejected_by_name(self, obj):
+        return obj.accounts_rejected_by.name if obj.accounts_rejected_by_id else None
+
+    # Who decided at the Sales/CP stage. The screens read one name per action rather
+    # than working it out from approval_status, so a card can say who approved it, who
+    # rejected it, or who took it off the books, without the caller guessing.
+    approved_by_name = serializers.SerializerMethodField()
+
+    def get_approved_by_name(self, obj):
+        return obj.approved_by.name if obj.approved_by_id else None
+
+    rejected_by_name = serializers.SerializerMethodField()
+
+    def get_rejected_by_name(self, obj):
+        return obj.rejected_by.name if obj.rejected_by_id else None
+
+    cancelled_by_name = serializers.SerializerMethodField()
+
+    def get_cancelled_by_name(self, obj):
+        return obj.cancelled_by.name if obj.cancelled_by_id else None
+
+    # The sale this one replaces on a unit put back on the market. Named, because
+    # "resale" on its own does not tell anyone whose unit changed hands.
+    resale_of_client = serializers.SerializerMethodField()
+
+    def get_resale_of_client(self, obj):
+        return obj.resale_of.client_name if obj.resale_of_id else None
+
+    resale_of_stm = serializers.SerializerMethodField()
+
+    def get_resale_of_stm(self, obj):
+        if not obj.resale_of_id:
+            return None
+        prev = obj.resale_of
+        return prev.manual_stm_name or (prev.stm.name if prev.stm_id else None)
+
+    # Whether the requesting user may act on this booking's Accounts-stage
+    # approval right now — mirrors PlotSerializer.can_cancel_hold's per-viewer
+    # pattern, so the frontend can show Approve/Reject only to someone who'd
+    # actually get a 200 back from AccountsBookingActionView.
+    can_accounts_approve = serializers.SerializerMethodField()
+
+    def get_can_accounts_approve(self, obj):
+        if obj.status != 'sold' or obj.accounts_status != 'pending':
+            return False
+        return self._is_accounts_approver_for(obj)
+
+    # Whether this viewer is a configured Accounts approver for this booking's
+    # project (CP-aware) — independent of the booking's current accounts_status,
+    # so it can gate both "may approve/reject this pending one" and "may cancel
+    # this already-approved one" from the same per-viewer check.
+    def _is_accounts_approver_for(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        # Computed once per list (not once per booking) — same instance-level cache
+        # pattern as PlotSerializer's _agent_cache, since AccountsBookingActionView's
+        # own gate re-queries per-project anyway; this just keeps a 1000-row list from
+        # firing two Project queries for every single row.
+        cache = getattr(self, '_accounts_approve_cache', None)
+        if cache is None:
+            from .views import _is_hard_admin, _accounts_approver_project_ids, _accounts_cp_approver_project_ids, _resolve_company
+            company = _resolve_company(request) if request is not None else getattr(user, 'company', None)
+            cache = {
+                'hard_admin': _is_hard_admin(user),
+                'reg_ids': set(_accounts_approver_project_ids(user, company)),
+                'cp_ids': set(_accounts_cp_approver_project_ids(user, company)),
+            }
+            self._accounts_approve_cache = cache
+        if cache['hard_admin']:
+            return True
+        if not obj.project_id:
+            return True
+        return obj.project_id in (cache['cp_ids'] if self._cp_sourced(obj) else cache['reg_ids'])
+
+    # Whether this viewer may cancel this already-Accounts-approved booking —
+    # mirrors the permission ClosureCancelView actually enforces for an Accounts
+    # approver, so the button only shows where the request would succeed.
+    can_accounts_cancel = serializers.SerializerMethodField()
+
+    def get_can_accounts_cancel(self, obj):
+        if obj.status != 'sold' or obj.accounts_status != 'approved' or not obj.closure_id:
+            return False
+        return self._is_accounts_approver_for(obj)
+
     class Meta:
         model = Booking
         fields = '__all__'
         read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
-                            'project_name', 'plot_number', 'stm_name']
+                            'project_name', 'plot_number', 'stm_name', 'is_cp_sourced',
+                            'approved_by_name', 'rejected_by_name', 'cancelled_by_name',
+                            'resale_of_client', 'resale_of_stm']
 
 
 class LeadUserSerializer(serializers.Serializer):

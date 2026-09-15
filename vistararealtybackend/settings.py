@@ -45,6 +45,13 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    # Compress every response the client says it can decompress. The list endpoints
+    # send JSON measured in megabytes (all bookings for a company is ~1.3 MB, the
+    # project list ~0.7 MB of floor-plan data) and it gzips roughly ten to one, which
+    # is most of the wait on a phone. Safe here because this is a token-authenticated
+    # JSON API: BREACH needs a secret and attacker-controlled text reflected into the
+    # same response body, and no response mixes a CSRF token with echoed input.
+    'django.middleware.gzip.GZipMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -81,10 +88,14 @@ if os.getenv('DATABASE_URL'):
     DATABASES = {
         'default': dj_database_url.parse(
             os.getenv('DATABASE_URL'),
-            # 0 by default: with Neon's pooled (PgBouncer) endpoint, app-side persistent
-            # connections hold pooler slots — especially now with multiple gunicorn
-            # workers × threads. Override via DB_CONN_MAX_AGE if on a session pooler.
-            conn_max_age=int(os.getenv('DB_CONN_MAX_AGE', '0')),
+            # Keep connections open between requests. This was 0 for a pooled (PgBouncer)
+            # endpoint, where app-side persistent connections hold pooler slots — but the
+            # database is plain Railway Postgres with no pooler in front, so 0 only meant
+            # every single API request paid a fresh TCP + TLS handshake before doing any
+            # work. At 3 workers x 4 threads this holds at most 12 connections against a
+            # server that allows 500. Set DB_CONN_MAX_AGE=0 if the app is ever moved
+            # behind a transaction-mode pooler.
+            conn_max_age=int(os.getenv('DB_CONN_MAX_AGE', '60')),
             ssl_require=not DEBUG,
         )
     }
