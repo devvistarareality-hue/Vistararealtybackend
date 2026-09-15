@@ -1611,11 +1611,12 @@ class ProjectDetailView(APIView):
                 {'detail': 'Only an administrator can change booking approvers.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        # Same idea for the Accounts-stage approver lists, but gated by Accounts &
-        # Finance admin-module rights instead of Sales' — a Sales admin should not
-        # be able to name who signs off for Accounts, and vice versa.
+        # Same idea for the Accounts-stage approver lists, but restricted tighter
+        # than Sales' own approver setup: a real admin only, not an Accounts
+        # Admin-Modules user — deciding who signs off at the money stage doesn't
+        # extend to whoever was merely granted admin rights over that module.
         if (('accounts_booking_approvers' in request.data or 'accounts_cp_booking_approvers' in request.data) and not (
-            _is_hard_admin(request.user) or 'Accounts & Finance' in (getattr(request.user, 'admin_modules', None) or [])
+            _is_hard_admin(request.user)
         )):
             return Response(
                 {'detail': 'Only an administrator can change Accounts approvers.'},
