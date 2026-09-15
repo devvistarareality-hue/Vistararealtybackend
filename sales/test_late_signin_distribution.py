@@ -101,7 +101,11 @@ class LateSignInTests(APITestCase):
         _run_distribution(self.co, 'stm', gate='signout')
         # skew the room: give A one extra
         Lead.objects.filter(stm=self.b).first().delete()
-        credit = _distribution_credit_for(self.c, self.co, 'stm')
+        # Pin the hour. Lateness is measured against stm_signin_time (10:20 here), so
+        # leaving it to the wall clock made this pass or fail depending on when the
+        # suite happened to run — it failed at 10:17 one morning for no other reason.
+        late = timezone.now().replace(hour=14, minute=0)
+        credit = _distribution_credit_for(self.c, self.co, 'stm', when=late)
         self.assertEqual(credit, min(Lead.objects.filter(stm=self.a).count(),
                                      Lead.objects.filter(stm=self.b).count()))
 

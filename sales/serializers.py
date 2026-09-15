@@ -256,6 +256,24 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_accounts_rejected_by_name(self, obj):
         return obj.accounts_rejected_by.name if obj.accounts_rejected_by_id else None
 
+    # Who decided at the Sales/CP stage. The screens read one name per action rather
+    # than working it out from approval_status, so a card can say who approved it, who
+    # rejected it, or who took it off the books, without the caller guessing.
+    approved_by_name = serializers.SerializerMethodField()
+
+    def get_approved_by_name(self, obj):
+        return obj.approved_by.name if obj.approved_by_id else None
+
+    rejected_by_name = serializers.SerializerMethodField()
+
+    def get_rejected_by_name(self, obj):
+        return obj.rejected_by.name if obj.rejected_by_id else None
+
+    cancelled_by_name = serializers.SerializerMethodField()
+
+    def get_cancelled_by_name(self, obj):
+        return obj.cancelled_by.name if obj.cancelled_by_id else None
+
     # Whether the requesting user may act on this booking's Accounts-stage
     # approval right now — mirrors PlotSerializer.can_cancel_hold's per-viewer
     # pattern, so the frontend can show Approve/Reject only to someone who'd
@@ -295,7 +313,8 @@ class BookingSerializer(serializers.ModelSerializer):
         model = Booking
         fields = '__all__'
         read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
-                            'project_name', 'plot_number', 'stm_name', 'is_cp_sourced']
+                            'project_name', 'plot_number', 'stm_name', 'is_cp_sourced',
+                            'approved_by_name', 'rejected_by_name', 'cancelled_by_name']
 
 
 class LeadUserSerializer(serializers.Serializer):

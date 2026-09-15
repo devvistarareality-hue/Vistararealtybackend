@@ -586,6 +586,15 @@ class Booking(models.Model):
     accounts_approved_at = models.DateTimeField(null=True, blank=True)
     accounts_rejected_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='accounts_rejected_bookings')
     accounts_rejected_at = models.DateTimeField(null=True, blank=True)
+    # Who decided, at the Sales/CP stage. approved_at recorded WHEN from the start but
+    # never WHO, so a deal on the books named nobody accountable for putting it there
+    # — and a cancellation, which takes a live sale off the books, named nobody at
+    # all. Mirrors the accounts_* pair above so both stages read the same way.
+    approved_by  = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_bookings')
+    rejected_by  = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_bookings')
+    rejected_at  = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_bookings')
+    cancelled_at = models.DateTimeField(null=True, blank=True)
     revision_no     = models.IntegerField(default=0)
     # The booking this one revises. The client has always posted `revision_of` but it
     # was never stored, leaving revision chains to be inferred from closure/unit —
