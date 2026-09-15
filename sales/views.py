@@ -1668,7 +1668,9 @@ def _release_plots(plot_ids, booking=None):
     wanted = set(plot_ids)
     live = Booking.objects.filter(status__in=('pending', 'sold'))
     if booking is not None:
-        live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company))
+        # strict: only recorded revisions of this booking, never rows that merely look
+        # alike. Freeing a unit is not the place for a guess.
+        live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company, strict=True))
     still_held = set()
     for b in live.only('id', 'plot_id', 'plot_ids'):
         held = set(b.plot_ids or [])
@@ -4726,20 +4728,27 @@ def _revision_groups(scope):
     return groups
 
 
-def _revision_chain_ids(booking_id, company):
+def _revision_chain_ids(booking_id, company, strict=False):
     """Every booking that is a version of this same deal, this one included.
 
     Starts from the grouping the listing uses, then walks `revision_of` in both
     directions to pull in rejected versions too: a rejected R1 is excluded from "what
     is live", which is right for a list, but it is exactly what someone opening the
     history wants to see.
+
+    `strict` drops the heuristic grouping and follows only recorded revision_of links.
+    The grouping joins rows that merely share a project, phone and unit, which is the
+    right guess for showing a history but far too loose for deciding whether a unit is
+    free: two genuinely separate bookings on one unit to the same buyer looked like one
+    deal, and discarding the draft released the unit out from under a live sale.
     """
     ids = {booking_id}
-    for g in _revision_groups(Booking.objects.filter(company=company)).values():
-        group_ids = {r['id'] for r in g}
-        if booking_id in group_ids:
-            ids |= group_ids
-            break
+    if not strict:
+        for g in _revision_groups(Booking.objects.filter(company=company)).values():
+            group_ids = {r['id'] for r in g}
+            if booking_id in group_ids:
+                ids |= group_ids
+                break
     links = list(Booking.objects.filter(company=company, revision_of__isnull=False)
                  .values_list('id', 'revision_of_id'))
     adjacent = {}

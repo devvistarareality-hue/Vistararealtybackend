@@ -254,3 +254,32 @@ class ReleasingAUnitRespectsOtherSalesTests(APITestCase):
         self.client.post(f'/api/sales/bookings/{draft.id}/discard/')
         free_plot.refresh_from_db()
         self.assertEqual(free_plot.status, 'available')
+
+    def test_a_lookalike_booking_is_not_treated_as_this_ones_revision(self):
+        """Two separate bookings on one unit to the same buyer are not one deal.
+
+        The revision grouping joins rows that merely share a project, phone and unit —
+        a fair guess for showing a history, far too loose for deciding a unit is free.
+        Discarding the draft released unit 102 out from under Umesh's live sale
+        because the two looked alike, and the map put the unit back up for sale.
+        """
+        same_phone = self.live.phone
+        draft = Booking.objects.create(
+            company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
+            stm=self.admin, status='draft', client_name='Umesh Tomar', phone=same_phone)
+        r = self.client.post(f'/api/sales/bookings/{draft.id}/discard/')
+        self.assertIn(r.status_code, (200, 204), getattr(r, 'data', None))
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'sold',
+                         'the live sale holds this unit, however similar the draft looked')
+
+    def test_a_real_revision_still_releases_its_own_unit(self):
+        # The exclusion has to keep working for a recorded revision: it shares the unit
+        # with the version it replaces, so rejecting it must not be blocked by that.
+        revision = Booking.objects.create(
+            company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
+            stm=self.admin, status='draft', revision_no=1, revision_of=self.live,
+            client_name='Umesh', phone=self.live.phone)
+        chain = __import__('sales.views', fromlist=['_revision_chain_ids'])._revision_chain_ids(
+            revision.id, self.co, strict=True)
+        self.assertIn(self.live.id, chain, 'a recorded revision_of link must still count')
