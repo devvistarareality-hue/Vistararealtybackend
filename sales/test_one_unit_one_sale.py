@@ -283,3 +283,66 @@ class ReleasingAUnitRespectsOtherSalesTests(APITestCase):
         chain = __import__('sales.views', fromlist=['_revision_chain_ids'])._revision_chain_ids(
             revision.id, self.co, strict=True)
         self.assertIn(self.live.id, chain, 'a recorded revision_of link must still count')
+
+
+class TheMapReclaimsUnitsWithALiveSaleTests(APITestCase):
+    """The net under every release path: a unit a live booking holds never reads as
+    available on the unit map.
+
+    Three separate paths had freed a sold unit — a cancelled sibling booking's release,
+    a discarded draft, a status edit in the plot editor — and each was fixed where it
+    stood. This reconciles on read, so whatever is written next cannot leave a sold
+    unit back on the map to be sold a second time.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='RCL', name='Reclaim Co')
+        cls.admin = User.objects.create(email='rcl@x.com', company=cls.co, role='Admin',
+                                        designation='Admin', user_code='L0', name='Admin')
+        cls.project = Project.objects.create(company=cls.co, name='Reclaim Tower')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+
+    def _plot(self, number, status='available'):
+        return Plot.objects.create(project=self.project, number=number, status=status)
+
+    def _map(self):
+        r = self.client.get(f'/api/sales/plots/?project={self.project.id}')
+        self.assertEqual(r.status_code, 200)
+        return {p['number']: p['status'] for p in r.data}
+
+    def test_a_unit_loose_under_a_completed_sale_is_reclaimed_as_sold(self):
+        plot = self._plot('102')
+        Booking.objects.create(company=self.co, project=self.project, plot=plot,
+                               plot_ids=[plot.id], status='sold', approval_status='APPROVED',
+                               client_name='Umesh', phone='9000000150')
+        self.assertEqual(self._map()['102'], 'sold')
+
+    def test_a_unit_loose_under_a_pending_booking_is_reclaimed_as_held(self):
+        # Pending means spoken for, not gone — the unit goes back to hold, not sold.
+        plot = self._plot('103')
+        Booking.objects.create(company=self.co, project=self.project, plot=plot,
+                               plot_ids=[plot.id], status='pending',
+                               client_name='Awaiting', phone='9000000151')
+        self.assertEqual(self._map()['103'], 'hold')
+
+    def test_a_resale_unit_is_left_exactly_alone(self):
+        # Resale is a deliberate decision to offer a sold unit again, and it keeps its
+        # old booking on purpose. Reclaiming it would undo the decision.
+        plot = self._plot('104', status='resale')
+        Booking.objects.create(company=self.co, project=self.project, plot=plot,
+                               plot_ids=[plot.id], status='sold', approval_status='APPROVED',
+                               client_name='Previous Owner', phone='9000000152')
+        self.assertEqual(self._map()['104'], 'resale')
+
+    def test_a_genuinely_free_unit_stays_available(self):
+        self._plot('105')
+        Booking.objects.create(company=self.co, project=self.project, plot=self._plot('106'),
+                               status='rejected', approval_status='CANCELLED',
+                               client_name='Cancelled', phone='9000000153')
+        m = self._map()
+        self.assertEqual(m['105'], 'available')
+        self.assertEqual(m['106'], 'available', 'a cancelled booking holds nothing')

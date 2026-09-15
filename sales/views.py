@@ -1686,6 +1686,47 @@ def _release_plots(plot_ids, booking=None):
     )
 
 
+def _reclaim_units_with_a_live_sale(plots_qs):
+    """Self-healing: a unit a live booking holds must never read as available.
+
+    Three separate paths had freed a sold unit — a cancelled sibling booking's release,
+    a discarded draft, a status edit in the plot editor — and each was fixed where it
+    stood. This is the net under all of them, and under whatever is written next: the
+    unit map reconciles itself on read, so a unit that slips back onto the map is
+    corrected the moment anyone looks at the project rather than being sold twice.
+
+    Only 'available' is reclaimed. 'resale' is a deliberate decision to offer a sold
+    unit again and keeps its old booking on purpose, so it is left exactly alone.
+    """
+    loose = list(plots_qs.filter(status='available').values_list('id', flat=True))
+    if not loose:
+        return 0
+    loose_set = set(loose)
+    claimed = {}
+    for b in (Booking.objects.filter(status__in=('pending', 'sold'))
+              .only('id', 'plot_id', 'plot_ids', 'status')):
+        held = set(b.plot_ids or [])
+        if b.plot_id:
+            held.add(b.plot_id)
+        for pid in held & loose_set:
+            # A completed sale outranks one still waiting on an approver.
+            if b.status == 'sold' or pid not in claimed:
+                claimed[pid] = b.status
+    fixed = 0
+    for want in ('sold', 'pending'):
+        ids = [pid for pid, st in claimed.items() if st == want]
+        if ids:
+            # A booking still pending leaves the unit spoken for, not gone.
+            fixed += Plot.objects.filter(id__in=ids).update(
+                status=('sold' if want == 'sold' else 'hold'),
+                held_by=None, held_at=None, pre_hold_status='')
+    if fixed:
+        logging.getLogger(__name__).warning(
+            'reclaimed %d unit(s) that read available while a live booking held them: %s',
+            fixed, sorted(claimed))
+    return fixed
+
+
 def _release_expired_holds(plots_qs):
     """Self-healing: flip stale soft-holds (a rep selected the unit on the picker but
     never submitted) back to available before reading. Only touches held_by-tracked
@@ -1720,6 +1761,9 @@ class PlotListView(APIView):
         if not _project_in_scope(request, project_id):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         _release_expired_holds(Plot.objects.filter(project_id=project_id))
+        # …and the other direction: a unit a live booking holds must not be sitting on
+        # the map as available, whatever put it there.
+        _reclaim_units_with_a_live_sale(Plot.objects.filter(project_id=project_id))
         plots = Plot.objects.filter(project_id=project_id).select_related('project')
         # context: can_cancel_hold is per-viewer, so the serializer needs the request.
         return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
