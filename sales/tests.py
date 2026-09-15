@@ -1184,6 +1184,38 @@ class BookingExportTests(APITestCase):
         # and the total counts the revision, not the original
         self.assertEqual(sum(self._column(ws, 'Final Amount')), 3500000)
 
+    def test_it_is_the_whole_company_not_just_the_downloader_s_own(self):
+        """The sheet is every approved booking in the company, whoever booked it.
+
+        The button sits on My Bookings (Approvals is manager-only, so an ordinary
+        employee could not reach it there) — but the export applies none of that
+        screen's scoping. No `mine`, no reporting tree, no CP filter: a rep granted
+        the permission downloads the same rows an admin would.
+        """
+        from datetime import date
+        from sales.models import Booking
+        co, admin, stm, p1, p2, *_ = self._seed()
+        someone_else = User.objects.create(email='other@exp.com', company=co, role='Sales',
+                                           user_code='OEXP', name='Someone Else',
+                                           designation='STM', reporting_manager=admin)
+        Booking.objects.create(company=co, project=p1, stm=someone_else,
+                               client_name="Another Rep's Client", booking_date=date.today(),
+                               final_amount=5000000, status='sold', source='Channel Partner')
+        stm.can_export_bookings = True
+        stm.save()
+
+        auth(self.client, stm)
+        ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
+        clients = self._column(ws, 'Client Name')
+        self.assertIn("Another Rep's Client", clients)   # not their own booking
+        self.assertIn('Sales Client', clients)
+        self.assertIn('Partner Client', clients)
+        self.assertEqual(len(clients), 4)
+        # and the same rep's own My Bookings list shows only their own — the export
+        # is deliberately not that list.
+        mine = self.client.get('/api/sales/bookings/?mine=1').json()
+        self.assertNotIn("Another Rep's Client", [b['client_name'] for b in mine])
+
     def test_user_management_can_grant_and_revoke_it(self):
         """The toggle in User Management is what actually gates the download."""
         co, admin, stm, *_ = self._seed()
