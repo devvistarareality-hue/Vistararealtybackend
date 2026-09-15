@@ -1,6 +1,10 @@
 import os
 from decimal import Decimal, InvalidOperation
 from django.db import models
+from cryptography.fernet import InvalidToken
+
+
+_FERNET_CACHE = {}
 
 
 def get_fernet():
@@ -8,12 +12,20 @@ def get_fernet():
 
     When None, EncryptedTextField behaves as a plain TextField (passthrough) so
     the app keeps working before the key is provisioned.
+
+    The instance is cached per key. Building one costs a base64 decode and two key
+    objects, and every encrypted column on every row asks for it — a single list of
+    bookings called this 17,000 times, which was a fifth of the request. Keyed by the
+    key itself, so changing FIELD_ENCRYPTION_KEY still takes effect immediately.
     """
     key = os.getenv('FIELD_ENCRYPTION_KEY', '').strip()
     if not key:
         return None
-    from cryptography.fernet import Fernet
-    return Fernet(key.encode())
+    f = _FERNET_CACHE.get(key)
+    if f is None:
+        from cryptography.fernet import Fernet
+        f = _FERNET_CACHE[key] = Fernet(key.encode())
+    return f
 
 
 class EncryptedTextField(models.TextField):
@@ -33,7 +45,6 @@ class EncryptedTextField(models.TextField):
         f = get_fernet()
         if f is None:
             return value
-        from cryptography.fernet import InvalidToken
         try:
             return f.decrypt(value.encode()).decode()
         except (InvalidToken, Exception):
@@ -46,7 +57,6 @@ class EncryptedTextField(models.TextField):
         f = get_fernet()
         if f is None:
             return value
-        from cryptography.fernet import InvalidToken
         try:
             f.decrypt(value.encode())
             return value  # already ciphertext — don't double-encrypt
@@ -124,7 +134,6 @@ class EncryptedDecimalField(models.DecimalField):
             return None
         f = get_fernet()
         if f is not None:
-            from cryptography.fernet import InvalidToken
             try:
                 return Decimal(f.decrypt(value.encode()).decode())
             except (InvalidToken, Exception):
@@ -136,7 +145,6 @@ class EncryptedDecimalField(models.DecimalField):
             return value
         f = get_fernet()
         if f is not None and isinstance(value, str):
-            from cryptography.fernet import InvalidToken
             try:
                 return Decimal(f.decrypt(value.encode()).decode())
             except (InvalidToken, Exception):

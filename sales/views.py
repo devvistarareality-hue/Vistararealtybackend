@@ -1570,7 +1570,18 @@ class ProjectListView(APIView):
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             projects = projects.filter(company_id=request.query_params['company_id'])
-        return Response(ProjectSerializer(projects, many=True).data)
+        data = ProjectSerializer(projects, many=True).data
+        # The floor plans and site-map zones are the bulk of this response — 90% of it
+        # on a company with drawn site maps — and nothing that lists projects draws a
+        # site map. The screens that do (Manage Plots, the closure viewer, the project
+        # edit form) each load one project from ProjectDetailView, which still returns
+        # everything. ?full=1 asks for them here anyway, for any caller that needs the
+        # whole record straight from the list.
+        if request.query_params.get('full') != '1':
+            for row in data:
+                row.pop('floor_plans', None)
+                row.pop('site_map_zones', None)
+        return Response(data)
 
     def post(self, request):
         if not is_admin_or_manager(request.user):
@@ -2223,7 +2234,8 @@ class SiteVisitListView(APIView):
 
     def get(self, request):
         qs = scope_to_company(
-            SiteVisit.objects.select_related('lead', 'project', 'stm'),
+            SiteVisit.objects.select_related('lead', 'project', 'stm',
+                                             'referred_by_telecaller', 'lead__telecaller'),
             request.user, 'lead__company',
         )
         if not _sees_all_company(request.user, request):
@@ -2327,7 +2339,8 @@ class ClosureListView(APIView):
 
     def get(self, request):
         qs = scope_to_company(
-            Closure.objects.select_related('lead', 'project', 'stm'),
+            Closure.objects.select_related('lead', 'project', 'stm',
+                                           'referred_by_telecaller', 'lead__telecaller'),
             request.user, 'company',
         )
         if not _sees_all_company(request.user, request):
@@ -4092,7 +4105,8 @@ class BookingListCreateView(APIView):
 
     def get(self, request):
         company = _resolve_company(request)
-        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
+                'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
         # Drafts are half-finished commercial terms, so they are not browsable by
         # every manager the way a submitted booking is. Visible to their author, to a
         # real admin, and to whoever approves that project's bookings — the same people
@@ -4862,8 +4876,15 @@ class BookingAllView(APIView):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
         qs = _drop_superseded_revisions(
-            Booking.objects.filter(company=company).select_related('project', 'plot', 'stm')
+            Booking.objects.filter(company=company)
+            .select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
+                'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
         ).order_by('-created_at')
+        # is_cp_sourced reaches into the lead; resolved once for the page here rather
+        # than per row, the same way the sales list does it.
+        qs = qs.annotate(cp_sourced_ann=Case(
+            When(cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner'), then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
 

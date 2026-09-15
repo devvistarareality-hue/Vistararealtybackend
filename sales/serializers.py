@@ -224,15 +224,20 @@ class BookingSerializer(serializers.ModelSerializer):
     # filter and the approver list can never disagree.
     is_cp_sourced = serializers.SerializerMethodField()
 
-    def get_is_cp_sourced(self, obj):
-        # The list view annotates this (one query for the whole page); everywhere
-        # else falls back to computing it, which costs a lead lookup per object and
-        # is only ever reached for a single booking.
+    def _cp_sourced(self, obj):
+        """Is this booking Channel-Partner-sourced? Reads the list views' annotation
+        when it is there (one query for the whole page) and only falls back to a
+        per-row lead lookup for the single-object cases that have no annotation.
+        Every field that needs the answer goes through here, so a list never pays
+        for the same lookup three times."""
         annotated = getattr(obj, 'cp_sourced_ann', None)
         if annotated is not None:
             return bool(annotated)
         from .views import _is_cp_sourced_booking
         return bool(_is_cp_sourced_booking(obj.lead_id, obj.source))
+
+    def get_is_cp_sourced(self, obj):
+        return self._cp_sourced(obj)
 
     def get_can_approve(self, obj):
         if obj.status != 'pending':
@@ -241,10 +246,25 @@ class BookingSerializer(serializers.ModelSerializer):
         user = getattr(request, 'user', None)
         if not user or not user.is_authenticated:
             return False
-        from .views import _can_approve_booking
-        return bool(_can_approve_booking(
-            user, obj.project_id, obj.project_id, obj.lead_id,
-            getattr(user, 'company', None), obj.source))
+        # Same per-list cache as the Accounts gate below: the approver lists are per
+        # viewer and per company, not per booking, so resolving them once keeps a
+        # page of pending bookings from firing a Project query each.
+        cache = getattr(self, '_approve_cache', None)
+        if cache is None:
+            from .views import (_is_hard_admin, _approver_project_ids,
+                                _cp_approver_project_ids, _resolve_company)
+            company = _resolve_company(request) if request is not None else getattr(user, 'company', None)
+            cache = {
+                'hard_admin': _is_hard_admin(user),
+                'reg_ids': set(_approver_project_ids(user, company)),
+                'cp_ids': set(_cp_approver_project_ids(user, company)),
+            }
+            self._approve_cache = cache
+        if cache['hard_admin']:
+            return True
+        if not obj.project_id:
+            return True
+        return obj.project_id in (cache['cp_ids'] if self._cp_sourced(obj) else cache['reg_ids'])
 
     accounts_approved_by_name = serializers.SerializerMethodField()
 
@@ -327,9 +347,7 @@ class BookingSerializer(serializers.ModelSerializer):
             return True
         if not obj.project_id:
             return True
-        from .views import _is_cp_sourced_booking
-        is_cp = _is_cp_sourced_booking(obj.lead_id, obj.source)
-        return obj.project_id in (cache['cp_ids'] if is_cp else cache['reg_ids'])
+        return obj.project_id in (cache['cp_ids'] if self._cp_sourced(obj) else cache['reg_ids'])
 
     # Whether this viewer may cancel this already-Accounts-approved booking —
     # mirrors the permission ClosureCancelView actually enforces for an Accounts

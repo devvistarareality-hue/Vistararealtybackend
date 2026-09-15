@@ -220,7 +220,10 @@ class Club1000UsersView(APIView):
     def get(self, request):
         if not has_club1000_access(request.user):
             return _no_access()
-        users = User.objects.filter(company=request.user.company, is_active=True).order_by('name')
+        # has_club1000_access -> is_platform_admin reads user.company.code, so without
+        # the join this walked back to the database once per user in the list.
+        users = (User.objects.filter(company=request.user.company, is_active=True)
+                 .select_related('company').order_by('name'))
         data = [
             {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation}
             for u in users if has_club1000_access(u)

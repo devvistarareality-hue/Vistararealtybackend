@@ -884,3 +884,98 @@ class PhoneDedupTests(APITestCase):
         self.assertEqual(new.duplicate_of_id, first.id)
         first.refresh_from_db()
         self.assertEqual(first.duplicate_count, 1)
+
+
+class ListQueryCountTests(APITestCase):
+    """The list endpoints must cost a fixed number of queries whatever the row count.
+
+    Each of these lists used to walk back to the database once per row — the Accounts
+    booking list fired 491 queries for 541 bookings, and the site-visit list 129 — for
+    names that a join resolves in one go. A count that grows with the data is the bug,
+    so every case here loads a small set and a larger one and asserts the query count
+    did not move.
+    """
+
+    def _company(self, code):
+        from companies.models import Company
+        co = Company.objects.create(code=code, name=code)
+        admin = User.objects.create(email=f'a@{code}.com', company=co, role='Admin',
+                                    user_code=f'A{code}', modules=['Sales'])
+        proj = Project.objects.create(company=co, name=f'{code} Project')
+        return co, admin, proj
+
+    def _bookings(self, co, admin, proj, start, n):
+        from datetime import date
+        from sales.models import Booking
+        for i in range(start, start + n):
+            lead = Lead.objects.create(company=co, name=f'L{i}', phone=f'+9190000{i:05d}')
+            # approved_by / rejected_by / cancelled_by each cost their own query per row
+            # without the join, so set them: an unset FK would hide the regression.
+            Booking.objects.create(company=co, project=proj, lead=lead, stm=admin,
+                                   status='sold', client_name=f'C{i}', booking_date=date.today(),
+                                   approved_by=admin, rejected_by=admin, cancelled_by=admin)
+
+    def _count(self, url):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        with CaptureQueriesContext(connection) as ctx:
+            res = self.client.get(url)
+        self.assertEqual(res.status_code, 200)
+        return len(ctx)
+
+    def test_accounts_booking_list_does_not_query_per_row(self):
+        co, admin, proj = self._company('QA')
+        admin.modules = ['Sales', 'Accounts & Finance']; admin.save()
+        auth(self.client, admin)
+        self._bookings(co, admin, proj, 0, 3)
+        few = self._count('/api/sales/bookings/all/')
+        self._bookings(co, admin, proj, 100, 12)
+        many = self._count('/api/sales/bookings/all/')
+        self.assertEqual(few, many, f'query count grew with row count: {few} -> {many}')
+
+    def test_booking_list_does_not_query_per_row(self):
+        co, admin, proj = self._company('QB')
+        auth(self.client, admin)
+        self._bookings(co, admin, proj, 0, 3)
+        few = self._count('/api/sales/bookings/')
+        self._bookings(co, admin, proj, 100, 12)
+        many = self._count('/api/sales/bookings/')
+        self.assertEqual(few, many, f'query count grew with row count: {few} -> {many}')
+
+    def test_site_visit_list_does_not_query_per_row(self):
+        from sales.models import SiteVisit
+        co, admin, proj = self._company('QC')
+        auth(self.client, admin)
+
+        def add(start, n):
+            for i in range(start, start + n):
+                lead = Lead.objects.create(company=co, name=f'L{i}', phone=f'+9191000{i:05d}',
+                                           telecaller=admin)
+                SiteVisit.objects.create(lead=lead, project=proj, stm=admin,
+                                         referred_by_telecaller=admin)
+
+        add(0, 3)
+        few = self._count('/api/sales/site-visits/')
+        add(100, 12)
+        many = self._count('/api/sales/site-visits/')
+        self.assertEqual(few, many, f'query count grew with row count: {few} -> {many}')
+
+    def test_closure_list_does_not_query_per_row(self):
+        from datetime import date
+        from sales.models import Closure
+        co, admin, proj = self._company('QD')
+        auth(self.client, admin)
+
+        def add(start, n):
+            for i in range(start, start + n):
+                lead = Lead.objects.create(company=co, name=f'L{i}', phone=f'+9192000{i:05d}',
+                                           telecaller=admin)
+                Closure.objects.create(company=co, lead=lead, project=proj, stm=admin,
+                                       status='booked', closure_date=date.today(), unit_no=str(i),
+                                       referred_by_telecaller=admin)
+
+        add(0, 3)
+        few = self._count('/api/sales/closures/')
+        add(100, 12)
+        many = self._count('/api/sales/closures/')
+        self.assertEqual(few, many, f'query count grew with row count: {few} -> {many}')
