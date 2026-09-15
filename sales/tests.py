@@ -1007,3 +1007,64 @@ class ListQueryCountTests(APITestCase):
         for blob in ('floor_plans', 'site_map_zones', 'plot_type_plans'):
             self.assertNotIn(f'"sales_project"."{blob}"', sql,
                              f'the unit map is still selecting {blob} for every unit')
+
+
+class ReviseOwnNonCPBookingTests(APITestCase):
+    """A CP-designated user must be able to revise their own booking even when it
+    did not come through a Channel Partner.
+
+    Their booking list is forced CP-only server-side, and the booking form used to
+    load the booking it was revising by fetching that list and searching it. A
+    booking of their own sourced 'Reference' is simply not in that list, so Revise
+    LOI found nothing and sat on a blank form — reported on Baroda Kalrav 1. The form
+    asks for the one booking by id instead, which is the same route resuming a draft
+    already takes.
+    """
+
+    def _seed(self):
+        from datetime import date
+        from companies.models import Company
+        from sales.models import Booking
+        co = Company.objects.create(code='CPR', name='CP Revise')
+        # 'CP Cluster Head' is what is_cp_manager keys on — the real designation the
+        # report came from.
+        cp = User.objects.create(email='cp@cpr.com', company=co, role='Manager',
+                                 user_code='CPR1', designation='CP CLUSTER HEAD',
+                                 modules=['Sales', 'Channel Partner'])
+        proj = Project.objects.create(company=co, name='Baroda Kalrav 1')
+        own = Booking.objects.create(company=co, project=proj, stm=cp, status='sold',
+                                     client_name='Reference Client', source='Reference',
+                                     booking_date=date.today(), plot_numbers='EOI-33')
+        partner = Booking.objects.create(company=co, project=proj, stm=cp, status='sold',
+                                         client_name='Partner Client', source='Channel Partner',
+                                         booking_date=date.today(), plot_numbers='EOI-30')
+        return co, cp, proj, own, partner
+
+    def test_the_list_the_form_used_to_search_omits_it(self):
+        co, cp, proj, own, partner = self._seed()
+        auth(self.client, cp)
+        ids = {row['id'] for row in self.client.get('/api/sales/bookings/').json()}
+        self.assertIn(partner.id, ids)           # partner-sourced: visible
+        self.assertNotIn(own.id, ids)            # their own, not partner-sourced: not
+
+    def test_opening_it_by_id_works(self):
+        co, cp, proj, own, partner = self._seed()
+        auth(self.client, cp)
+        res = self.client.get(f'/api/sales/bookings/{own.id}/')
+        self.assertEqual(res.status_code, 200, 'Revise LOI cannot prefill without this')
+        self.assertEqual(res.json()['client_name'], 'Reference Client')
+
+    def test_submitting_the_revision_is_accepted(self):
+        from datetime import date
+        from sales.models import Booking
+        co, cp, proj, own, partner = self._seed()
+        auth(self.client, cp)
+        res = self.client.post('/api/sales/bookings/', {
+            'project': proj.id, 'client_name': 'Reference Client', 'phone': '+919000000111',
+            'booking_date': str(date.today()), 'revision_of': own.id,
+            'loi_document': 'proj/loi-r1.pdf', 'area': '1200',
+        }, format='json')
+        self.assertEqual(res.status_code, 201, res.content[:400])
+        rev = Booking.objects.get(id=res.json()['id'])
+        self.assertEqual(rev.revision_of_id, own.id)
+        self.assertEqual(rev.revision_no, own.revision_no + 1)
