@@ -979,3 +979,31 @@ class ListQueryCountTests(APITestCase):
         add(100, 12)
         many = self._count('/api/sales/closures/')
         self.assertEqual(few, many, f'query count grew with row count: {few} -> {many}')
+
+    def test_unit_map_does_not_drag_the_project_blobs_along(self):
+        """Listing a project's units must not pull its floor plans once per unit.
+
+        select_related('project') repeats every joined project column on every row, so
+        a project carrying 160 KB of floor plans (Pratishtha 2) turned a 537-unit map
+        into 84 MB off the database and a ten-second wait on the booking screen. The
+        unit map never draws a site plan, so the join must leave those columns behind.
+        """
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+        from sales.models import Plot
+        co, admin, proj = self._company('QE')
+        proj.floor_plans = [{'block': 'A', 'floor': f, 'zones': [{'x': f, 'y': f}] * 50}
+                            for f in range(20)]
+        proj.save()
+        for i in range(12):
+            Plot.objects.create(project=proj, number=f'A-{i}', status='available')
+
+        auth(self.client, admin)
+        with CaptureQueriesContext(connection) as ctx:
+            res = self.client.get(f'/api/sales/plots/?project={proj.id}')
+            sql = ' '.join(q['sql'] for q in connection.queries[ctx.initial_queries:])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.json()), 12)
+        for blob in ('floor_plans', 'site_map_zones', 'plot_type_plans'):
+            self.assertNotIn(f'"sales_project"."{blob}"', sql,
+                             f'the unit map is still selecting {blob} for every unit')

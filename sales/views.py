@@ -345,6 +345,15 @@ def can_assign_leads(user):
     return not (is_telecaller(user) or is_stm(user) or is_cp(user))
 
 
+# A project's floor plans, site-map zones and unit-type plans are large JSON blobs —
+# 160 KB on Pratishtha 2 — and select_related('project') repeats the whole project row
+# on every joined row. Listing that project's 537 units was pulling 84 MB out of the
+# database to draw one unit map, which is where the ten-second wait came from. Nothing
+# that lists units, bookings or leads draws a site map, so the join leaves them behind;
+# the screens that do draw one load the project itself, which still carries everything.
+PROJECT_BLOBS = ('project__floor_plans', 'project__site_map_zones', 'project__plot_type_plans')
+
+
 def _dist_type_for(user):
     """'telecaller' | 'stm' | None for a user based on their designation."""
     if is_telecaller(user):
@@ -728,7 +737,8 @@ class StatsView(APIView):
         avg_closure_days = round(sum(_diffs) / len(_diffs), 1) if _diffs else None
         # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
         # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
-        recent = leads_qs.select_related('project', 'source', 'telecaller', 'stm').order_by('-created_at')[:8]
+        recent = (leads_qs.select_related('project', 'source', 'telecaller', 'stm')
+                  .defer(*PROJECT_BLOBS).order_by('-created_at')[:8])
         payload = {
             'total_leads':        agg['total_leads'],
             'new_leads':          agg['new_leads'],
@@ -958,7 +968,7 @@ class LeadListView(APIView):
     def get(self, request):
         # Defer heavy text blobs not needed for list view
         qs = scope_to_company(
-            Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+            Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(*PROJECT_BLOBS),
             request.user,
         ).defer(
             'telecaller_remarks', 'stm_remarks', 'requirement',
@@ -1342,7 +1352,7 @@ class LeadDetailView(APIView):
     def _get_lead(self, request, pk):
         try:
             qs = scope_to_company(
-                Lead.objects.select_related('project', 'source', 'telecaller', 'stm'),
+                Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(*PROJECT_BLOBS),
                 request.user,
             )
             # Telecallers / STMs can only open leads assigned to them.
@@ -1714,8 +1724,13 @@ def _reclaim_units_with_a_live_sale(plots_qs):
     if not loose:
         return 0
     loose_set = set(loose)
+    # Only this tenant's bookings can hold these units, so the scan stops at the
+    # company line instead of reading every live booking on the platform — which is
+    # what it did on every single unit-map load, for every company there is.
+    company_ids = set(
+        Project.objects.filter(plots__id__in=loose).values_list('company_id', flat=True))
     claimed = {}
-    for b in (Booking.objects.filter(status__in=('pending', 'sold'))
+    for b in (Booking.objects.filter(status__in=('pending', 'sold'), company_id__in=company_ids)
               .only('id', 'plot_id', 'plot_ids', 'status')):
         held = set(b.plot_ids or [])
         if b.plot_id:
@@ -1776,7 +1791,8 @@ class PlotListView(APIView):
         # …and the other direction: a unit a live booking holds must not be sitting on
         # the map as available, whatever put it there.
         _reclaim_units_with_a_live_sale(Plot.objects.filter(project_id=project_id))
-        plots = Plot.objects.filter(project_id=project_id).select_related('project')
+        plots = (Plot.objects.filter(project_id=project_id)
+                 .select_related('project').defer(*PROJECT_BLOBS))
         # context: can_cancel_hold is per-viewer, so the serializer needs the request.
         return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
 
@@ -1951,7 +1967,7 @@ class PlotCancelHoldView(APIView):
             return Response({'detail': 'No units given.'}, status=status.HTTP_400_BAD_REQUEST)
 
         plots = list(Plot.objects.filter(id__in=ids, project__company=company)
-                     .select_related('project'))
+                     .select_related('project').defer(*PROJECT_BLOBS))
         if not plots:
             return Response({'detail': 'Unit not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2039,7 +2055,8 @@ class LeadCompanySearchView(APIView):
                 if needle in (nm or '').lower() or needle in (ph or '').lower()
             ]
             qs = qs.filter(id__in=hits)
-        qs = qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner').order_by('-created_at')[:25]
+        qs = (qs.select_related('telecaller', 'stm', 'project', 'source', 'channel_partner')
+              .defer(*PROJECT_BLOBS).order_by('-created_at')[:25])
         return Response([
             {
                 'id': l.id,
@@ -2235,7 +2252,8 @@ class SiteVisitListView(APIView):
     def get(self, request):
         qs = scope_to_company(
             SiteVisit.objects.select_related('lead', 'project', 'stm',
-                                             'referred_by_telecaller', 'lead__telecaller'),
+                                             'referred_by_telecaller', 'lead__telecaller')
+                             .defer(*PROJECT_BLOBS),
             request.user, 'lead__company',
         )
         if not _sees_all_company(request.user, request):
@@ -2340,7 +2358,8 @@ class ClosureListView(APIView):
     def get(self, request):
         qs = scope_to_company(
             Closure.objects.select_related('lead', 'project', 'stm',
-                                           'referred_by_telecaller', 'lead__telecaller'),
+                                           'referred_by_telecaller', 'lead__telecaller')
+                           .defer(*PROJECT_BLOBS),
             request.user, 'company',
         )
         if not _sees_all_company(request.user, request):
@@ -3933,7 +3952,8 @@ class ReportsView(APIView):
             }
 
         def get_closures():
-            return closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller').order_by('-closure_date')[:20]
+            return (closure_qs.select_related('lead', 'project', 'stm', 'referred_by_telecaller')
+                    .defer(*PROJECT_BLOBS).order_by('-closure_date')[:20])
 
         # Run sequentially. These are indexed aggregates (fast); the previous
         # ThreadPoolExecutor opened 5 DB connections per request and didn't close
@@ -4105,8 +4125,10 @@ class BookingListCreateView(APIView):
 
     def get(self, request):
         company = _resolve_company(request)
-        qs = Booking.objects.filter(company=company).select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
-                'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+        qs = (Booking.objects.filter(company=company)
+              .select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
+                              'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+              .defer(*PROJECT_BLOBS))
         # Drafts are half-finished commercial terms, so they are not browsable by
         # every manager the way a submitted booking is. Visible to their author, to a
         # real admin, and to whoever approves that project's bookings — the same people
@@ -4878,7 +4900,8 @@ class BookingAllView(APIView):
         qs = _drop_superseded_revisions(
             Booking.objects.filter(company=company)
             .select_related('project', 'plot', 'stm', 'approved_by', 'rejected_by', 'cancelled_by',
-                'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+                            'resale_of', 'accounts_approved_by', 'accounts_rejected_by')
+            .defer(*PROJECT_BLOBS)
         ).order_by('-created_at')
         # is_cp_sourced reaches into the lead; resolved once for the page here rather
         # than per row, the same way the sales list does it.
@@ -6368,7 +6391,8 @@ class LeadTransferListCreateView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         qs = (LeadTransfer.objects.filter(company=company)
-              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by'))
+              .select_related('lead', 'project', 'from_stm', 'to_stm', 'requested_by', 'decided_by')
+              .defer(*PROJECT_BLOBS))
         if not _is_hard_admin(request.user):
             approver_pids = _approver_project_ids(request.user, company)
             qs = qs.filter(
