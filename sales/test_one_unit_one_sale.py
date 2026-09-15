@@ -346,3 +346,53 @@ class TheMapReclaimsUnitsWithALiveSaleTests(APITestCase):
         m = self._map()
         self.assertEqual(m['105'], 'available')
         self.assertEqual(m['106'], 'available', 'a cancelled booking holds nothing')
+
+
+class SelectingAUnitChecksItsBookingsTests(APITestCase):
+    """A rep cannot even select a unit somebody already bought.
+
+    The plot's own status is not the last word — a unit whose status was wrongly freed
+    still belongs to whoever bought it, and the rep picking it on the map is the first
+    person who would find out, by drafting a booking on a sold unit. Checking the
+    bookings themselves makes selection safe even before the map reconciles.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='SEL', name='Select Co')
+        cls.rep = User.objects.create(email='sel@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='S9', name='Rep')
+        cls.project = Project.objects.create(company=cls.co, name='Select Tower')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.rep)
+
+    def _hold(self, plot):
+        return self.client.post('/api/sales/plots/hold/', {'plot_ids': [plot.id]}, format='json')
+
+    def test_a_unit_wrongly_reading_available_still_cannot_be_selected(self):
+        plot = Plot.objects.create(project=self.project, number='102', status='available')
+        Booking.objects.create(company=self.co, project=self.project, plot=plot,
+                               plot_ids=[plot.id], status='sold', approval_status='APPROVED',
+                               client_name='Umesh', phone='9000000160')
+        r = self._hold(plot)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data.get('held'), [])
+        self.assertEqual(r.data['failed'][0]['reason'], 'sold')
+        plot.refresh_from_db()
+        self.assertNotEqual(plot.status, 'hold')
+
+    def test_a_free_unit_is_still_selectable(self):
+        plot = Plot.objects.create(project=self.project, number='103', status='available')
+        r = self._hold(plot)
+        self.assertEqual(r.data['held'], [plot.id])
+
+    def test_a_resale_unit_is_still_selectable(self):
+        # Resale keeps its old sold booking on purpose — that is the whole point of
+        # putting a sold unit back on the market, so selection must stay open.
+        plot = Plot.objects.create(project=self.project, number='104', status='resale')
+        Booking.objects.create(company=self.co, project=self.project, plot=plot,
+                               plot_ids=[plot.id], status='sold', approval_status='APPROVED',
+                               client_name='Previous Owner', phone='9000000161')
+        self.assertEqual(self._hold(plot).data['held'], [plot.id])

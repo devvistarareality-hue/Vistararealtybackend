@@ -1880,6 +1880,20 @@ class PlotHoldView(APIView):
                     reason = 'held_by_other' if (plot.held_by_id and plot.held_by_id != request.user.id) else plot.status
                     failed.append({'id': pid, 'number': plot.number, 'reason': reason})
                     continue
+                # The plot's own status is not the last word. A unit whose status was
+                # wrongly freed still belongs to whoever bought it, and the rep picking
+                # it on the map is the first person who would find out — by drafting a
+                # booking on a unit that is already sold. Checked against the bookings
+                # themselves, so selection is safe even before the map reconciles.
+                claim = next(
+                    (b for b in Booking.objects.filter(company=plot.project.company,
+                                                       status__in=('pending', 'sold'))
+                     .only('id', 'plot_id', 'plot_ids', 'status')
+                     if plot.id == b.plot_id or plot.id in (b.plot_ids or [])),
+                    None)
+                if claim and plot.status != 'resale':
+                    failed.append({'id': pid, 'number': plot.number, 'reason': claim.status})
+                    continue
                 plot.pre_hold_status = plot.status
                 plot.status, plot.held_by, plot.held_at = 'hold', request.user, timezone.now()
                 plot.save(update_fields=['status', 'held_by', 'held_at', 'pre_hold_status'])
