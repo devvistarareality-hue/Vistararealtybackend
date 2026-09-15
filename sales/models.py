@@ -590,6 +590,12 @@ class Booking(models.Model):
     # never WHO, so a deal on the books named nobody accountable for putting it there
     # — and a cancellation, which takes a live sale off the books, named nobody at
     # all. Mirrors the accounts_* pair above so both stages read the same way.
+    # A unit sold once, put back on the market, and sold again. The earlier sale stays
+    # on file — it happened — so the new booking points at it rather than replacing it,
+    # and every count that asks "who holds this unit" can tell the two apart.
+    is_resale = models.BooleanField(default=False)
+    resale_of = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='resales')
     approved_by  = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_bookings')
     rejected_by  = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='rejected_bookings')
     rejected_at  = models.DateTimeField(null=True, blank=True)

@@ -274,6 +274,21 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_cancelled_by_name(self, obj):
         return obj.cancelled_by.name if obj.cancelled_by_id else None
 
+    # The sale this one replaces on a unit put back on the market. Named, because
+    # "resale" on its own does not tell anyone whose unit changed hands.
+    resale_of_client = serializers.SerializerMethodField()
+
+    def get_resale_of_client(self, obj):
+        return obj.resale_of.client_name if obj.resale_of_id else None
+
+    resale_of_stm = serializers.SerializerMethodField()
+
+    def get_resale_of_stm(self, obj):
+        if not obj.resale_of_id:
+            return None
+        prev = obj.resale_of
+        return prev.manual_stm_name or (prev.stm.name if prev.stm_id else None)
+
     # Whether the requesting user may act on this booking's Accounts-stage
     # approval right now — mirrors PlotSerializer.can_cancel_hold's per-viewer
     # pattern, so the frontend can show Approve/Reject only to someone who'd
@@ -331,7 +346,8 @@ class BookingSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
                             'project_name', 'plot_number', 'stm_name', 'is_cp_sourced',
-                            'approved_by_name', 'rejected_by_name', 'cancelled_by_name']
+                            'approved_by_name', 'rejected_by_name', 'cancelled_by_name',
+                            'resale_of_client', 'resale_of_stm']
 
 
 class LeadUserSerializer(serializers.Serializer):

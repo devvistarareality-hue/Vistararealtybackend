@@ -46,9 +46,14 @@ class Command(BaseCommand):
         loose = list(plots.filter(id__in=claim.keys(), status='available'))
         # 2. a unit carrying two live sales at once
         live = _drop_superseded_revisions(bookings).filter(status='sold')
+        # A resale legitimately leaves the earlier sale on the unit — it happened, and
+        # it stays on file. The booking that replaced it says so, so the one it points
+        # at is not a second live sale.
+        resold = set(bookings.filter(is_resale=True, resale_of__isnull=False)
+                     .values_list('resale_of_id', flat=True))
         per_unit = {}
         for b in live.only('id', 'plot_id', 'client_name'):
-            if b.plot_id:
+            if b.plot_id and b.id not in resold:
                 per_unit.setdefault(b.plot_id, []).append(b)
         doubled = {pid: bs for pid, bs in per_unit.items() if len(bs) > 1}
 

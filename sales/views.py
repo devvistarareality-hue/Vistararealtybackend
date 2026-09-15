@@ -4268,6 +4268,9 @@ class BookingListCreateView(APIView):
         # regardless of the exact client-side cause. Revisions (revision_of)
         # legitimately reuse the same plot, so they're excluded, as are EOIs
         # (no real plot reserved yet).
+        # Declared out here, not inside the branch below: a revision or an EOI skips
+        # that branch entirely and this is read further down regardless.
+        resale_of = None
         if not data.get('revision_of') and not data.get('eoi'):
             requested_plot_ids = set()
             raw_plot_ids = data.get('plot_ids')
@@ -4275,6 +4278,12 @@ class BookingListCreateView(APIView):
                 requested_plot_ids = {int(x) for x in raw_plot_ids if str(x).isdigit()}
             elif data.get('plot') and str(data['plot']).isdigit():
                 requested_plot_ids = {int(data['plot'])}
+            # A unit an admin has put back on the market carries its earlier sale on
+            # purpose — that sale is what is being resold, so it must not read as a
+            # clash. Without this the guard closed the resale flow outright: booking a
+            # resale unit answered "this plot already has a sold booking for …".
+            resale_pids = set(Plot.objects.filter(
+                id__in=requested_plot_ids, status='resale').values_list('id', flat=True))
             if requested_plot_ids:
                 # 'sold' is the stored status of an approved booking — there is no
                 # 'approved' row anywhere in the table. Looking for one meant the guard
@@ -4287,11 +4296,17 @@ class BookingListCreateView(APIView):
                     b_plot_ids = set(b.plot_ids or [])
                     if b.plot_id:
                         b_plot_ids.add(b.plot_id)
-                    if b_plot_ids & requested_plot_ids:
+                    overlap = b_plot_ids & requested_plot_ids
+                    if overlap - resale_pids:
                         return Response(
                             {'detail': f'This plot already has a {b.status} booking for {b.client_name} (#{b.id}).'},
                             status=status.HTTP_409_CONFLICT,
                         )
+                    if overlap and b.status == 'sold':
+                        # The sale being resold. Newest wins if a unit has been round
+                        # more than once.
+                        if resale_of is None or b.id > resale_of.id:
+                            resale_of = b
                 # A plot soft-held by a DIFFERENT rep (selected on the plot-map picker
                 # via PlotHoldView, not yet submitted) or already sold blocks submission
                 # too — closes the gap where someone bypasses the picker's lock (stale
@@ -4380,6 +4395,10 @@ class BookingListCreateView(APIView):
             pids = [booking.plot_id]
         else:
             pids = []
+        if resale_of is not None and not booking.is_resale:
+            booking.is_resale = True
+            booking.resale_of = resale_of
+            booking.save(update_fields=['is_resale', 'resale_of'])
         if pids:
             num_map = dict(Plot.objects.filter(id__in=pids).values_list('id', 'number'))
             booking.plot_ids = pids
@@ -5191,7 +5210,7 @@ class BookingActionView(APIView):
             # to a re-import or a reset between the two — neither of which the
             # submission-time check can see. A revision legitimately reuses its own
             # unit, so the chain it belongs to is excluded.
-            if _pids and not b.revision_of_id:
+            if _pids and not b.revision_of_id and not b.is_resale:
                 chain = _revision_chain_ids(b.id, company)
                 wanted = set(_pids)
                 clash = None
