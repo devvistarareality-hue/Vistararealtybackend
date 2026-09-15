@@ -126,3 +126,71 @@ class CancelledIsItsOwnTabTests(APITestCase):
 
     def test_approved_is_untouched(self):
         self.assertEqual(self._ids('sold'), [self.live.id])
+
+
+class WhoDecidedTests(APITestCase):
+    """Every decision names the person who made it.
+
+    approved_at recorded WHEN a deal went on the books from the start, but never WHO —
+    so a booking named nobody accountable for approving it, and a cancellation, which
+    takes a live sale off the books, named nobody at all.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='WHO', name='Who Co')
+        cls.approver = User.objects.create(email='who_a@x.com', company=cls.co, role='Admin',
+                                           designation='Admin', user_code='W0', name='Rachit Puranik')
+        cls.stm = User.objects.create(email='who_s@x.com', company=cls.co, role='Employee',
+                                      designation='STM', user_code='W1', name='Stm',
+                                      reporting_manager=cls.approver)
+        cls.project = Project.objects.create(company=cls.co, name='Who Tower')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.approver)
+
+    def _booking(self, **over):
+        f = dict(company=self.co, project=self.project, stm=self.stm, status='pending',
+                 client_name='Buyer', phone='9000000130')
+        f.update(over)
+        return Booking.objects.create(**f)
+
+    def _row(self, pk):
+        r = self.client.get(f'/api/sales/bookings/{pk}/')
+        self.assertEqual(r.status_code, 200)
+        return r.data
+
+    def test_approving_records_who(self):
+        b = self._booking()
+        self.assertEqual(self.client.post(f'/api/sales/bookings/{b.id}/action/',
+                                          {'action': 'approve'}, format='json').status_code, 200)
+        row = self._row(b.id)
+        self.assertEqual(row['approved_by_name'], 'Rachit Puranik')
+        self.assertIsNone(row['rejected_by_name'])
+        self.assertIsNone(row['cancelled_by_name'])
+
+    def test_rejecting_records_who(self):
+        b = self._booking()
+        self.assertEqual(self.client.post(f'/api/sales/bookings/{b.id}/action/',
+                                          {'action': 'reject'}, format='json').status_code, 200)
+        row = self._row(b.id)
+        self.assertEqual(row['rejected_by_name'], 'Rachit Puranik')
+        self.assertIsNone(row['approved_by_name'])
+
+    def test_cancelling_records_who(self):
+        lead = Lead.objects.create(company=self.co, name='Buyer', phone='9000000131', stm=self.stm)
+        closure = Closure.objects.create(company=self.co, lead=lead, project=self.project,
+                                         stm=self.stm, client_name='Buyer', status='booked',
+                                         closure_date='2026-09-01', unit_no='101')
+        b = self._booking(status='sold', approval_status='APPROVED', closure=closure, lead=lead)
+        self.assertEqual(self.client.post(f'/api/sales/closures/{closure.id}/cancel/',
+                                          {}, format='json').status_code, 200)
+        row = self._row(b.id)
+        self.assertEqual(row['cancelled_by_name'], 'Rachit Puranik')
+        self.assertIsNotNone(row['cancelled_at'])
+
+    def test_a_booking_nobody_has_decided_names_nobody(self):
+        row = self._row(self._booking().id)
+        for k in ('approved_by_name', 'rejected_by_name', 'cancelled_by_name'):
+            self.assertIsNone(row[k], k)

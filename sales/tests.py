@@ -483,9 +483,15 @@ class BookingApprovalTests(APITestCase):
         self.assertEqual(res.status_code, 200)
         b.refresh_from_db(); pl.refresh_from_db(); lead.refresh_from_db()
         self.assertEqual(b.status, 'sold')
-        self.assertEqual(pl.status, 'sold')
+        # Spoken for, not gone: the unit waits on the Accounts sign-off below.
+        self.assertEqual(pl.status, 'hold')
         self.assertEqual(lead.stm_status, 'closed')
         self.assertTrue(Closure.objects.filter(lead=lead, stm=stm, status='booked').exists())
+
+        res = self.client.post(f'/api/sales/bookings/{b.id}/accounts-action/', {'action': 'approve'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        pl.refresh_from_db()
+        self.assertEqual(pl.status, 'sold')
 
     def test_reject_frees_plot(self):
         from sales.models import Booking
@@ -733,9 +739,16 @@ class MultiPlotBookingTests(APITestCase):
         auth(self.client, admin)
         self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'approve'}, format='json')
         pl1.refresh_from_db(); pl2.refresh_from_db()
-        self.assertEqual(pl1.status, 'sold')
-        self.assertEqual(pl2.status, 'sold')          # both sold
+        # Sales/CP approval means spoken for, not gone — the unit stays 'hold' until
+        # Accounts signs off, which is the only place that sets 'sold'.
+        self.assertEqual(pl1.status, 'hold')
+        self.assertEqual(pl2.status, 'hold')
         self.assertTrue(Closure.objects.filter(lead=lead, unit_no='10, 11').exists())
+
+        self.client.post(f'/api/sales/bookings/{b.id}/accounts-action/', {'action': 'approve'}, format='json')
+        pl1.refresh_from_db(); pl2.refresh_from_db()
+        self.assertEqual(pl1.status, 'sold')
+        self.assertEqual(pl2.status, 'sold')          # both sold, once Accounts agrees
 
 
 RESET_KEY = 'test-reset-key'

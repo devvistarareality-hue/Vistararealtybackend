@@ -5127,6 +5127,7 @@ class BookingActionView(APIView):
             b.status = 'sold'
             b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
             b.approved_at = timezone.now()
+            b.approved_by = request.user
             # Sales/CP approval alone no longer makes this real to Accounts — it now
             # waits on a configured Accounts approver too (see AccountsBookingActionView).
             # Reset on every approval, including a revision: the amount may have
@@ -5140,7 +5141,7 @@ class BookingActionView(APIView):
             b.accounts_rejected_at = None
             if b.closure_id:
                 # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'accounts_status',
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'accounts_status',
                                        'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
                                        'accounts_rejected_by', 'accounts_rejected_at'])
                 Closure.objects.filter(id=b.closure_id).update(
@@ -5166,7 +5167,7 @@ class BookingActionView(APIView):
                     booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
                 )
                 b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'closure', 'accounts_status',
+                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'closure', 'accounts_status',
                                        'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
                                        'accounts_rejected_by', 'accounts_rejected_at'])
                 # The sale is now real, so make sure the pipeline shows how it got
@@ -5202,11 +5203,14 @@ class BookingActionView(APIView):
         elif action == 'reject':
             b.status = 'rejected'
             b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
+            b.rejected_by = request.user
+            b.rejected_at = timezone.now()
             # Remove the rejected signed LOI PDF from Supabase storage.
             if b.loi_document:
                 try: b.loi_document.delete(save=False)
                 except Exception: pass
-            b.save(update_fields=['status', 'approval_status', 'loi_document'])
+            b.save(update_fields=['status', 'approval_status', 'loi_document',
+                                  'rejected_by', 'rejected_at'])
             if not is_rev:
                 _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
                 _release_plots(_pids)
@@ -5426,7 +5430,9 @@ class ClosureCancelView(APIView):
             _release_plots(_pids)
             b.status = 'rejected'
             b.approval_status = 'CANCELLED'
-            b.save(update_fields=['status', 'approval_status'])
+            b.cancelled_by = request.user
+            b.cancelled_at = timezone.now()
+            b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at'])
         if closure.lead_id:
             Lead.objects.filter(id=closure.lead_id).update(stm_status='')
         # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
