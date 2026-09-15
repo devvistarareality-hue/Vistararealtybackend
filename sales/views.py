@@ -5385,20 +5385,24 @@ class ClosureCancelView(APIView):
             request.user, 'company').first()
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        # Only an approver (admin/manager) may cancel a booking — same authority that
-        # approves/rejects it. The owning STM can no longer self-cancel.
-        if not is_admin_or_manager(request.user):
-            return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
-        # ...and only for a project they actually approve. Cancelling undoes an approval,
-        # frees the plots and deletes the signed LOI, so it cannot be laxer than approving.
         # A closure has no Source field of its own — pull it from the booking that
         # was approved into this closure, if any, so a CP-sourced deal still routes
         # to the CP approvers at cancel time too.
         booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
-        if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
-            return Response({'detail': 'You are not a booking approver for this project.'},
-                            status=status.HTTP_403_FORBIDDEN)
+        # Two independent routes to cancel authority: the Sales/CP approver for this
+        # project (admin/manager, same authority that approves/rejects it — the owning
+        # STM can no longer self-cancel), OR the Accounts approver who signed off on it
+        # at that separate stage — undoing either approval is cancelling the same sale,
+        # so either side's approver may void it once it's Accounts-approved.
+        is_accounts_approver = _can_approve_accounts_booking(
+            request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source)
+        if not is_accounts_approver:
+            if not is_admin_or_manager(request.user):
+                return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
+            if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
+                return Response({'detail': 'You are not a booking approver for this project.'},
+                                status=status.HTTP_403_FORBIDDEN)
 
         # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
         notif_stm      = closure.stm

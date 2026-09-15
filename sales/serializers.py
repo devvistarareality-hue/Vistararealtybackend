@@ -265,6 +265,13 @@ class BookingSerializer(serializers.ModelSerializer):
     def get_can_accounts_approve(self, obj):
         if obj.status != 'sold' or obj.accounts_status != 'pending':
             return False
+        return self._is_accounts_approver_for(obj)
+
+    # Whether this viewer is a configured Accounts approver for this booking's
+    # project (CP-aware) — independent of the booking's current accounts_status,
+    # so it can gate both "may approve/reject this pending one" and "may cancel
+    # this already-approved one" from the same per-viewer check.
+    def _is_accounts_approver_for(self, obj):
         request = self.context.get('request')
         user = getattr(request, 'user', None)
         if not user or not user.is_authenticated:
@@ -290,6 +297,16 @@ class BookingSerializer(serializers.ModelSerializer):
         from .views import _is_cp_sourced_booking
         is_cp = _is_cp_sourced_booking(obj.lead_id, obj.source)
         return obj.project_id in (cache['cp_ids'] if is_cp else cache['reg_ids'])
+
+    # Whether this viewer may cancel this already-Accounts-approved booking —
+    # mirrors the permission ClosureCancelView actually enforces for an Accounts
+    # approver, so the button only shows where the request would succeed.
+    can_accounts_cancel = serializers.SerializerMethodField()
+
+    def get_can_accounts_cancel(self, obj):
+        if obj.status != 'sold' or obj.accounts_status != 'approved' or not obj.closure_id:
+            return False
+        return self._is_accounts_approver_for(obj)
 
     class Meta:
         model = Booking
