@@ -2726,6 +2726,106 @@ class AvailabilityView(APIView):
         return Response({'user_id': user.id, 'is_available': obj.is_available})
 
 
+class AvailabilityHistoryExportView(APIView):
+    """The sign-in history as an .xlsx — the same records AvailabilityHistoryView
+    renders, over the same date range, one row per person per day.
+
+    Flat on purpose: the screen groups by day because that reads well, but a sheet is
+    something you sort and pivot, so the day is a column rather than a heading. Counts
+    per day are in the summary line; the rows carry who and when.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from datetime import date as date_cls
+        if not is_admin_or_manager(request.user):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        today = date_cls.today()
+        date_from = request.query_params.get('date_from') or str(today - timedelta(days=29))
+        date_to   = request.query_params.get('date_to')   or str(today)
+
+        desig_map = {'TELECALLER': 'Telecaller', 'STM': 'STM'}
+        rows = (
+            UserAvailability.objects
+            .filter(user__company=company, date__gte=date_from, date__lte=date_to,
+                    user__designation__in=['TELECALLER', 'STM'])
+            .select_related('user')
+            .order_by('-date', 'user__designation', 'user__name')
+        )
+
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        NAVY, PAPER = 'FF0F1838', 'FFEEF1F7'
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Sign-in History'
+
+        data = []
+        for a in rows:
+            checked_in = (timezone.localtime(a.checked_in_at).strftime('%I:%M %p')
+                          if a.checked_in_at else '')
+            data.append([
+                a.date.strftime('%d/%m/%Y'),
+                desig_map.get((a.user.designation or '').upper(), a.user.designation or ''),
+                a.user.name or '',
+                a.user.user_code or '',
+                'Yes' if a.is_available else 'No',
+                checked_in,
+                # The handicap a late sign-in forfeits — the reason a day's share of
+                # the backlog can be smaller than the room's, which is exactly what
+                # someone reading this sheet is usually trying to explain.
+                a.distribution_credit or 0,
+            ])
+
+        signed_in = sum(1 for r in data if r[4] == 'Yes')
+        ws.append([f"{company.name if company else ''} — Sign-in History"])
+        ws.append([f"{date_from} to {date_to}  ·  {len(data)} record{'' if len(data) == 1 else 's'}  ·  "
+                   f"{signed_in} signed in  ·  generated "
+                   f"{timezone.localtime(timezone.now()).strftime('%d/%m/%Y %I:%M %p')}"])
+        ws['A1'].font = Font(bold=True, size=14, color=NAVY)
+        ws['A2'].font = Font(size=10, color='FF8492A6')
+
+        headings = ['Date', 'Role', 'Name', 'User Code', 'Signed In', 'Sign-in Time', 'Missed Leads']
+        ws.append(headings)
+        header_row = ws.max_row
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color='FFFFFFFF', size=10)
+            cell.fill = PatternFill('solid', fgColor=NAVY)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+        # Addressed by name, not via ws.cell(): asking openpyxl for a cell creates it,
+        # which would leave an empty row under the header.
+        ws.freeze_panes = f'A{header_row + 1}'
+
+        for line in data:
+            ws.append(line)
+
+        total_row = ws.max_row + 1
+        ws.cell(row=total_row, column=1, value='TOTAL')
+        ws.cell(row=total_row, column=5, value=f'{signed_in} of {len(data)} signed in')
+        if data:
+            col = get_column_letter(len(headings))
+            ws.cell(row=total_row, column=len(headings),
+                    value=f'=SUM({col}{header_row + 1}:{col}{ws.max_row - 1})')
+        for cell in ws[total_row]:
+            cell.font = Font(bold=True, color=NAVY, size=10)
+            cell.fill = PatternFill('solid', fgColor=PAPER)
+
+        for idx, heading in enumerate(headings, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = max(14, len(heading) + 6)
+
+        buf = BytesIO()
+        wb.save(buf)
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = (
+            f'attachment; filename="Sign-in-History-{date_from}-to-{date_to}.xlsx"')
+        return resp
+
+
 class AvailabilityHistoryView(APIView):
     """Sign-in history day by day — who marked available and at what time.
 

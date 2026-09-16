@@ -1361,3 +1361,70 @@ class RevisedSourceRoutesApprovalTests(APITestCase):
         ids = {b['id'] for b in self.client.get('/api/sales/bookings/?cp_only=true').json()}
         self.assertNotIn(r2.id, ids)
         self.assertNotIn(r1.id, ids)
+
+
+class AvailabilityHistoryExportTests(APITestCase):
+    """The sign-in history as a workbook — same records and same date range as the
+    Availability card on the Distribution page."""
+
+    def _seed(self):
+        from datetime import date, timedelta
+        from django.utils import timezone
+        from companies.models import Company
+        from sales.models import UserAvailability
+        co = Company.objects.create(code='AVX', name='Avail Co')
+        admin = User.objects.create(email='a@avx.com', company=co, role='Admin',
+                                    user_code='AAVX', is_staff=True)
+        tc = User.objects.create(email='tc@avx.com', company=co, role='Sales', user_code='TC1',
+                                 name='Kavya Dave', designation='TELECALLER', reporting_manager=admin)
+        stm = User.objects.create(email='stm@avx.com', company=co, role='Sales', user_code='ST1',
+                                  name='Aakash Pathak', designation='STM', reporting_manager=admin)
+        today = date.today()
+        UserAvailability.objects.create(user=tc, date=today, is_available=True,
+                                        checked_in_at=timezone.now())
+        UserAvailability.objects.create(user=stm, date=today, is_available=True,
+                                        checked_in_at=timezone.now(), distribution_credit=2)
+        # Someone who did not sign in that day — the sheet records that too.
+        UserAvailability.objects.create(user=stm, date=today - timedelta(days=1), is_available=False)
+        return co, admin, tc, stm, today
+
+    def _sheet(self, content):
+        import openpyxl
+        from io import BytesIO
+        return openpyxl.load_workbook(BytesIO(content)).active
+
+    def test_a_plain_user_may_not_download(self):
+        co, admin, tc, *_ = self._seed()
+        auth(self.client, tc)
+        self.assertEqual(self.client.get('/api/sales/availability/history/export/').status_code, 403)
+
+    def test_it_holds_one_row_per_person_per_day(self):
+        co, admin, tc, stm, today = self._seed()
+        auth(self.client, admin)
+        res = self.client.get('/api/sales/availability/history/export/')
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('spreadsheetml', res['Content-Type'])
+        ws = self._sheet(res.content)
+        hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
+        body = [[c.value for c in r] for r in ws.iter_rows(min_row=hdr[0].row + 1)
+                if r[0].value != 'TOTAL']
+        self.assertEqual(len(body), 3)
+        names = {r[2] for r in body}
+        self.assertEqual(names, {'Kavya Dave', 'Aakash Pathak'})
+        signed = {r[2]: r[4] for r in body if r[0] == today.strftime('%d/%m/%Y')}
+        self.assertEqual(signed['Kavya Dave'], 'Yes')
+        # the forfeited share of the backlog rides along, since it is what a reader is
+        # usually trying to explain
+        credits = {r[2]: r[6] for r in body if r[0] == today.strftime('%d/%m/%Y')}
+        self.assertEqual(credits['Aakash Pathak'], 2)
+
+    def test_the_date_range_narrows_it(self):
+        from datetime import timedelta
+        co, admin, tc, stm, today = self._seed()
+        auth(self.client, admin)
+        only_today = today.strftime('%Y-%m-%d')
+        ws = self._sheet(self.client.get(
+            f'/api/sales/availability/history/export/?date_from={only_today}&date_to={only_today}').content)
+        hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
+        body = [r for r in ws.iter_rows(min_row=hdr[0].row + 1) if r[0].value != 'TOTAL']
+        self.assertEqual(len(body), 2)   # yesterday's record is outside the range
