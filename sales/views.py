@@ -267,15 +267,40 @@ def _is_cp_sourced(lead_id):
 
 
 def _is_cp_sourced_booking(lead_id, booking_source=None):
-    """Whether a booking counts as Channel-Partner-sourced for approval routing —
-    either its lead is CP-attributed (the structured directory), or its own
-    free-text Source field was set to "Channel Partner" (the older per-booking
-    selector on the booking form itself, unconnected to the ChannelPartner
-    directory but meant the same way: this deal came through a partner, so it
-    should route to the CP approvers, not the project's regular ones)."""
-    if (booking_source or '').strip().lower() == 'channel partner':
+    """Whether a booking counts as Channel-Partner-sourced for approval routing.
+
+    The booking's own Source field decides whenever it says anything at all:
+    "Channel Partner" routes to the CP approvers, and any other answer routes to
+    the project's regular ones. Only a booking that names no source falls back to
+    its lead's attribution (the ChannelPartner directory, or Lead.source set to
+    "Channel Partner" — same test as cp_lead_q), which is what keeps a CP lead
+    booked without a source from disappearing out of the module.
+
+    The fallback used to apply even when the booking contradicted it, so a deal
+    revised away from Channel Partner stayed in the CP approval queue for good:
+    EOI-23's R1 and R2 both read Source = Reference and were still waiting on a CP
+    approver because the lead behind them was CP-attributed. What the deal says
+    now is what routes it.
+
+    cp_booking_q is the query form of this — change the two together.
+    """
+    src = (booking_source or '').strip().lower()
+    if src == 'channel partner':
         return True
+    if src:
+        return False
     return _is_cp_sourced(lead_id)
+
+
+def cp_booking_q(source_field='source', lead_prefix='lead__'):
+    """_is_cp_sourced_booking in query form, for filtering and annotating lists.
+
+    Kept beside it deliberately: when the two drifted, the same booking counted one
+    way in a list and the other way in a permission check.
+    """
+    names_cp = Q(**{f'{source_field}__iexact': 'channel partner'})
+    unset = Q(**{f'{source_field}__isnull': True}) | Q(**{source_field: ''})
+    return names_cp | (unset & cp_lead_q(prefix=lead_prefix))
 
 
 def _can_approve_booking(user, project_id, project, lead_id, company, booking_source=None):
@@ -4169,11 +4194,9 @@ class BookingListCreateView(APIView):
         # someone named a CP approver (but not a regular one) still needs to see
         # those bookings without gaining visibility into the project's other ones.
         cp_approver_project_ids = [] if _is_hard_admin(request.user) else _cp_approver_project_ids(request.user, company)
-        # A booking counts as Channel-Partner-sourced either through its lead
-        # (channel_partner FK OR Lead.source = "Channel Partner", same as
-        # cp_lead_q) or its own free-text Source field — see
-        # _is_cp_sourced_booking, mirrored here in query form.
-        is_cp_booking_q = cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner')
+        # See _is_cp_sourced_booking: the booking's own Source decides when it says
+        # anything, and only a booking naming no source falls back to its lead.
+        is_cp_booking_q = cp_booking_q()
 
         # Two screens, two questions, and conflating them is what made this drift.
         #
@@ -4908,7 +4931,7 @@ class BookingAllView(APIView):
         # is_cp_sourced reaches into the lead; resolved once for the page here rather
         # than per row, the same way the sales list does it.
         qs = qs.annotate(cp_sourced_ann=Case(
-            When(cp_lead_q(prefix='lead__') | Q(source__iexact='channel partner'), then=Value(True)),
+            When(cp_booking_q(), then=Value(True)),
             default=Value(False), output_field=BooleanField()))
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)

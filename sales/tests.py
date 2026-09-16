@@ -1292,3 +1292,72 @@ class LeadTransferCPScopeTests(APITestCase):
         auth(self.client, admin)
         rows = self.client.get('/api/sales/lead-transfers/?status=pending&cp_only=true').json()
         self.assertEqual([r['lead_name'] for r in rows], ['CP Lead'])
+
+
+class RevisedSourceRoutesApprovalTests(APITestCase):
+    """A revision that changes Source away from Channel Partner must stop routing to
+    the CP approvers.
+
+    EOI-23 was booked as Channel Partner (R0) and revised twice to Reference. Both
+    revisions kept arriving in the CP approval queue, because the routing fell back to
+    the lead's attribution even when the booking itself contradicted it — so a deal
+    could never be moved off the CP side once its lead had been.
+    """
+
+    def _seed(self):
+        from datetime import date
+        from companies.models import Company
+        from sales.models import Booking, LeadSource
+        co = Company.objects.create(code='RSR', name='Revise Source Co')
+        admin = User.objects.create(email='a@rsr.com', company=co, role='Admin',
+                                    user_code='ARSR', is_staff=True)
+        proj = Project.objects.create(company=co, name='Kalrav')
+        cp_src = LeadSource.objects.create(company=co, name='Channel Partner')
+        # The lead is CP-attributed — which is what used to pin every booking on it.
+        lead = Lead.objects.create(company=co, name='Akshay', phone='+919000003333',
+                                   project=proj, source=cp_src)
+        def booking(source, rev, parent=None):
+            return Booking.objects.create(company=co, project=proj, lead=lead, stm=admin,
+                                          client_name='Akshay', booking_date=date.today(),
+                                          plot_numbers='EOI-23', source=source,
+                                          revision_no=rev, revision_of=parent,
+                                          status='sold', final_amount=100)
+        r0 = booking('Channel Partner', 0)
+        r1 = booking('Reference', 1, r0)
+        r2 = booking('Reference', 2, r1)
+        return co, admin, lead, r0, r1, r2
+
+    def test_the_booking_s_own_source_decides(self):
+        from sales.views import _is_cp_sourced_booking
+        co, admin, lead, r0, r1, r2 = self._seed()
+        self.assertTrue(_is_cp_sourced_booking(r0.lead_id, r0.source))    # says CP
+        self.assertFalse(_is_cp_sourced_booking(r1.lead_id, r1.source))   # says Reference
+        self.assertFalse(_is_cp_sourced_booking(r2.lead_id, r2.source))
+
+    def test_a_booking_naming_no_source_still_follows_its_lead(self):
+        """The fallback is what keeps a CP lead booked without a source in the module."""
+        from sales.views import _is_cp_sourced_booking
+        co, admin, lead, *_ = self._seed()
+        self.assertTrue(_is_cp_sourced_booking(lead.id, ''))
+        self.assertTrue(_is_cp_sourced_booking(lead.id, None))
+
+    def test_the_query_form_agrees_with_the_python_one(self):
+        """Drift between these two is what made the same booking count one way in a
+        list and the other way in a permission check."""
+        from django.db.models import Case, When, Value, BooleanField
+        from sales.models import Booking
+        from sales.views import cp_booking_q, _is_cp_sourced_booking
+        co, admin, lead, *_ = self._seed()
+        rows = Booking.objects.filter(company=co).annotate(ann=Case(
+            When(cp_booking_q(), then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
+        for b in rows:
+            self.assertEqual(bool(b.ann), _is_cp_sourced_booking(b.lead_id, b.source),
+                             f'booking {b.id} with source {b.source!r}')
+
+    def test_the_cp_bookings_list_drops_the_revised_ones(self):
+        co, admin, lead, r0, r1, r2 = self._seed()
+        auth(self.client, admin)
+        ids = {b['id'] for b in self.client.get('/api/sales/bookings/?cp_only=true').json()}
+        self.assertNotIn(r2.id, ids)
+        self.assertNotIn(r1.id, ids)

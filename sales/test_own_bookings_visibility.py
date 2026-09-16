@@ -154,11 +154,17 @@ class NoDuplicateRowsTests(APITestCase):
 class CpSourcedFlagTests(APITestCase):
     """`is_cp_sourced` on each booking — what the CP module's "Source: CP" filter reads.
 
-    It has to come from the server. The rule is "the lead is CP-attributed OR the
-    booking's own Source says so", and the lead half never reaches the client: a UI
-    guessing from the fields it does have — Source plus the free-text cp_name —
-    called 107 of a real cluster head's 133 bookings CP-sourced where the server
-    counts 68, because a Reference deal can still name a partner in cp_name.
+    It has to come from the server. A UI guessing from the fields it does have —
+    Source plus the free-text cp_name — called 107 of a real cluster head's 133
+    bookings CP-sourced where the server counts 68, because a Reference deal can
+    still name a partner in cp_name.
+
+    The rule itself is: the booking's own Source decides whenever it says anything,
+    and only a booking naming no source falls back to its lead's attribution. It used
+    to be "lead OR booking", which meant a deal could never be moved off the CP side
+    once its lead had been — EOI-23 was revised from Channel Partner to Reference
+    twice and both revisions stayed in the CP approval queue. See
+    _is_cp_sourced_booking.
     """
 
     @classmethod
@@ -174,13 +180,18 @@ class CpSourcedFlagTests(APITestCase):
         cls.by_source = Booking.objects.create(
             company=cls.co, project=cls.project, stm=cls.user, status='sold',
             source='Channel Partner', client_name='By Source', phone='9000000070')
-        # 2. Partner-sourced through the lead, with the booking's Source saying
-        #    something else entirely — the case a client-side guess cannot see.
+        # 2. A CP-attributed lead, booked with no Source of its own — the case a
+        #    client-side guess cannot see, and the one the lead fallback exists for.
         lead = Lead.objects.create(company=cls.co, name='Via Lead', phone='9000000071',
                                    source=cp_source, stm=cls.user)
         cls.by_lead = Booking.objects.create(
             company=cls.co, project=cls.project, stm=cls.user, status='sold', lead=lead,
-            source='Reference', client_name='Via Lead', phone='9000000071')
+            source='', client_name='Via Lead', phone='9000000071')
+        # 2b. The same CP-attributed lead, but this booking names Reference. The deal
+        #     says it did not come through the partner, and the deal is what counts.
+        cls.lead_cp_booking_says_no = Booking.objects.create(
+            company=cls.co, project=cls.project, stm=cls.user, status='sold', lead=lead,
+            source='Reference', client_name='Moved Off CP', phone='9000000073')
         # 3. Not partner-sourced, but names a partner in the free-text cp_name. This
         #    is the row a client-side guess gets wrong.
         ref_lead = Lead.objects.create(company=cls.co, name='Plain Ref', phone='9000000072',
@@ -202,8 +213,17 @@ class CpSourcedFlagTests(APITestCase):
     def test_booking_source_marks_it_cp(self):
         self.assertIs(self._flags()[self.by_source.id], True)
 
-    def test_lead_source_marks_it_cp_even_when_the_booking_says_otherwise(self):
+    def test_lead_source_marks_it_cp_when_the_booking_names_none(self):
         self.assertIs(self._flags()[self.by_lead.id], True)
+
+    def test_the_booking_s_own_source_overrides_its_lead(self):
+        """Reversed deliberately. This used to assert the opposite — that a
+        CP-attributed lead made the booking CP whatever its own Source said — which
+        left a deal revised away from Channel Partner stuck in the CP queue for good.
+        The fallback now applies only where the booking names no source at all."""
+        r = self.client.get('/api/sales/bookings/?status=sold&mine=1')
+        flags = {b['id']: b['is_cp_sourced'] for b in r.data}
+        self.assertIs(flags[self.lead_cp_booking_says_no.id], False)
 
     def test_a_named_partner_alone_does_not_make_it_cp(self):
         # cp_name is free text on a Reference deal — the money did not come through
