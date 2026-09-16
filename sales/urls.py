@@ -27,6 +27,7 @@ urlpatterns = [
     path('lead-transfers/<int:pk>/action/', views.LeadTransferActionView.as_view()),
     path('bookings/',                  views.BookingListCreateView.as_view()),
     path('bookings/all/',              views.BookingAllView.as_view()),
+    path('bookings/export/',           views.BookingExportView.as_view()),
     path('bookings/next-eoi/',         views.BookingNextEOIView.as_view()),
     path('bookings/draft/',            views.BookingDraftView.as_view()),
     path('bookings/<int:pk>/action/',  views.BookingActionView.as_view()),

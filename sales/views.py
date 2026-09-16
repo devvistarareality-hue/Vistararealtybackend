@@ -1,8 +1,10 @@
 import logging
 import os
 import hmac
+import re
 import secrets
 from datetime import datetime, time as dt_time, timedelta
+from io import BytesIO
 import requests as http_requests
 from django.conf import settings
 from django.db import transaction
@@ -4910,6 +4912,283 @@ class BookingAllView(APIView):
             default=Value(False), output_field=BooleanField()))
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
+
+
+def _can_export_bookings(user):
+    """Who may download the approved-bookings workbook.
+
+    Granted per person in User Management (can_export_bookings), plus real admins,
+    who have it unconditionally. Deliberately NOT implied by having the Sales module:
+    the export crosses the Sales/CP line and carries every commercial figure of every
+    approved deal in the company, which is a different thing from being able to work
+    your own bookings.
+    """
+    return bool(_is_hard_admin(user) or getattr(user, 'can_export_bookings', False))
+
+
+# The workbook's columns, in order: (heading, attribute, kind).
+# kind 'money' is summed into the grand total row and formatted as rupees;
+# 'num' is a plain number; everything else is text.
+BOOKING_EXPORT_COLUMNS = [
+    ('Project',                  'project_name',        'text'),
+    ('Unit',                     'unit',                'text'),
+    ('Module',                   'module',              'text'),
+    ('Client Name',              'client_name',         'text'),
+    ('Gender',                   'gender',              'text'),
+    ('Phone',                    'phone',               'text'),
+    ('Address',                  'address',             'text'),
+    ('Source',                   'source',              'text'),
+    ('CP / Reference Name',      'cp_name',             'text'),
+    ('Booked By',                'booked_by',           'text'),
+    ('Booking Date',             'booking_date',        'text'),
+
+    ('Area',                     'area',                'text'),
+    ('Area Unit',                'area_unit',           'text'),
+    ('Construction Area',        'const_area',          'text'),
+    ('Villa / Unit Type',        'villa_type',          'text'),
+
+    ('Land Rate',                'land_rate',           'num'),
+    ('Development Rate',         'dev_rate',            'num'),
+    ('Construction Rate',        'const_rate',          'num'),
+    ('Sale Deed Rate',           'sale_deed_rate',      'num'),
+    ('Dev Agreement Rate',       'dev_agreement_rate',  'num'),
+    ('Sale Deed %',              'sale_deed_pct',       'num'),
+    ('Maintenance Rate',         'maint_rate',          'num'),
+    ('Maintenance Months',       'maint_months',        'num'),
+
+    ('Plot Basic',               'plot_basic',          'money'),
+    ('Plot Development',         'plot_dev',            'money'),
+    ('Construction Amount',      'const_amt',           'money'),
+    ('Sale Deed',                'sale_deed',           'money'),
+    ('Sale Deed Amount',         'sale_deed_amount',    'money'),
+    ('Land Sale Deed',           'land_sale_deed',      'money'),
+    ('Construction Agreement',   'const_agreement',     'money'),
+    ('Development Agreement',    'dev_agreement',       'money'),
+    ('Premium Location',         'premium_location',    'money'),
+    ('Stamp Duty',               'stamp_duty',          'money'),
+    ('Registration Fees',        'reg_fees',            'money'),
+    ('GST',                      'gst',                 'money'),
+    ('Maintenance',              'maintenance',         'money'),
+    ('Maintenance Deposit',      'maint_deposit',       'money'),
+    ('Maintenance Advance',      'maint_advance',       'money'),
+    ('Legal Charges',            'legal_charges',       'money'),
+    ('Total Extra',              'total_extra',         'money'),
+    ('Extra Work Amount',        'extra_work_amount',   'money'),
+    ('Extra Work Description',   'extra_work_desc',     'text'),
+    ('Discount',                 'discount',            'money'),
+    ('Final Amount',             'final_amount',        'money'),
+
+    ('Registration Fee Applied', 'apply_reg_fee',       'text'),
+    ('Page Fee Applied',         'apply_page_fee',      'text'),
+    ('Stamp Duty Applied',       'apply_stamp_duty',    'text'),
+    ('GST Applied',              'apply_gst',           'text'),
+
+    ('Revision No',              'revision_no',         'num'),
+    ('Approval Status',          'approval_status',     'text'),
+    ('Approved By',              'approved_by_name',    'text'),
+    ('Approved On',              'approved_on',         'text'),
+    ('Accounts Status',          'accounts_status',     'text'),
+    ('Accounts Approved By',     'accounts_by',         'text'),
+    ('Accounts Approved On',     'accounts_on',         'text'),
+]
+
+
+def _unit_sort_key(unit):
+    """Order unit numbers the way a person reads them, not the way strings sort.
+
+    Plain alphabetical puts 1004 before 101 and Shop10 before Shop4. This splits the
+    label into text and number runs and compares the numbers as numbers, so 101, 102,
+    … 1004, 1102 come out in order and Shop4 sorts before Shop10. Units that start
+    with a number (flats, plots) lead; the prefixed ones (Shop-, EOI-) follow, each
+    prefix grouped together.
+    """
+    text = str(unit or '').strip()
+    if not text:
+        return (2, [])                      # a booking with no unit label goes last
+    parts = [p for p in re.split(r'(\d+)', text.upper()) if p]
+    return (0 if text[:1].isdigit() else 1,
+            [(1, int(p)) if p.isdigit() else (0, p) for p in parts])
+
+
+class BookingExportView(APIView):
+    """Every approved booking in the company as an .xlsx, for the Sales module.
+
+    Sales and Channel Partner in one sheet: the export applies no CP filter at all,
+    which is the point of it — the Sales module's download is the combined picture,
+    and the CP module has no download of its own. A Module column says which side each
+    booking came from.
+
+    Approved means what the Approved tab means (status='sold'), whether or not Accounts
+    has signed off yet; the Accounts Status column says where each one stands. Only the
+    current version of a revised booking is listed — a superseded revision would
+    double-count its deal in the grand total.
+
+    ?project=<id> narrows it to one project. The last row is a grand total across every
+    money column.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _can_export_bookings(request.user):
+            return Response({'detail': 'You do not have access to download booking data.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+
+        qs = Booking.objects.filter(company=company, status='sold')
+        project = None
+        project_id = request.query_params.get('project')
+        if project_id and str(project_id).isdigit():
+            project = Project.objects.filter(id=project_id, company=company).first()
+            if project is None:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            qs = qs.filter(project_id=project.id)
+        qs = (_drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))
+              .select_related('project', 'plot', 'stm', 'approved_by',
+                              'accounts_approved_by', 'lead')
+              .defer(*PROJECT_BLOBS)
+              .order_by('project__name', 'booking_date', 'id'))
+
+        # Unit order within each project — what someone reading the sheet expects, and
+        # not something the database can do: the unit label is text ("401", "Shop4",
+        # "EOI-23") and sorting it as text puts 1004 before 101.
+        rows = sorted((self._row(b) for b in qs),
+                      key=lambda r: (r['project_name'], _unit_sort_key(r['unit'])))
+        wb = self._workbook(rows, company, project)
+
+        stamp = timezone.now().strftime('%Y-%m-%d')
+        label = (project.name if project else 'All Projects')
+        safe  = re.sub(r'[^A-Za-z0-9]+', '-', label).strip('-') or 'All-Projects'
+        buf = BytesIO()
+        wb.save(buf)
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = f'attachment; filename="Bookings-{safe}-{stamp}.xlsx"'
+        return resp
+
+    def _row(self, b):
+        """One booking flattened to the column attributes above."""
+        def dt(value):
+            return timezone.localtime(value).strftime('%d/%m/%Y %I:%M %p') if value else ''
+
+        unit = b.plot_numbers or (b.plot.number if b.plot_id else '') or b.area or ''
+        return {
+            'project_name': b.project.name if b.project_id else '',
+            'unit': unit,
+            'module': 'Channel Partner' if _is_cp_sourced_booking(b.lead_id, b.source) else 'Sales',
+            'client_name': b.client_name or '',
+            'gender': b.gender or '',
+            'phone': b.phone or '',
+            'address': b.address or '',
+            'source': b.source or '',
+            'cp_name': b.cp_name or '',
+            # manual_stm_name covers a booking entered on behalf of someone with no login.
+            'booked_by': (b.stm.name if b.stm_id else '') or b.manual_stm_name or '',
+            'booking_date': b.booking_date.strftime('%d/%m/%Y') if b.booking_date else '',
+            'area': b.area or '',
+            'area_unit': b.area_unit or '',
+            'const_area': b.const_area or '',
+            'villa_type': b.villa_type or b.bunglow_type or '',
+            'land_rate': b.land_rate, 'dev_rate': b.dev_rate, 'const_rate': b.const_rate,
+            'sale_deed_rate': b.sale_deed_rate, 'dev_agreement_rate': b.dev_agreement_rate,
+            'sale_deed_pct': b.sale_deed_pct, 'maint_rate': b.maint_rate, 'maint_months': b.maint_months,
+            'plot_basic': b.plot_basic, 'plot_dev': b.plot_dev, 'const_amt': b.const_amt,
+            'sale_deed': b.sale_deed, 'sale_deed_amount': b.sale_deed_amount,
+            'land_sale_deed': b.land_sale_deed, 'const_agreement': b.const_agreement,
+            'dev_agreement': b.dev_agreement, 'premium_location': b.premium_location,
+            'stamp_duty': b.stamp_duty, 'reg_fees': b.reg_fees, 'gst': b.gst,
+            'maintenance': b.maintenance, 'maint_deposit': b.maint_deposit,
+            'maint_advance': b.maint_advance, 'legal_charges': b.legal_charges,
+            'total_extra': b.total_extra, 'extra_work_amount': b.extra_work_amount,
+            'extra_work_desc': b.extra_work_desc or '', 'discount': b.discount,
+            'final_amount': b.final_amount,
+            'apply_reg_fee': b.apply_reg_fee or '', 'apply_page_fee': b.apply_page_fee or '',
+            'apply_stamp_duty': b.apply_stamp_duty or '', 'apply_gst': b.apply_gst or '',
+            'revision_no': b.revision_no or 0,
+            'approval_status': b.approval_status or '',
+            'approved_by_name': b.approved_by.name if b.approved_by_id else '',
+            'approved_on': dt(b.approved_at),
+            'accounts_status': (b.accounts_status or '').title(),
+            'accounts_by': b.accounts_approved_by.name if b.accounts_approved_by_id else '',
+            'accounts_on': dt(b.accounts_approved_at),
+        }
+
+    def _workbook(self, rows, company, project):
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        NAVY  = 'FF0F1838'
+        PAPER = 'FFEEF1F7'
+        MONEY = '#,##0.00'
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Approved Bookings'
+
+        title = f"{company.name if company else ''} — Approved Bookings"
+        subtitle = (f"{project.name if project else 'All Projects'}  ·  "
+                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'}  ·  "
+                    f"generated {timezone.localtime(timezone.now()).strftime('%d/%m/%Y %I:%M %p')}")
+        ws.append([title])
+        ws.append([subtitle])
+        ws.append([])
+        ws['A1'].font = Font(bold=True, size=14, color=NAVY)
+        ws['A2'].font = Font(size=10, color='FF8492A6')
+
+        # Read the header's row number back from the sheet rather than predicting it:
+        # openpyxl's append([]) advances its write cursor without moving max_row, so a
+        # predicted number was one short and the grand total's SUM range started on the
+        # header itself.
+        ws.append([c[0] for c in BOOKING_EXPORT_COLUMNS])
+        header_row = ws.max_row
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color='FFFFFFFF', size=10)
+            cell.fill = PatternFill('solid', fgColor=NAVY)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        # Addressed by name, not via ws.cell(): asking openpyxl for a cell creates it,
+        # which left an empty row between the header and the first booking.
+        ws.freeze_panes = f'A{header_row + 1}'
+
+        def as_number(value):
+            """Money and rates are encrypted columns that come back as Decimal, but a
+            blank reads as None or ''. Excel needs a real number to sum, so anything
+            unparseable becomes 0 rather than text that would break the total."""
+            if value in (None, ''):
+                return 0
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0
+
+        for row in rows:
+            line = []
+            for _, attr, kind in BOOKING_EXPORT_COLUMNS:
+                value = row.get(attr)
+                line.append(as_number(value) if kind in ('money', 'num') else (value or ''))
+            ws.append(line)
+            for idx, (_, _, kind) in enumerate(BOOKING_EXPORT_COLUMNS, start=1):
+                if kind == 'money':
+                    ws.cell(row=ws.max_row, column=idx).number_format = MONEY
+
+        # Grand total — every money column summed over the rows above it, using a real
+        # SUM formula so it stays right if somebody filters or edits the sheet.
+        first, last = header_row + 1, ws.max_row
+        total_row = ws.max_row + 1
+        ws.cell(row=total_row, column=1, value='GRAND TOTAL')
+        for idx, (_, _, kind) in enumerate(BOOKING_EXPORT_COLUMNS, start=1):
+            cell = ws.cell(row=total_row, column=idx)
+            if kind == 'money' and rows:
+                col = get_column_letter(idx)
+                cell.value = f'=SUM({col}{first}:{col}{last})'
+                cell.number_format = MONEY
+            cell.font = Font(bold=True, color=NAVY, size=10)
+            cell.fill = PatternFill('solid', fgColor=PAPER)
+
+        for idx, (heading, _, kind) in enumerate(BOOKING_EXPORT_COLUMNS, start=1):
+            width = 34 if heading in ('Address', 'Extra Work Description') else max(13, min(len(heading) + 4, 26))
+            ws.column_dimensions[get_column_letter(idx)].width = width
+        return wb
 
 
 def _notify_closure_cancellation(stm, project_obj, company, unit, client, amount, canceller, extra_data=None):

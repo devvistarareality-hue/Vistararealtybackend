@@ -44,7 +44,7 @@ class UserSerializer(serializers.ModelSerializer):
             'role', 'department', 'designation', 'avatar_url',
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
-            'reporting_manager', 'is_approver',
+            'reporting_manager', 'is_approver', 'can_export_bookings',
         ]
 
 
@@ -75,7 +75,7 @@ class UserListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user_code', 'name', 'email', 'phone', 'role', 'designation',
             'modules', 'manager_modules', 'admin_modules', 'module_count', 'is_manager', 'is_active',
-            'company_code', 'company_name', 'reporting_manager',
+            'can_export_bookings', 'company_code', 'company_name', 'reporting_manager',
         ]
 
 
@@ -113,7 +113,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'user_code_prefix', 'company_id', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'can_export_bookings', 'user_code_prefix', 'company_id', 'reporting_manager_id']
 
     def validate(self, attrs):
         validate_reporting_manager(attrs.get('role'), attrs.get('reporting_manager_id'))
@@ -173,7 +173,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'is_active', 'reporting_manager_id']
+        fields = ['name', 'email', 'phone', 'user_code', 'password', 'role', 'designation', 'modules', 'manager_modules', 'admin_modules', 'can_export_bookings', 'is_active', 'reporting_manager_id']
 
     def validate_email(self, value):
         # email is encrypted; uniqueness lives on the blind index.

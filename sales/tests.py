@@ -1068,3 +1068,186 @@ class ReviseOwnNonCPBookingTests(APITestCase):
         rev = Booking.objects.get(id=res.json()['id'])
         self.assertEqual(rev.revision_of_id, own.id)
         self.assertEqual(rev.revision_no, own.revision_no + 1)
+
+
+class BookingExportTests(APITestCase):
+    """The approved-bookings workbook: who may download it, and what is in it."""
+
+    def _seed(self):
+        from datetime import date
+        from companies.models import Company
+        from sales.models import Booking, ChannelPartner
+        co = Company.objects.create(code='EXP', name='Export Co')
+        admin = User.objects.create(email='a@exp.com', company=co, role='Admin',
+                                    user_code='AEXP', is_staff=True)
+        stm = User.objects.create(email='s@exp.com', company=co, role='Sales', user_code='SEXP',
+                                  name='Sales Person', designation='STM', reporting_manager=admin)
+        p1 = Project.objects.create(company=co, name='Alpha Heights')
+        p2 = Project.objects.create(company=co, name='Beta Gardens')
+
+        def booking(project, client, amount, **kw):
+            return Booking.objects.create(
+                company=co, project=project, stm=stm, client_name=client,
+                booking_date=date.today(), final_amount=amount, plot_basic=amount,
+                **kw)
+
+        sales_b = booking(p1, 'Sales Client', 1000000, status='sold', source='Reference')
+        cp_b    = booking(p1, 'Partner Client', 2000000, status='sold', source='Channel Partner')
+        other   = booking(p2, 'Other Project', 4000000, status='sold', source='Reference')
+        pending = booking(p1, 'Not Approved Yet', 8000000, status='pending', source='Reference')
+        return co, admin, stm, p1, p2, sales_b, cp_b, other, pending
+
+    def _sheet(self, content):
+        import openpyxl
+        from io import BytesIO
+        return openpyxl.load_workbook(BytesIO(content)).active
+
+    def _column(self, ws, heading):
+        """Values under a heading, excluding the grand-total row."""
+        hdr = next(r for r in ws.iter_rows() if any(c.value == heading for c in r))
+        idx = next(c.column for c in hdr if c.value == heading)
+        out = []
+        for row in ws.iter_rows(min_row=hdr[0].row + 1):
+            if row[0].value == 'GRAND TOTAL':
+                break
+            out.append(ws.cell(row=row[0].row, column=idx).value)
+        return out
+
+    def test_a_plain_user_may_not_download(self):
+        co, admin, stm, *_ = self._seed()
+        auth(self.client, stm)
+        self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 403)
+
+    def test_granting_the_permission_lets_them_download(self):
+        co, admin, stm, *_ = self._seed()
+        stm.can_export_bookings = True
+        stm.save()
+        auth(self.client, stm)
+        res = self.client.get('/api/sales/bookings/export/')
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('spreadsheetml', res['Content-Type'])
+        self.assertIn('attachment; filename=', res['Content-Disposition'])
+
+    def test_admins_have_it_without_being_granted(self):
+        co, admin, *_ = self._seed()
+        self.assertFalse(admin.can_export_bookings)
+        auth(self.client, admin)
+        self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 200)
+
+    def test_it_holds_sales_and_cp_together_and_only_approved(self):
+        co, admin, stm, p1, p2, sales_b, cp_b, other, pending = self._seed()
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
+        clients = self._column(ws, 'Client Name')
+        self.assertIn('Sales Client', clients)
+        self.assertIn('Partner Client', clients)          # CP side included
+        self.assertIn('Other Project', clients)
+        self.assertNotIn('Not Approved Yet', clients)     # pending is left out
+        modules = dict(zip(clients, self._column(ws, 'Module')))
+        self.assertEqual(modules['Partner Client'], 'Channel Partner')
+        self.assertEqual(modules['Sales Client'], 'Sales')
+
+    def test_one_project_narrows_it(self):
+        co, admin, stm, p1, p2, *_ = self._seed()
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get(f'/api/sales/bookings/export/?project={p1.id}').content)
+        self.assertEqual(sorted(self._column(ws, 'Client Name')), ['Partner Client', 'Sales Client'])
+        self.assertNotIn('Other Project', self._column(ws, 'Client Name'))
+
+    def test_the_grand_total_sums_the_rows_above_it(self):
+        co, admin, stm, p1, *_ = self._seed()
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get(f'/api/sales/bookings/export/?project={p1.id}').content)
+        total = next(r for r in ws.iter_rows() if r[0].value == 'GRAND TOTAL')
+        hdr = next(r for r in ws.iter_rows() if any(c.value == 'Final Amount' for c in r))
+        idx = next(c.column for c in hdr if c.value == 'Final Amount')
+        first, last = hdr[0].row + 1, total[0].row - 1
+        col = ws.cell(row=total[0].row, column=idx)
+        # A SUM formula, not a frozen number, so it stays right if the sheet is filtered.
+        self.assertEqual(col.value, f'=SUM({col.column_letter}{first}:{col.column_letter}{last})')
+        self.assertEqual(sum(self._column(ws, 'Final Amount')), 3000000)
+
+    def test_a_superseded_revision_is_not_listed_twice(self):
+        from datetime import date
+        from sales.models import Booking
+        # client_name is an encrypted column, so it cannot be looked up by value —
+        # hold on to the object the fixture made.
+        co, admin, stm, p1, p2, original, *_ = self._seed()
+        Booking.objects.create(company=co, project=p1, stm=stm, client_name='Sales Client',
+                               booking_date=date.today(), final_amount=1500000,
+                               status='sold', source='Reference',
+                               revision_of=original, revision_no=1)
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get(f'/api/sales/bookings/export/?project={p1.id}').content)
+        clients = self._column(ws, 'Client Name')
+        self.assertEqual(clients.count('Sales Client'), 1, 'the superseded version is still listed')
+        # and the total counts the revision, not the original
+        self.assertEqual(sum(self._column(ws, 'Final Amount')), 3500000)
+
+    def test_it_is_the_whole_company_not_just_the_downloader_s_own(self):
+        """The sheet is every approved booking in the company, whoever booked it.
+
+        The button sits on My Bookings (Approvals is manager-only, so an ordinary
+        employee could not reach it there) — but the export applies none of that
+        screen's scoping. No `mine`, no reporting tree, no CP filter: a rep granted
+        the permission downloads the same rows an admin would.
+        """
+        from datetime import date
+        from sales.models import Booking
+        co, admin, stm, p1, p2, *_ = self._seed()
+        someone_else = User.objects.create(email='other@exp.com', company=co, role='Sales',
+                                           user_code='OEXP', name='Someone Else',
+                                           designation='STM', reporting_manager=admin)
+        Booking.objects.create(company=co, project=p1, stm=someone_else,
+                               client_name="Another Rep's Client", booking_date=date.today(),
+                               final_amount=5000000, status='sold', source='Channel Partner')
+        stm.can_export_bookings = True
+        stm.save()
+
+        auth(self.client, stm)
+        ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
+        clients = self._column(ws, 'Client Name')
+        self.assertIn("Another Rep's Client", clients)   # not their own booking
+        self.assertIn('Sales Client', clients)
+        self.assertIn('Partner Client', clients)
+        self.assertEqual(len(clients), 4)
+        # and the same rep's own My Bookings list shows only their own — the export
+        # is deliberately not that list.
+        mine = self.client.get('/api/sales/bookings/?mine=1').json()
+        self.assertNotIn("Another Rep's Client", [b['client_name'] for b in mine])
+
+    def test_user_management_can_grant_and_revoke_it(self):
+        """The toggle in User Management is what actually gates the download."""
+        co, admin, stm, *_ = self._seed()
+        auth(self.client, admin)
+        res = self.client.patch(f'/api/auth/users/{stm.id}/',
+                                {'can_export_bookings': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.content[:300])
+        stm.refresh_from_db()
+        self.assertTrue(stm.can_export_bookings)
+
+        auth(self.client, stm)
+        self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 200)
+        # and the signed-in user can see their own flag, so the button knows to show
+        self.assertTrue(self.client.get('/api/auth/me/').json()['can_export_bookings'])
+
+        auth(self.client, admin)
+        self.client.patch(f'/api/auth/users/{stm.id}/', {'can_export_bookings': False}, format='json')
+        auth(self.client, stm)
+        self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 403)
+
+    def test_rows_come_out_in_unit_order(self):
+        """Unit order as a person reads it: 401 before 1102, Shop4 before Shop10."""
+        from datetime import date
+        from sales.models import Booking
+        co, admin, stm, p1, *_ = self._seed()
+        Booking.objects.filter(company=co).delete()
+        for unit in ['Shop10', '1102', 'Shop4', '401', '106', '1004', 'EOI-23', 'EOI-3']:
+            Booking.objects.create(company=co, project=p1, stm=stm, status='sold',
+                                   client_name=f'C {unit}', booking_date=date.today(),
+                                   final_amount=1000, plot_numbers=unit, source='Reference')
+        auth(self.client, admin)
+        ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
+        self.assertEqual(
+            self._column(ws, 'Unit'),
+            ['106', '401', '1004', '1102', 'EOI-3', 'EOI-23', 'Shop4', 'Shop10'])

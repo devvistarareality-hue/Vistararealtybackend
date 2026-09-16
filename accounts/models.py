@@ -48,6 +48,10 @@ class User(AbstractBaseUser, PermissionsMixin):
     reporting_manager  = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='subordinates'
     )
+    # Granted per person in User Management. Gates the approved-bookings Excel export,
+    # which crosses the Sales/CP line and carries every commercial figure of a deal, so
+    # it is not implied by having the Sales module. Real admins always have it.
+    can_export_bookings = models.BooleanField(default=False)
     is_active         = models.BooleanField(default=True)
     is_staff          = models.BooleanField(default=False)
     date_joined       = models.DateTimeField(auto_now_add=True)
