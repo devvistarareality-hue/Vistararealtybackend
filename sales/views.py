@@ -6680,6 +6680,13 @@ class LeadTransferListCreateView(APIView):
             )
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        # The Channel Partner module shows only partner-sourced work. Transferring a
+        # lead between STMs is a Sales activity, so its queue was arriving in the CP
+        # module untouched — a CP approver was being asked to decide transfers for
+        # leads that never came through a partner. Same test and same parameter the
+        # rest of the module's lists use.
+        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+            qs = qs.filter(cp_lead_q(prefix='lead__'))
         return Response(LeadTransferSerializer(qs[:200], many=True).data)
 
     def post(self, request):

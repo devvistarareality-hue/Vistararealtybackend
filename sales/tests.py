@@ -1251,3 +1251,44 @@ class BookingExportTests(APITestCase):
         self.assertEqual(
             self._column(ws, 'Unit'),
             ['106', '401', '1004', '1102', 'EOI-3', 'EOI-23', 'Shop4', 'Shop10'])
+
+
+class LeadTransferCPScopeTests(APITestCase):
+    """A lead transfer is a Sales activity. The Channel Partner module must not ask a
+    CP approver to decide transfers for leads that never came through a partner —
+    reported from the CP Approvals page, which was listing every pending Sales
+    transfer in the company."""
+
+    def _seed(self):
+        from companies.models import Company
+        from sales.models import LeadTransfer, ChannelPartner
+        co = Company.objects.create(code='XFR', name='Transfer Co')
+        admin = User.objects.create(email='a@xfr.com', company=co, role='Admin',
+                                    user_code='AXFR', is_staff=True)
+        stm_a = User.objects.create(email='sa@xfr.com', company=co, role='Sales',
+                                    user_code='SA', name='From STM', designation='STM',
+                                    reporting_manager=admin)
+        stm_b = User.objects.create(email='sb@xfr.com', company=co, role='Sales',
+                                    user_code='SB', name='To STM', designation='STM',
+                                    reporting_manager=admin)
+        proj = Project.objects.create(company=co, name='Kalrav')
+        partner = ChannelPartner.objects.create(company=co, name='Shah Realty', contact_no='9999999999')
+        plain = Lead.objects.create(company=co, name='Plain Lead', phone='+919000001111', project=proj)
+        cp_lead = Lead.objects.create(company=co, name='CP Lead', phone='+919000002222',
+                                      project=proj, channel_partner=partner)
+        for lead in (plain, cp_lead):
+            LeadTransfer.objects.create(company=co, lead=lead, project=proj, from_stm=stm_a,
+                                        to_stm=stm_b, requested_by=stm_a, status='pending')
+        return co, admin
+
+    def test_sales_sees_every_pending_transfer(self):
+        co, admin = self._seed()
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/lead-transfers/?status=pending').json()
+        self.assertEqual(len(rows), 2)
+
+    def test_the_cp_module_sees_only_partner_sourced_ones(self):
+        co, admin = self._seed()
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/lead-transfers/?status=pending&cp_only=true').json()
+        self.assertEqual([r['lead_name'] for r in rows], ['CP Lead'])
