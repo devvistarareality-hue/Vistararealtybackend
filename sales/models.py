@@ -507,6 +507,11 @@ class Booking(models.Model):
     land_rate          = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     dev_rate           = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     const_rate         = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    # PLC (Premium Location Charge) rate — Kalrav-set projects only. Same shape as
+    # dev_rate: PLC Amount = Plot Area × plc_rate, folded into premium_location below
+    # (Ankhol's own flat-amount field) rather than a separate amount column, since
+    # every consumer of "the premium location amount" already reads that one field.
+    plc_rate           = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     sale_deed_rate     = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     dev_agreement_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     # Ankhol sale-deed percentage (editable per booking; defaults to 60%).
