@@ -1251,3 +1251,180 @@ class BookingExportTests(APITestCase):
         self.assertEqual(
             self._column(ws, 'Unit'),
             ['106', '401', '1004', '1102', 'EOI-3', 'EOI-23', 'Shop4', 'Shop10'])
+
+
+class LeadTransferCPScopeTests(APITestCase):
+    """A lead transfer is a Sales activity. The Channel Partner module must not ask a
+    CP approver to decide transfers for leads that never came through a partner —
+    reported from the CP Approvals page, which was listing every pending Sales
+    transfer in the company."""
+
+    def _seed(self):
+        from companies.models import Company
+        from sales.models import LeadTransfer, ChannelPartner
+        co = Company.objects.create(code='XFR', name='Transfer Co')
+        admin = User.objects.create(email='a@xfr.com', company=co, role='Admin',
+                                    user_code='AXFR', is_staff=True)
+        stm_a = User.objects.create(email='sa@xfr.com', company=co, role='Sales',
+                                    user_code='SA', name='From STM', designation='STM',
+                                    reporting_manager=admin)
+        stm_b = User.objects.create(email='sb@xfr.com', company=co, role='Sales',
+                                    user_code='SB', name='To STM', designation='STM',
+                                    reporting_manager=admin)
+        proj = Project.objects.create(company=co, name='Kalrav')
+        partner = ChannelPartner.objects.create(company=co, name='Shah Realty', contact_no='9999999999')
+        plain = Lead.objects.create(company=co, name='Plain Lead', phone='+919000001111', project=proj)
+        cp_lead = Lead.objects.create(company=co, name='CP Lead', phone='+919000002222',
+                                      project=proj, channel_partner=partner)
+        for lead in (plain, cp_lead):
+            LeadTransfer.objects.create(company=co, lead=lead, project=proj, from_stm=stm_a,
+                                        to_stm=stm_b, requested_by=stm_a, status='pending')
+        return co, admin
+
+    def test_sales_sees_every_pending_transfer(self):
+        co, admin = self._seed()
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/lead-transfers/?status=pending').json()
+        self.assertEqual(len(rows), 2)
+
+    def test_the_cp_module_sees_only_partner_sourced_ones(self):
+        co, admin = self._seed()
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/lead-transfers/?status=pending&cp_only=true').json()
+        self.assertEqual([r['lead_name'] for r in rows], ['CP Lead'])
+
+
+class RevisedSourceRoutesApprovalTests(APITestCase):
+    """A revision that changes Source away from Channel Partner must stop routing to
+    the CP approvers.
+
+    EOI-23 was booked as Channel Partner (R0) and revised twice to Reference. Both
+    revisions kept arriving in the CP approval queue, because the routing fell back to
+    the lead's attribution even when the booking itself contradicted it — so a deal
+    could never be moved off the CP side once its lead had been.
+    """
+
+    def _seed(self):
+        from datetime import date
+        from companies.models import Company
+        from sales.models import Booking, LeadSource
+        co = Company.objects.create(code='RSR', name='Revise Source Co')
+        admin = User.objects.create(email='a@rsr.com', company=co, role='Admin',
+                                    user_code='ARSR', is_staff=True)
+        proj = Project.objects.create(company=co, name='Kalrav')
+        cp_src = LeadSource.objects.create(company=co, name='Channel Partner')
+        # The lead is CP-attributed — which is what used to pin every booking on it.
+        lead = Lead.objects.create(company=co, name='Akshay', phone='+919000003333',
+                                   project=proj, source=cp_src)
+        def booking(source, rev, parent=None):
+            return Booking.objects.create(company=co, project=proj, lead=lead, stm=admin,
+                                          client_name='Akshay', booking_date=date.today(),
+                                          plot_numbers='EOI-23', source=source,
+                                          revision_no=rev, revision_of=parent,
+                                          status='sold', final_amount=100)
+        r0 = booking('Channel Partner', 0)
+        r1 = booking('Reference', 1, r0)
+        r2 = booking('Reference', 2, r1)
+        return co, admin, lead, r0, r1, r2
+
+    def test_the_booking_s_own_source_decides(self):
+        from sales.views import _is_cp_sourced_booking
+        co, admin, lead, r0, r1, r2 = self._seed()
+        self.assertTrue(_is_cp_sourced_booking(r0.lead_id, r0.source))    # says CP
+        self.assertFalse(_is_cp_sourced_booking(r1.lead_id, r1.source))   # says Reference
+        self.assertFalse(_is_cp_sourced_booking(r2.lead_id, r2.source))
+
+    def test_a_booking_naming_no_source_still_follows_its_lead(self):
+        """The fallback is what keeps a CP lead booked without a source in the module."""
+        from sales.views import _is_cp_sourced_booking
+        co, admin, lead, *_ = self._seed()
+        self.assertTrue(_is_cp_sourced_booking(lead.id, ''))
+        self.assertTrue(_is_cp_sourced_booking(lead.id, None))
+
+    def test_the_query_form_agrees_with_the_python_one(self):
+        """Drift between these two is what made the same booking count one way in a
+        list and the other way in a permission check."""
+        from django.db.models import Case, When, Value, BooleanField
+        from sales.models import Booking
+        from sales.views import cp_booking_q, _is_cp_sourced_booking
+        co, admin, lead, *_ = self._seed()
+        rows = Booking.objects.filter(company=co).annotate(ann=Case(
+            When(cp_booking_q(), then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
+        for b in rows:
+            self.assertEqual(bool(b.ann), _is_cp_sourced_booking(b.lead_id, b.source),
+                             f'booking {b.id} with source {b.source!r}')
+
+    def test_the_cp_bookings_list_drops_the_revised_ones(self):
+        co, admin, lead, r0, r1, r2 = self._seed()
+        auth(self.client, admin)
+        ids = {b['id'] for b in self.client.get('/api/sales/bookings/?cp_only=true').json()}
+        self.assertNotIn(r2.id, ids)
+        self.assertNotIn(r1.id, ids)
+
+
+class AvailabilityHistoryExportTests(APITestCase):
+    """The sign-in history as a workbook — same records and same date range as the
+    Availability card on the Distribution page."""
+
+    def _seed(self):
+        from datetime import date, timedelta
+        from django.utils import timezone
+        from companies.models import Company
+        from sales.models import UserAvailability
+        co = Company.objects.create(code='AVX', name='Avail Co')
+        admin = User.objects.create(email='a@avx.com', company=co, role='Admin',
+                                    user_code='AAVX', is_staff=True)
+        tc = User.objects.create(email='tc@avx.com', company=co, role='Sales', user_code='TC1',
+                                 name='Kavya Dave', designation='TELECALLER', reporting_manager=admin)
+        stm = User.objects.create(email='stm@avx.com', company=co, role='Sales', user_code='ST1',
+                                  name='Aakash Pathak', designation='STM', reporting_manager=admin)
+        today = date.today()
+        UserAvailability.objects.create(user=tc, date=today, is_available=True,
+                                        checked_in_at=timezone.now())
+        UserAvailability.objects.create(user=stm, date=today, is_available=True,
+                                        checked_in_at=timezone.now(), distribution_credit=2)
+        # Someone who did not sign in that day — the sheet records that too.
+        UserAvailability.objects.create(user=stm, date=today - timedelta(days=1), is_available=False)
+        return co, admin, tc, stm, today
+
+    def _sheet(self, content):
+        import openpyxl
+        from io import BytesIO
+        return openpyxl.load_workbook(BytesIO(content)).active
+
+    def test_a_plain_user_may_not_download(self):
+        co, admin, tc, *_ = self._seed()
+        auth(self.client, tc)
+        self.assertEqual(self.client.get('/api/sales/availability/history/export/').status_code, 403)
+
+    def test_it_holds_one_row_per_person_per_day(self):
+        co, admin, tc, stm, today = self._seed()
+        auth(self.client, admin)
+        res = self.client.get('/api/sales/availability/history/export/')
+        self.assertEqual(res.status_code, 200)
+        self.assertIn('spreadsheetml', res['Content-Type'])
+        ws = self._sheet(res.content)
+        hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
+        body = [[c.value for c in r] for r in ws.iter_rows(min_row=hdr[0].row + 1)
+                if r[0].value != 'TOTAL']
+        self.assertEqual(len(body), 3)
+        names = {r[2] for r in body}
+        self.assertEqual(names, {'Kavya Dave', 'Aakash Pathak'})
+        signed = {r[2]: r[4] for r in body if r[0] == today.strftime('%d/%m/%Y')}
+        self.assertEqual(signed['Kavya Dave'], 'Yes')
+        # the forfeited share of the backlog rides along, since it is what a reader is
+        # usually trying to explain
+        credits = {r[2]: r[6] for r in body if r[0] == today.strftime('%d/%m/%Y')}
+        self.assertEqual(credits['Aakash Pathak'], 2)
+
+    def test_the_date_range_narrows_it(self):
+        from datetime import timedelta
+        co, admin, tc, stm, today = self._seed()
+        auth(self.client, admin)
+        only_today = today.strftime('%Y-%m-%d')
+        ws = self._sheet(self.client.get(
+            f'/api/sales/availability/history/export/?date_from={only_today}&date_to={only_today}').content)
+        hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
+        body = [r for r in ws.iter_rows(min_row=hdr[0].row + 1) if r[0].value != 'TOTAL']
+        self.assertEqual(len(body), 2)   # yesterday's record is outside the range
