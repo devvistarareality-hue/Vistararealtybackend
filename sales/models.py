@@ -470,6 +470,10 @@ class SiteVisit(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-scheduled_at']),
+            models.Index(fields=['status', '-scheduled_at']),
+        ]
 
 
 class Booking(models.Model):
@@ -619,6 +623,10 @@ class Booking(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['company', 'status']),
+            models.Index(fields=['-created_at']),
+        ]
 
     def __str__(self):
         return f'Booking {self.project_id}/{self.plot_id} – {self.client_name}'
@@ -656,6 +664,10 @@ class Closure(models.Model):
 
     class Meta:
         ordering = ['-closure_date']
+        indexes = [
+            models.Index(fields=['-closure_date']),
+            models.Index(fields=['company', '-closure_date']),
+        ]
 
     def save(self, *args, **kwargs):
         # Derive the company + client snapshot from the lead on first write so callers
