@@ -368,6 +368,10 @@ class VerifyOtpView(APIView):
 
 class ResendOtpView(APIView):
     permission_classes = [AllowAny]
+    # Same cap as login/verify: without it, anyone holding a valid otp_token can
+    # keep triggering OTP emails.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'login'
 
     def post(self, request):
         token = request.data.get('otp_token', '').strip()
