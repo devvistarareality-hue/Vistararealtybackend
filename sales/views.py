@@ -5687,144 +5687,148 @@ class BookingActionView(APIView):
         action = request.data.get('action')
         is_rev = b.revision_no and b.revision_no > 0
 
-        if action == 'approve':
-            # The plot itself is NOT marked sold here — Sales/CP approval alone no
-            # longer finalises the unit on the map; it stays 'hold' (spoken for, not
-            # yet gone) until Accounts also signs off (see AccountsBookingActionView,
-            # which is the only place that sets 'sold'). A revision re-approval can
-            # find the plot already 'sold' from an earlier round — pull it back to
-            # 'hold' to match accounts_status being reset to pending below.
-            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            # Checking again here, not only at submission. Two bookings can sit pending
-            # on one unit and each be approved in turn, and a unit's status can be lost
-            # to a re-import or a reset between the two — neither of which the
-            # submission-time check can see. A revision legitimately reuses its own
-            # unit, so the chain it belongs to is excluded.
-            if _pids and not b.revision_of_id and not b.is_resale:
-                chain = _revision_chain_ids(b.id, company)
-                wanted = set(_pids)
-                clash = None
-                # plot_ids is JSON, not a Postgres array, so the overlap is worked out
-                # here rather than in the query — the same way the submission-time
-                # guard above does it, and portable to the test database.
-                for other in (Booking.objects.filter(company=company, status='sold')
-                              .exclude(id__in=chain)
-                              .only('id', 'plot_id', 'plot_ids', 'client_name')):
-                    held = set(other.plot_ids or [])
-                    if other.plot_id:
-                        held.add(other.plot_id)
-                    if held & wanted:
-                        clash = other
-                        break
-                if clash:
-                    return Response(
-                        {'detail': f'This unit is already sold to {clash.client_name} '
-                                   f'(booking #{clash.id}). Cancel that booking first.'},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-            if _pids:
-                Plot.objects.filter(id__in=_pids).update(status='hold')
-            b.status = 'sold'
-            b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
-            b.approved_at = timezone.now()
-            b.approved_by = request.user
-            # Sales/CP approval alone no longer makes this real to Accounts — it now
-            # waits on a configured Accounts approver too (see AccountsBookingActionView).
-            # Reset on every approval, including a revision: the amount may have
-            # changed, so Accounts should sign off on it again rather than keeping
-            # whatever stale accounts_status an earlier approval left behind.
-            b.accounts_status = 'pending'
-            b.accounts_rejected_reason = ''
-            b.accounts_approved_by = None
-            b.accounts_approved_at = None
-            b.accounts_rejected_by = None
-            b.accounts_rejected_at = None
-            if b.closure_id:
-                # Existing closure (revision / re-approval) → just sync the amounts.
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'accounts_status',
-                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
-                                       'accounts_rejected_by', 'accounts_rejected_at'])
-                Closure.objects.filter(id=b.closure_id).update(
-                    booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
-            else:
-                # First approval of a new booking → mirror it into My Conversions now.
-                if b.lead_id:
-                    # Both fields move to 'closed' together — status is the overall
-                    # pipeline field (what All Leads and the dashboard's closed-count
-                    # tile read; see Q(status='closed') in StatsView), stm_status is
-                    # the STM portal's own field. Leaving status behind used to strand
-                    # a lead auto-created at booking submission (status='new') on
-                    # "new" forever once its booking was approved, even though
-                    # _ensure_lead_and_site_visit_for_booking's backfill path already
-                    # sets both together for the no-lead-at-all case below.
-                    Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed', status='closed')
-                closure = Closure.objects.create(
-                    company_id=b.company_id, lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
-                    client_name=b.client_name or '', client_phone=b.phone or '',
-                    status='booked', closure_date=b.booking_date or timezone.now().date(),
-                    unit_no=(b.plot_numbers or (b.plot.number if b.plot_id else b.area)),
-                    unit_type=b.villa_type or b.bunglow_type or '',
-                    booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
-                )
-                b.closure = closure
-                b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'closure', 'accounts_status',
-                                       'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
-                                       'accounts_rejected_by', 'accounts_rejected_at'])
-                # The sale is now real, so make sure the pipeline shows how it got
-                # here: a lead, and a completed site visit dated on the booking date.
-                try:
-                    _lid, _svid = _ensure_lead_and_site_visit_for_booking(b)
-                    if _svid and not closure.lead_id and _lid:
-                        Closure.objects.filter(pk=closure.pk).update(lead_id=_lid)
-                except Exception:
-                    # Never let this block an approval — the booking is what matters.
-                    logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
-            # Notify the STM (approved) and — on a fresh closure — their manager chain.
-            from notifications import notify, notify_many, reporting_chain
-            _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-            _rev = (' (R%d)' % b.revision_no) if is_rev else ''
-            if b.stm:
-                notify(b.stm, 'booking_approved', 'Booking Approved%s' % _rev,
-                       f'{b.client_name or "Your booking"} · Unit {_unit} was approved.', {'booking_id': b.id})
-                if not is_rev:
-                    notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
-                                f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
-                                {'booking_id': b.id})
-            # Notify Accounts & Finance managers of every approved booking.
-            _notify_accounts_managers(
-                company, 'booking_approved', 'Booking Approved%s' % _rev,
-                f'{b.client_name or "Booking"} · {b.project.name if b.project_id else ""} Unit {_unit} · ₹{int(b.final_amount or 0)} — approved',
-                {'booking_id': b.id},
-            )
-            # And separately, tell whoever is actually configured to approve it at
-            # the Accounts stage — the broadcast above reaches every Accounts
-            # manager, but only these people can act on it.
-            _notify_accounts_approvers(company, b)
-        elif action == 'reject':
-            b.status = 'rejected'
-            b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
-            b.rejected_by = request.user
-            b.rejected_at = timezone.now()
-            # Remove the rejected signed LOI PDF from Supabase storage.
-            if b.loi_document:
-                try: b.loi_document.delete(save=False)
-                except Exception: pass
-            b.save(update_fields=['status', 'approval_status', 'loi_document',
-                                  'rejected_by', 'rejected_at'])
-            if not is_rev:
+        # Approving touches plots, the closure and the lead. Without one
+        # transaction a failure halfway leaves the unit held with no closure,
+        # or a closure with no lead — seen as "approved but not sold".
+        with transaction.atomic():
+            if action == 'approve':
+                # The plot itself is NOT marked sold here — Sales/CP approval alone no
+                # longer finalises the unit on the map; it stays 'hold' (spoken for, not
+                # yet gone) until Accounts also signs off (see AccountsBookingActionView,
+                # which is the only place that sets 'sold'). A revision re-approval can
+                # find the plot already 'sold' from an earlier round — pull it back to
+                # 'hold' to match accounts_status being reset to pending below.
                 _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-                _release_plots(_pids, booking=b)
+                # Checking again here, not only at submission. Two bookings can sit pending
+                # on one unit and each be approved in turn, and a unit's status can be lost
+                # to a re-import or a reset between the two — neither of which the
+                # submission-time check can see. A revision legitimately reuses its own
+                # unit, so the chain it belongs to is excluded.
+                if _pids and not b.revision_of_id and not b.is_resale:
+                    chain = _revision_chain_ids(b.id, company)
+                    wanted = set(_pids)
+                    clash = None
+                    # plot_ids is JSON, not a Postgres array, so the overlap is worked out
+                    # here rather than in the query — the same way the submission-time
+                    # guard above does it, and portable to the test database.
+                    for other in (Booking.objects.filter(company=company, status='sold')
+                                  .exclude(id__in=chain)
+                                  .only('id', 'plot_id', 'plot_ids', 'client_name')):
+                        held = set(other.plot_ids or [])
+                        if other.plot_id:
+                            held.add(other.plot_id)
+                        if held & wanted:
+                            clash = other
+                            break
+                    if clash:
+                        return Response(
+                            {'detail': f'This unit is already sold to {clash.client_name} '
+                                       f'(booking #{clash.id}). Cancel that booking first.'},
+                            status=status.HTTP_409_CONFLICT,
+                        )
+                if _pids:
+                    Plot.objects.filter(id__in=_pids).update(status='hold')
+                b.status = 'sold'
+                b.approval_status = ('REVISION R%d APPROVED' % b.revision_no) if is_rev else 'APPROVED'
+                b.approved_at = timezone.now()
+                b.approved_by = request.user
+                # Sales/CP approval alone no longer makes this real to Accounts — it now
+                # waits on a configured Accounts approver too (see AccountsBookingActionView).
+                # Reset on every approval, including a revision: the amount may have
+                # changed, so Accounts should sign off on it again rather than keeping
+                # whatever stale accounts_status an earlier approval left behind.
+                b.accounts_status = 'pending'
+                b.accounts_rejected_reason = ''
+                b.accounts_approved_by = None
+                b.accounts_approved_at = None
+                b.accounts_rejected_by = None
+                b.accounts_rejected_at = None
                 if b.closure_id:
-                    Closure.objects.filter(id=b.closure_id).delete()
-            from notifications import notify
-            _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-            _rev = (' (R%d)' % b.revision_no) if is_rev else ''
-            if b.stm:
-                _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
-                notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
-                       f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
-        else:
-            return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
+                    # Existing closure (revision / re-approval) → just sync the amounts.
+                    b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'accounts_status',
+                                           'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                           'accounts_rejected_by', 'accounts_rejected_at'])
+                    Closure.objects.filter(id=b.closure_id).update(
+                        booking_amount=b.plot_basic or None, total_amount=b.final_amount or None)
+                else:
+                    # First approval of a new booking → mirror it into My Conversions now.
+                    if b.lead_id:
+                        # Both fields move to 'closed' together — status is the overall
+                        # pipeline field (what All Leads and the dashboard's closed-count
+                        # tile read; see Q(status='closed') in StatsView), stm_status is
+                        # the STM portal's own field. Leaving status behind used to strand
+                        # a lead auto-created at booking submission (status='new') on
+                        # "new" forever once its booking was approved, even though
+                        # _ensure_lead_and_site_visit_for_booking's backfill path already
+                        # sets both together for the no-lead-at-all case below.
+                        Lead.objects.filter(id=b.lead_id).update(stm=b.stm, stm_status='closed', status='closed')
+                    closure = Closure.objects.create(
+                        company_id=b.company_id, lead_id=b.lead_id, project_id=b.project_id, stm=b.stm,
+                        client_name=b.client_name or '', client_phone=b.phone or '',
+                        status='booked', closure_date=b.booking_date or timezone.now().date(),
+                        unit_no=(b.plot_numbers or (b.plot.number if b.plot_id else b.area)),
+                        unit_type=b.villa_type or b.bunglow_type or '',
+                        booking_amount=b.plot_basic or None, total_amount=b.final_amount or None,
+                    )
+                    b.closure = closure
+                    b.save(update_fields=['status', 'approval_status', 'approved_at', 'approved_by', 'closure', 'accounts_status',
+                                           'accounts_rejected_reason', 'accounts_approved_by', 'accounts_approved_at',
+                                           'accounts_rejected_by', 'accounts_rejected_at'])
+                    # The sale is now real, so make sure the pipeline shows how it got
+                    # here: a lead, and a completed site visit dated on the booking date.
+                    try:
+                        _lid, _svid = _ensure_lead_and_site_visit_for_booking(b)
+                        if _svid and not closure.lead_id and _lid:
+                            Closure.objects.filter(pk=closure.pk).update(lead_id=_lid)
+                    except Exception:
+                        # Never let this block an approval — the booking is what matters.
+                        logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
+                # Notify the STM (approved) and — on a fresh closure — their manager chain.
+                from notifications import notify, notify_many, reporting_chain
+                _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                _rev = (' (R%d)' % b.revision_no) if is_rev else ''
+                if b.stm:
+                    notify(b.stm, 'booking_approved', 'Booking Approved%s' % _rev,
+                           f'{b.client_name or "Your booking"} · Unit {_unit} was approved.', {'booking_id': b.id})
+                    if not is_rev:
+                        notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
+                                    f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
+                                    {'booking_id': b.id})
+                # Notify Accounts & Finance managers of every approved booking.
+                _notify_accounts_managers(
+                    company, 'booking_approved', 'Booking Approved%s' % _rev,
+                    f'{b.client_name or "Booking"} · {b.project.name if b.project_id else ""} Unit {_unit} · ₹{int(b.final_amount or 0)} — approved',
+                    {'booking_id': b.id},
+                )
+                # And separately, tell whoever is actually configured to approve it at
+                # the Accounts stage — the broadcast above reaches every Accounts
+                # manager, but only these people can act on it.
+                _notify_accounts_approvers(company, b)
+            elif action == 'reject':
+                b.status = 'rejected'
+                b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
+                b.rejected_by = request.user
+                b.rejected_at = timezone.now()
+                # Remove the rejected signed LOI PDF from Supabase storage.
+                if b.loi_document:
+                    try: b.loi_document.delete(save=False)
+                    except Exception: pass
+                b.save(update_fields=['status', 'approval_status', 'loi_document',
+                                      'rejected_by', 'rejected_at'])
+                if not is_rev:
+                    _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+                    _release_plots(_pids, booking=b)
+                    if b.closure_id:
+                        Closure.objects.filter(id=b.closure_id).delete()
+                from notifications import notify
+                _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                _rev = (' (R%d)' % b.revision_no) if is_rev else ''
+                if b.stm:
+                    _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
+                    notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
+                           f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
+            else:
+                return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
 
 
@@ -5856,49 +5860,52 @@ class AccountsBookingActionView(APIView):
             return Response({'detail': 'This booking has already been processed by Accounts.'}, status=status.HTTP_400_BAD_REQUEST)
 
         action = request.data.get('action')
-        if action == 'approve':
-            # This is the ONLY point a unit actually becomes sold — Sales/CP approval
-            # leaves it 'hold' precisely so the map doesn't show it as final until now.
-            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            if _pids:
-                Plot.objects.filter(id__in=_pids).update(status='sold')
-            b.accounts_status = 'approved'
-            b.accounts_approved_by = request.user
-            b.accounts_approved_at = timezone.now()
-            b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
-            from notifications import notify
-            if b.stm:
-                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                notify(b.stm, 'accounts_booking_approved', 'Approved by Accounts',
-                       f'{b.client_name or "Your booking"} · Unit {unit} was approved by Accounts.', {'booking_id': b.id})
-        elif action == 'reject':
-            reason = (request.data.get('reason') or '').strip()
-            if not reason:
-                return Response({'detail': 'Remarks are required to reject.'}, status=status.HTTP_400_BAD_REQUEST)
-            b.accounts_status = 'rejected'
-            b.accounts_rejected_reason = reason
-            b.accounts_rejected_by = request.user
-            b.accounts_rejected_at = timezone.now()
-            # Same fate as a Sales-level rejection: the plot(s) free up and the
-            # booking itself is marked rejected, not just its accounts stage.
-            b.status = 'rejected'
-            if b.loi_document:
-                try: b.loi_document.delete(save=False)
-                except Exception: pass
-            b.save(update_fields=['accounts_status', 'accounts_rejected_reason', 'accounts_rejected_by',
-                                   'accounts_rejected_at', 'status', 'loi_document'])
-            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            _release_plots(_pids, booking=b)
-            if b.closure_id:
-                Closure.objects.filter(id=b.closure_id).delete()
-            from notifications import notify
-            if b.stm:
-                unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                notify(b.stm, 'accounts_booking_rejected', 'Rejected by Accounts',
-                       f'{b.client_name or "Your booking"} · Unit {unit} was rejected by Accounts: {reason}', {'booking_id': b.id})
-            _notify_accounts_rejection_to_sales(company, b, request.user, reason)
-        else:
-            return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
+        # Units go 'sold' and the booking's accounts state flips together, or
+        # the unit is sold on the map with the booking still pending.
+        with transaction.atomic():
+            if action == 'approve':
+                # This is the ONLY point a unit actually becomes sold — Sales/CP approval
+                # leaves it 'hold' precisely so the map doesn't show it as final until now.
+                _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+                if _pids:
+                    Plot.objects.filter(id__in=_pids).update(status='sold')
+                b.accounts_status = 'approved'
+                b.accounts_approved_by = request.user
+                b.accounts_approved_at = timezone.now()
+                b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
+                from notifications import notify
+                if b.stm:
+                    unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                    notify(b.stm, 'accounts_booking_approved', 'Approved by Accounts',
+                           f'{b.client_name or "Your booking"} · Unit {unit} was approved by Accounts.', {'booking_id': b.id})
+            elif action == 'reject':
+                reason = (request.data.get('reason') or '').strip()
+                if not reason:
+                    return Response({'detail': 'Remarks are required to reject.'}, status=status.HTTP_400_BAD_REQUEST)
+                b.accounts_status = 'rejected'
+                b.accounts_rejected_reason = reason
+                b.accounts_rejected_by = request.user
+                b.accounts_rejected_at = timezone.now()
+                # Same fate as a Sales-level rejection: the plot(s) free up and the
+                # booking itself is marked rejected, not just its accounts stage.
+                b.status = 'rejected'
+                if b.loi_document:
+                    try: b.loi_document.delete(save=False)
+                    except Exception: pass
+                b.save(update_fields=['accounts_status', 'accounts_rejected_reason', 'accounts_rejected_by',
+                                       'accounts_rejected_at', 'status', 'loi_document'])
+                _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+                _release_plots(_pids, booking=b)
+                if b.closure_id:
+                    Closure.objects.filter(id=b.closure_id).delete()
+                from notifications import notify
+                if b.stm:
+                    unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                    notify(b.stm, 'accounts_booking_rejected', 'Rejected by Accounts',
+                           f'{b.client_name or "Your booking"} · Unit {unit} was rejected by Accounts: {reason}', {'booking_id': b.id})
+                _notify_accounts_rejection_to_sales(company, b, request.user, reason)
+            else:
+                return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
 
 
