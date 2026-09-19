@@ -46,6 +46,39 @@ from .serializers import (
 
 PAGE_SIZE = 25
 
+# ── Optional pagination ──────────────────────────────────────────────────────
+# These list endpoints used to serialise the whole table: My Conversions alone
+# pulled ~2,000 site visits and closures on every open, over mobile data. They
+# now page when the caller asks (?page=1&page_size=50) and still return a plain
+# list when it doesn't, so older app builds keep working unchanged.
+LIST_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
+def maybe_paginate(request, qs, serializer_cls, **ser_kwargs):
+    page = request.query_params.get('page')
+    if not page:
+        return Response(serializer_cls(qs, many=True, **ser_kwargs).data)
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        size = min(MAX_PAGE_SIZE, max(1, int(request.query_params.get('page_size') or LIST_PAGE_SIZE)))
+    except (TypeError, ValueError):
+        size = LIST_PAGE_SIZE
+    total = qs.count()
+    start = (page - 1) * size
+    rows = qs[start:start + size]
+    return Response({
+        'results': serializer_cls(rows, many=True, **ser_kwargs).data,
+        'count': total,
+        'page': page,
+        'page_size': size,
+        'has_next': start + size < total,
+    })
+
+
 
 # The staff hierarchy, most senior first. Everything at or above Manager carries
 # Manager's authority — a Director who could do less than the Manager reporting to
@@ -2241,7 +2274,7 @@ class FollowUpListView(APIView):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
-        return Response(FollowUpSerializer(qs, many=True).data)
+        return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), FollowUpSerializer)
 
     def post(self, request):
         ser = FollowUpSerializer(data=request.data)
@@ -2301,7 +2334,15 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
-        return Response(SiteVisitSerializer(qs, many=True).data)
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        # Headline counts without shipping the rows: the app's stat tiles used to
+        # be derived from the full list, which is the reason it downloaded it.
+        if request.query_params.get('counts_only') == 'true':
+            from django.db.models import Count
+            rows = qs.values('status').annotate(n=Count('id'))
+            return Response({r['status']: r['n'] for r in rows})
+        return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), SiteVisitSerializer)
 
     def post(self, request):
         ser = SiteVisitSerializer(data=request.data)
@@ -2407,7 +2448,9 @@ class ClosureListView(APIView):
             # chose that source silently drops out of the CP Closures tab once
             # approved.
             qs = qs.filter(cp_lead_q(prefix='lead__') | Q(bookings__source__iexact='channel partner')).distinct()
-        return Response(ClosureSerializer(qs, many=True).data)
+        if request.query_params.get('counts_only') == 'true':
+            return Response({'total': qs.count()})
+        return maybe_paginate(request, qs.order_by('-closure_date', '-id'), ClosureSerializer)
 
     def post(self, request):
         ser = ClosureSerializer(data=request.data)
