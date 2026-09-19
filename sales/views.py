@@ -1744,21 +1744,35 @@ def _release_plots(plot_ids, booking=None):
     the map, and a rep then drafted on it. `booking` is the one being released — its
     own revision chain is ignored, since a revision legitimately shares the unit with
     the version it replaces.
+
+    Exception: a plot whose pre_hold_status is 'resale' was already, deliberately,
+    taken off its old sold booking's books before this hold began — that 'sold'
+    booking is history being kept on purpose (see _reclaim_units_with_a_live_sale),
+    not a live claim, so it must not keep a later soft hold stuck forever. Kalrav 2
+    plots 64/65 got wedged exactly this way: re-held after being marked resale, the
+    stale hold outlived PLOT_HOLD_TIMEOUT by days because the old 'sold' booking kept
+    reading as still live. A 'pending' booking on a resale plot is a real live claim
+    and still blocks release.
     """
     if not plot_ids:
         return 0
     wanted = set(plot_ids)
+    resale_ids = set(Plot.objects.filter(id__in=wanted, pre_hold_status='resale')
+                      .values_list('id', flat=True))
     live = Booking.objects.filter(status__in=('pending', 'sold'))
     if booking is not None:
         # strict: only recorded revisions of this booking, never rows that merely look
         # alike. Freeing a unit is not the place for a guess.
         live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company, strict=True))
     still_held = set()
-    for b in live.only('id', 'plot_id', 'plot_ids'):
+    for b in live.only('id', 'plot_id', 'plot_ids', 'status'):
         held = set(b.plot_ids or [])
         if b.plot_id:
             held.add(b.plot_id)
-        still_held |= held & wanted
+        matched = held & wanted
+        if b.status == 'sold':
+            matched -= resale_ids
+        still_held |= matched
     free = wanted - still_held
     if not free:
         return 0
