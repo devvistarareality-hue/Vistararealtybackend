@@ -1932,8 +1932,14 @@ class PlotDetailView(APIView):
         # Cancelling is a real operation: it voids the signed LOI, deletes the
         # closure, reopens the lead and notifies the chain. It has to go through that
         # path, not through a status dropdown.
+        #
+        # 'resale' is exempt from this guard: it only ever applies to an already-sold
+        # plot and is explicitly designed to keep that sold booking untouched while
+        # relisting the unit (see moveToResaleFromPanel's confirm text). That booking
+        # will always show up as a "holder", so checking resale here made the Move to
+        # Resale button reject every plot it was ever used on.
         new_status = str(request.data.get('status') or '').strip()
-        if new_status and new_status != plot.status and new_status in ('available', 'resale'):
+        if new_status and new_status != plot.status and new_status == 'available':
             holder = next(
                 (b for b in Booking.objects.filter(company=plot.project.company,
                                                    status__in=('pending', 'sold'))
