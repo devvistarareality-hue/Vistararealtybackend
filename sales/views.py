@@ -1744,21 +1744,35 @@ def _release_plots(plot_ids, booking=None):
     the map, and a rep then drafted on it. `booking` is the one being released — its
     own revision chain is ignored, since a revision legitimately shares the unit with
     the version it replaces.
+
+    Exception: a plot whose pre_hold_status is 'resale' was already, deliberately,
+    taken off its old sold booking's books before this hold began — that 'sold'
+    booking is history being kept on purpose (see _reclaim_units_with_a_live_sale),
+    not a live claim, so it must not keep a later soft hold stuck forever. Kalrav 2
+    plots 64/65 got wedged exactly this way: re-held after being marked resale, the
+    stale hold outlived PLOT_HOLD_TIMEOUT by days because the old 'sold' booking kept
+    reading as still live. A 'pending' booking on a resale plot is a real live claim
+    and still blocks release.
     """
     if not plot_ids:
         return 0
     wanted = set(plot_ids)
+    resale_ids = set(Plot.objects.filter(id__in=wanted, pre_hold_status='resale')
+                      .values_list('id', flat=True))
     live = Booking.objects.filter(status__in=('pending', 'sold'))
     if booking is not None:
         # strict: only recorded revisions of this booking, never rows that merely look
         # alike. Freeing a unit is not the place for a guess.
         live = live.exclude(id__in=_revision_chain_ids(booking.id, booking.company, strict=True))
     still_held = set()
-    for b in live.only('id', 'plot_id', 'plot_ids'):
+    for b in live.only('id', 'plot_id', 'plot_ids', 'status'):
         held = set(b.plot_ids or [])
         if b.plot_id:
             held.add(b.plot_id)
-        still_held |= held & wanted
+        matched = held & wanted
+        if b.status == 'sold':
+            matched -= resale_ids
+        still_held |= matched
     free = wanted - still_held
     if not free:
         return 0
@@ -1918,8 +1932,14 @@ class PlotDetailView(APIView):
         # Cancelling is a real operation: it voids the signed LOI, deletes the
         # closure, reopens the lead and notifies the chain. It has to go through that
         # path, not through a status dropdown.
+        #
+        # 'resale' is exempt from this guard: it only ever applies to an already-sold
+        # plot and is explicitly designed to keep that sold booking untouched while
+        # relisting the unit (see moveToResaleFromPanel's confirm text). That booking
+        # will always show up as a "holder", so checking resale here made the Move to
+        # Resale button reject every plot it was ever used on.
         new_status = str(request.data.get('status') or '').strip()
-        if new_status and new_status != plot.status and new_status in ('available', 'resale'):
+        if new_status and new_status != plot.status and new_status == 'available':
             holder = next(
                 (b for b in Booking.objects.filter(company=plot.project.company,
                                                    status__in=('pending', 'sold'))
