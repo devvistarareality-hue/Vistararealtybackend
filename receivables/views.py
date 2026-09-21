@@ -524,8 +524,8 @@ def _read_rows(fileobj):
 
 
 def _check_rows(request, pid, rows):
-    """Validate receipt rows for one project. Each row names its account (grid
-    entry) or its plot (Excel file). Returns (ok, skipped); ok rows carry
+    """Validate receipt rows (from an uploaded Excel file) for one project. Each
+    row names its plot. Returns (ok, skipped); ok rows carry
     account_id. Same plot + date + amount as a receipt already on the account is
     a duplicate, so re-running an import adds nothing."""
     _sync(request)
@@ -614,44 +614,9 @@ class ARImportView(APIView):
         return _result(ok, skipped, commit)
 
 
-class ARBulkEntryView(APIView):
-    """Receipts typed into the on-screen grid, plot-wise within one project.
-    JSON {project_id, rows: [{line, account_id, paid_on, amount, mode, remarks}], commit}.
-    Preview first (nothing saved), then commit — same checks as the Excel import."""
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        if not has_ar_access(request.user):
-            return _deny()
-        pid = request.data.get('project_id')
-        raw = request.data.get('rows')
-        if not pid or not isinstance(raw, list) or not raw:
-            return Response({'detail': 'Choose a project and enter at least one payment.'}, status=status.HTTP_400_BAD_REQUEST)
-        if len(raw) > 2000:
-            return Response({'detail': 'Enter at most 2,000 payments at a time.'}, status=status.HTTP_400_BAD_REQUEST)
-        rows = []
-        for i, r in enumerate(raw, start=1):
-            r = r if isinstance(r, dict) else {}
-            try:
-                aid = int(r.get('account_id'))
-            except (TypeError, ValueError):
-                aid = None
-            rows.append({
-                'line': r.get('line') or i, 'account_id': aid, 'plot': str(r.get('plot') or '')[:40],
-                'paid_on': parse_date(r.get('paid_on')), 'amount': _d(r.get('amount')),
-                'mode': MODE_ALIASES.get(str(r.get('mode') or '').strip().lower(), ''),
-                'remarks': str(r.get('remarks') or '').strip()[:500],
-            })
-        ok, skipped = _check_rows(request, pid, rows)
-        commit = _wants_commit(request) and bool(ok) and not skipped
-        if commit:
-            _save_rows(request, ok, 'manual')
-        return _result(ok, skipped, commit)
-
-
 class ARImportTemplateView(APIView):
     """GET ?project_id= → an .xlsx with one row per approved plot of the project,
-    ready to fill in and upload (or to copy into the on-screen grid)."""
+    ready to fill in and upload on the Import receipts page."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

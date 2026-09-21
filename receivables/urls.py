@@ -11,6 +11,5 @@ urlpatterns = [
     path('receipts/<int:rid>/audit/', views.ARReceiptAuditView.as_view()),
     path('dashboard/', views.ARDashboardView.as_view()),
     path('import/', views.ARImportView.as_view()),
-    path('import/entries/', views.ARBulkEntryView.as_view()),
     path('import/template/', views.ARImportTemplateView.as_view()),
 ]
