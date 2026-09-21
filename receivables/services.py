@@ -37,7 +37,7 @@ def parse_date(s):
 
 def is_fully_approved(b: Booking) -> bool:
     """AR starts only once BOTH Sales (status='sold') and Accounts have approved."""
-    return b.status == 'sold' and (b.accounts_status or 'approved') == 'approved' and not b.cancelled_at
+    return b.status == 'sold' and b.accounts_status == 'approved' and not b.cancelled_at
 
 
 def legal_other_amount(b: Booking) -> Decimal:
@@ -105,12 +105,16 @@ def build_plan(b: Booking, legal_due=None):
 BALANCE_TOLERANCE = Decimal('10')
 
 
-def pending_revision_ids(booking_ids):
-    """Bookings (of the given ids) that have a newer revision still awaiting approval.
-    AR keeps such a deal on its last approved version — the money is still owed —
-    while the Bookings page, which shows only the newest revision, leaves it out."""
-    return set(Booking.objects.filter(revision_of_id__in=list(booking_ids), cancelled_at__isnull=True)
-               .exclude(approval_status__icontains='REJECT').values_list('revision_of_id', flat=True))
+def current_approved_booking_ids(bookings_qs):
+    """The bookings AR may show: the CURRENT version of each deal (the same
+    superseded-revision rule as the Accounts & Finance Bookings page), approved by
+    both Sales (status 'sold') and Accounts, and not cancelled. A deal whose newest
+    revision is still awaiting approval is therefore left out until it is approved,
+    exactly as on the Bookings page."""
+    from sales.views import _drop_superseded_revisions
+    return {b.id for b in _drop_superseded_revisions(bookings_qs).only('id', 'status', 'accounts_status', 'approval_status', 'cancelled_at')
+            if b.status == 'sold' and b.accounts_status == 'approved' and not b.cancelled_at
+            and 'CANCEL' not in str(b.approval_status or '').upper()}
 
 
 def has_schedule(lines) -> bool:
@@ -157,7 +161,7 @@ def sync_accounts(bookings_qs):
 
     latest = {}   # root id → (company_id, latest approved booking id, (revision_no, id))
     for r in rows:
-        if not (r['status'] == 'sold' and (r['accounts_status'] or 'approved') == 'approved' and not r['cancelled_at']):
+        if not (r['status'] == 'sold' and r['accounts_status'] == 'approved' and not r['cancelled_at']):
             continue
         root = _root_id(r['id'], parent)
         rank = (r['revision_no'] or 0, r['id'])

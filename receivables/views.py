@@ -16,8 +16,8 @@ from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
 from .models import ARAccount, ARReceipt, ARReceiptAudit
 from .permissions import has_ar_access
-from .services import (SUSPECT_BELOW, compute_account, expected_collectable, parse_date, pending_revision_ids,
-                       sync_accounts, _d)
+from .services import (SUSPECT_BELOW, compute_account, current_approved_booking_ids, expected_collectable,
+                       parse_date, sync_accounts, _d)
 
 ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
@@ -31,20 +31,28 @@ def _as_of(request):
     return parse_date(request.query_params.get('as_of')) or timezone.localdate()
 
 
-def _accounts_qs(request):
-    qs = scope_to_company(ARAccount.objects.all(), request.user)
+def _bookings_qs(request):
+    qs = scope_to_company(Booking.objects.all(), request.user)
     cid = request.query_params.get('company_id')
     if cid and is_platform_admin(request.user):
         qs = qs.filter(company_id=cid)
     return qs
 
 
-def _sync(request):
-    qs = scope_to_company(Booking.objects.all(), request.user)
+def _accounts_qs(request):
+    """The accounts AR shows and acts on: only deals whose current booking is
+    approved by both Sales and Accounts — the same set as the Accounts & Finance
+    Bookings page. Others (a revision awaiting approval, cancelled) keep their
+    account and receipts but are hidden until they qualify again."""
+    qs = scope_to_company(ARAccount.objects.all(), request.user)
     cid = request.query_params.get('company_id')
     if cid and is_platform_admin(request.user):
         qs = qs.filter(company_id=cid)
-    sync_accounts(qs.filter(status='sold'))
+    return qs.filter(booking_id__in=current_approved_booking_ids(_bookings_qs(request)))
+
+
+def _sync(request):
+    sync_accounts(_bookings_qs(request).filter(status='sold'))
 
 
 def _summary(acct, plan, r, mismatch):
@@ -84,8 +92,6 @@ def _summary(acct, plan, r, mismatch):
         'no_schedule': no_schedule,
         # A deal under ₹1 lakh is a mistyped amount, not a real sale.
         'suspect_amount': expected_collectable(b) < SUSPECT_BELOW,
-        # A newer revision of this deal is awaiting approval; AR shows the last approved one.
-        'revision_pending': bool(getattr(acct, '_rev_pending', False)),
     }
 
 
@@ -107,10 +113,8 @@ def _slim(qs):
 
 def _computed(qs, as_of):
     accts = list(_slim(qs).prefetch_related('receipts'))
-    pending = pending_revision_ids(a.booking_id for a in accts)
     out = []
     for acct in accts:
-        acct._rev_pending = acct.booking_id in pending
         receipts = [x for x in acct.receipts.all() if not x.is_deleted]
         plan, r, mismatch = compute_account(acct, as_of, receipts)
         out.append((acct, plan, r, mismatch, receipts))
@@ -156,7 +160,6 @@ class ARAccountView(APIView):
         as_of = _as_of(request)
         receipts = sorted(acct.receipts.filter(is_deleted=False).select_related('created_by'), key=lambda x: (x.paid_on, x.id))
         plan, r, mismatch = compute_account(acct, as_of, receipts)
-        acct._rev_pending = acct.booking_id in pending_revision_ids([acct.booking_id])
         data = _summary(acct, plan, r, mismatch)
         data.update({
             'as_of': as_of.isoformat(),
@@ -331,7 +334,7 @@ class ARDashboardView(APIView):
         totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
         forecast, order, rows = {}, [], []
-        issues = {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0, 'revision_pending': 0}
+        issues = {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0}
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
@@ -346,7 +349,6 @@ class ARDashboardView(APIView):
             issues['no_schedule'] += sm['no_schedule']
             issues['plan_mismatch'] += bool(sm['plan_mismatch'])
             issues['suspect_amount'] += sm['suspect_amount']
-            issues['revision_pending'] += sm['revision_pending']
             rows.append((sm, r.ageing.get('>180', ZERO)))
 
         def brief(sm, amount):

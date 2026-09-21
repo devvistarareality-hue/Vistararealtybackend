@@ -106,11 +106,14 @@ class ARApiTests(TestCase):
         ARReceipt.objects.create(account_id=a['id'], paid_on=date(2025, 8, 1), amount=D('100000'), mode='bank')
         self.booking.cancelled_at = timezone.now()
         self.booking.save()
-        a = self.acct()
-        self.assertEqual(a['status'], 'frozen')
-        self.assertEqual(a['received'], 100000)  # history kept
+        # No longer approved, so it leaves AR (like the Bookings page)…
+        self.assertEqual(self.api.get('/api/ar/accounts/').json()['results'], [])
         r = self.api.post(f"/api/ar/accounts/{a['id']}/receipts/", {'paid_on': '2025-09-01', 'amount': '5', 'mode': 'bank'}, format='json')
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 404)
+        # …but the account is frozen, not deleted, and its receipts are kept.
+        acct = ARAccount.objects.get(pk=a['id'])
+        self.assertEqual(acct.status, 'frozen')
+        self.assertEqual(acct.receipts.filter(is_deleted=False).count(), 1)
 
     def test_revision_replaces_plan_receipts_stay(self):
         a = self.acct()
@@ -239,7 +242,7 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertEqual(d['top_overdue'][0]['id'], self.id)
         self.assertEqual(d['top_over_180'][0]['amount'], 2150000)
         self.assertEqual(d['projects'], [{'id': self.project.id, 'name': 'Pratishtha'}])
-        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0, 'revision_pending': 0})
+        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0})
 
     def test_statement_is_print_ready_html(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '1234567', 'mode': 'cheque',
@@ -349,10 +352,20 @@ class ARMatchesBookingsTests(TestCase):
         ledger = self.api.get(f"/api/ar/accounts/{self.rows()[b.id]['id']}/").json()
         self.assertNotIn('balance', [p['kind'] for p in ledger['plan']])
 
-    def test_a_pending_revision_is_flagged(self):
+    def test_only_deals_approved_by_sales_and_accounts_are_shown(self):
         b = make_booking(self.co, self.project, plot='EOI-56')
-        self.assertFalse(self.rows()[b.id]['revision_pending'])
-        make_booking(self.co, self.project, plot='EOI-56', revision_of=b, status='pending', approval_status='REVISION R1 PENDING')
-        r = self.rows()[b.id]                                           # AR stays on the approved version…
-        self.assertTrue(r['revision_pending'])                          # …and says a revision is waiting
-        self.assertEqual(self.api.get('/api/ar/dashboard/').json()['issues']['revision_pending'], 1)
+        self.assertIn(b.id, self.rows())
+        # A revision awaiting approval: the deal leaves AR, as it leaves the Bookings page…
+        r1 = make_booking(self.co, self.project, plot='EOI-56', revision_of=b, revision_no=1, status='pending',
+                          approval_status='REVISION R1 PENDING')
+        self.assertNotIn(b.id, self.rows())
+        self.assertNotIn(r1.id, self.rows())
+        self.assertEqual(self.api.get('/api/ar/dashboard/').json()['accounts'], 0)
+        # …and comes back on the approved revision once Sales and Accounts approve it.
+        r1.status, r1.accounts_status, r1.approval_status = 'sold', 'approved', 'REVISION R1 APPROVED'
+        r1.save()
+        self.assertIn(r1.id, self.rows())
+
+    def test_blank_accounts_status_is_not_approved(self):
+        b = make_booking(self.co, self.project, plot='9', accounts_status='')
+        self.assertNotIn(b.id, self.rows())
