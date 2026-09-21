@@ -1,8 +1,9 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -84,6 +85,43 @@ class StatsView(APIView):
         leads_count = leads.count()
         converted_count = leads.filter(status='converted').count()
 
+        # Portfolio-state figures below are deliberately NOT scoped to the
+        # date filter above — "how many investors need a renew/payout
+        # decision right now" or "what's coming due" is a live snapshot, not
+        # a fact about investments made in a chosen date range. Same
+        # ownership scoping as `investors`, just without the date clause.
+        portfolio = _company_filtered(Investor.objects.select_related('scheme'), request)
+        if not manager:
+            portfolio = portfolio.filter(added_by=request.user)
+
+        # is_matured() is computed on the fly (nothing ever flips status to
+        # 'matured' — see the model) — an investor sitting active past its
+        # maturity date genuinely needs a Renew/Payout decision, which is a
+        # more useful bucket than the raw, effectively-unused 'matured' choice.
+        status_breakdown = {'active': 0, 'due_for_renewal': 0, 'redeemed': 0, 'premature_redeemed': 0}
+        for inv in portfolio:
+            if inv.status == 'active' and inv.is_matured():
+                status_breakdown['due_for_renewal'] += 1
+            else:
+                status_breakdown[inv.status] = status_breakdown.get(inv.status, 0) + 1
+
+        today = date.today()
+        soon = today + timedelta(days=30)
+        upcoming = portfolio.filter(status='active', maturity_date__gte=today, maturity_date__lte=soon)
+        upcoming_amount = sum((i.amount_invested or Decimal('0') for i in upcoming), Decimal('0'))
+
+        followups = _company_filtered(FollowUp.objects.all(), request, field='lead__company').filter(status='pending')
+        if not manager:
+            followups = followups.filter(assigned_to=request.user)
+        now = timezone.now()
+        followups_overdue = followups.filter(scheduled_at__lt=now).count()
+        followups_today = followups.filter(scheduled_at__date=today).count()
+
+        referrals = ReferralReward.objects.filter(investor__in=portfolio)
+        referral_pending = referrals.filter(status='pending')
+        referral_paid_amount = sum((r.amount or Decimal('0') for r in referrals.filter(status='paid')), Decimal('0'))
+        referral_pending_amount = sum((r.amount or Decimal('0') for r in referral_pending), Decimal('0'))
+
         data = {
             'total_invested': total_invested,
             'investor_count': investors.count(),
@@ -94,9 +132,23 @@ class StatsView(APIView):
             'by_scheme': list(by_scheme.values()),
             'leads_count': leads_count,
             'converted_count': converted_count,
+            'investor_status_breakdown': status_breakdown,
+            'upcoming_maturities_count': upcoming.count(),
+            'upcoming_maturities_amount': upcoming_amount,
+            'followups_due_today': followups_today,
+            'followups_overdue': followups_overdue,
+            'referral_pending_count': referral_pending.count(),
+            'referral_pending_amount': referral_pending_amount,
+            'referral_paid_amount': referral_paid_amount,
         }
         if manager:
             data['active_scheme_count'] = _company_filtered(Scheme.objects.filter(is_active=True), request).count()
+            data['pending_approval_count'] = _investor_visibility_qs(request).filter(approval_status='pending').count()
+            top = portfolio.order_by('-amount_invested')[:5]
+            data['top_investors'] = [
+                {'name': i.name, 'amount': i.amount_invested, 'scheme': i.scheme.name, 'status': i.status}
+                for i in top
+            ]
         return Response(data)
 
 
