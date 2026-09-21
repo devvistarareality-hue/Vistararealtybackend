@@ -1030,21 +1030,26 @@ def _merge_into_existing_lead(existing, validated, user, can_assign):
     previous STM/CP, by design: two people chasing the same contact should
     collapse onto one record, not fork into two.
 
-    If the lead already has a telecaller and it's an STM/CP taking over, the
-    telecaller's independent work just got confirmed by someone else finding
-    the same contact — that's exactly the signal 'warm' already means, so it's
-    set automatically (reusing the same warm-transfer path a telecaller
-    picking 'warm' themselves triggers, further down in post()).
+    If the lead has a telecaller but NO STM/CP yet and an STM/CP is the one
+    taking it over, that's the first handoff — the telecaller's independent
+    work just got confirmed by someone else finding the same contact, which
+    is exactly the signal 'warm' already means, so it's set automatically
+    (reusing the same warm-transfer path a telecaller picking 'warm'
+    themselves triggers, further down in post()). If an STM/CP is ALREADY
+    assigned, that handoff already happened — a later STM/CP taking over from
+    the previous one is a pure ownership swap on the STM side; the telecaller
+    side is left untouched.
     """
     old_tc_status = existing.telecaller_status
     if is_cp(user) or is_stm(user):
+        first_handoff = existing.telecaller_id and not existing.stm_id
         existing.stm = user
         existing.stm_assigned_at = timezone.now()
         if validated.get('stm_status'):
             existing.stm_status = validated['stm_status']
         if validated.get('stm_remarks'):
             existing.stm_remarks = validated['stm_remarks']
-        if existing.telecaller_id and existing.telecaller_status != 'warm':
+        if first_handoff and existing.telecaller_status != 'warm':
             existing.telecaller_status = 'warm'
     elif is_telecaller(user):
         existing.telecaller = user
