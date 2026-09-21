@@ -120,3 +120,42 @@ class RuleTests(SimpleTestCase):
         r = compute(plan, [Receipt(1, date(2026, 1, 1), D('150'))], self.AS_OF)
         self.assertEqual([s.status for s in r.lines], ['completed', 'partial'])
         self.assertEqual(rupees(r.outstanding), 50)
+
+
+class RealLoiShapeTests(SimpleTestCase):
+    """Plans exactly as production LOIs store them (Kalrav 2 plot 10, read from the
+    live database): sale-deed + NSD installments, and the extra charges as an
+    installment numbered "Extra" that already includes stamp duty and registration."""
+
+    class B:  # a stand-in with just the fields build_plan reads
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    def booking(self):
+        return self.B(
+            installments=[
+                {'no': 1, 'date': '2025-11-12', 'amt': 2889000},
+                {'no': 1, 'date': '2025-08-01', 'amt': 100000, 'isNsd': True},
+                {'no': 2, 'date': '2025-09-25', 'amt': 4050000, 'isNsd': True},
+                {'no': 3, 'date': '2025-09-30', 'amt': 2500000, 'isNsd': True},
+                {'no': 4, 'date': '2025-10-12', 'amt': 4875000, 'isNsd': True},
+                {'no': 5, 'date': '2025-11-12', 'amt': 1985999, 'isNsd': True},
+                {'no': 'Extra', 'date': '2027-03-31', 'amt': 706555},
+            ],
+            extra_work_inst=[], total_extra=D('706555'), stamp_duty=D('53361'), reg_fees=D('12390'),
+            final_amount=D('17106554'),
+        )
+
+    def test_extra_installment_is_the_legal_line_not_added_twice(self):
+        from .services import build_plan, expected_collectable
+        b = self.booking()
+        plan = build_plan(b)
+        self.assertEqual([l.no for l in plan], ['1', 'N1', 'N2', 'N3', 'N4', 'N5', 'L'])
+        legal = plan[-1]
+        self.assertEqual(legal.amount, D('640804'))            # 7,06,555 − 53,361 − 12,390
+        self.assertEqual(legal.due, date(2027, 3, 31))          # the LOI's own date
+        self.assertEqual(sum(l.amount for l in plan), expected_collectable(b))  # no mismatch
+
+    def test_a_date_set_by_accounts_overrides_the_loi(self):
+        from .services import build_plan
+        self.assertEqual(build_plan(self.booking(), date(2026, 6, 30))[-1].due, date(2026, 6, 30))

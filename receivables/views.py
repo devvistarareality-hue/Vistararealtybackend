@@ -71,12 +71,30 @@ def _summary(acct, plan, r, mismatch):
         'legal_due_date': acct.legal_due_date.isoformat() if acct.legal_due_date else None,
         # The plan should add up to Total Deal − Stamp − Reg; flag it when it doesn't
         # so Accounts can see the LOI schedule doesn't cover the whole deal.
-        'plan_mismatch': rupees(mismatch) if abs(mismatch) >= 1 else 0,
+        # Installment amounts are typed by hand, so a few rupees of rounding is normal;
+        # only a real gap (over ₹10) is worth a warning.
+        'plan_mismatch': rupees(mismatch) if abs(mismatch) > 10 else 0,
     }
 
 
+# Just the booking columns the register and ledger use. A Booking row carries ~30
+# encrypted fields and each one is decrypted on load; the register loads every
+# account, so loading only these is most of its speed.
+_BOOKING_COLS = (
+    'booking__id', 'booking__company_id', 'booking__project_id', 'booking__plot_id', 'booking__plot_numbers',
+    'booking__client_name', 'booking__phone', 'booking__booking_date', 'booking__final_amount',
+    'booking__stamp_duty', 'booking__reg_fees', 'booking__total_extra', 'booking__installments',
+    'booking__extra_work_inst', 'booking__cancelled_at', 'booking__project__name', 'booking__plot__number',
+)
+_ACCOUNT_COLS = ('id', 'company_id', 'root_booking_id', 'booking_id', 'status', 'frozen_at', 'legal_due_date')
+
+
+def _slim(qs):
+    return qs.select_related('booking', 'booking__project', 'booking__plot').only(*_ACCOUNT_COLS, *_BOOKING_COLS)
+
+
 def _computed(qs, as_of):
-    qs = qs.select_related('booking', 'booking__project', 'booking__plot').prefetch_related('receipts')
+    qs = _slim(qs).prefetch_related('receipts')
     out = []
     for acct in qs:
         receipts = [x for x in acct.receipts.all() if not x.is_deleted]
@@ -113,7 +131,7 @@ class ARAccountView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _get(self, request, pk):
-        return _accounts_qs(request).select_related('booking', 'booking__project', 'booking__plot').filter(pk=pk).first()
+        return _slim(_accounts_qs(request)).filter(pk=pk).first()
 
     def get(self, request, pk):
         if not has_ar_access(request.user):

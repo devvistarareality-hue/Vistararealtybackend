@@ -63,8 +63,15 @@ def build_plan(b: Booking, legal_due=None):
         lines.append(PlanLine(key, (prefix.upper().rstrip('-') + no) if prefix else no, label,
                               parse_date(inst.get('date')), amt, kind))
 
+    # Most LOIs carry the extra charges as their own installment, no="Extra", for
+    # the whole of total_extra — stamp duty and registration included. That line
+    # IS "Legal & Other Charges": it is collected less stamp and reg (paid to the
+    # government directly), and it must not be added a second time.
+    extra_inst = None
     for inst in (b.installments or []):
-        if inst.get('isExtraWork'):
+        if str(inst.get('no') or '').strip().lower() == 'extra':
+            extra_inst = inst
+        elif inst.get('isExtraWork'):
             add(inst, 'extra', 'e-')
         elif inst.get('isNsd'):
             add(inst, 'nsd', 'n-')
@@ -73,9 +80,15 @@ def build_plan(b: Booking, legal_due=None):
     for inst in (b.extra_work_inst or []):
         add(inst, 'extra', 'e-')
 
-    legal = legal_other_amount(b)
+    if extra_inst is not None:
+        legal = max(ZERO, _d(extra_inst.get('amt')) - _d(b.stamp_duty) - _d(b.reg_fees))
+        # The LOI's date applies unless Accounts set one (sale deed / possession).
+        due = legal_due or parse_date(extra_inst.get('date'))
+    else:
+        legal = legal_other_amount(b)
+        due = legal_due
     if legal > 0:
-        lines.append(PlanLine('legal', 'L', 'Legal & Other Charges', legal_due, legal, 'legal'))
+        lines.append(PlanLine('legal', 'L', 'Legal & Other Charges', due, legal, 'legal'))
     return lines
 
 
@@ -83,42 +96,64 @@ def expected_collectable(b: Booking) -> Decimal:
     return _d(b.final_amount) - _d(b.stamp_duty) - _d(b.reg_fees)
 
 
-def root_of(b: Booking) -> Booking:
+# Only plain columns: loading a Booking normally decrypts ~30 encrypted fields,
+# and the sync looks at every sold booking on every register load.
+_SYNC_FIELDS = ('id', 'company_id', 'status', 'accounts_status', 'cancelled_at', 'revision_of_id', 'revision_no')
+
+
+def _root_id(bid, parent):
     seen = set()
-    while b.revision_of_id and b.revision_of_id not in seen:
-        seen.add(b.id)
-        b = b.revision_of
-    return b
+    while parent.get(bid) and bid not in seen:
+        seen.add(bid)
+        bid = parent[bid]
+    return bid
 
 
 @transaction.atomic
 def sync_accounts(bookings_qs):
     """Make sure every fully-approved booking has an AR account pointing at the
     latest approved booking of its revision chain, and freeze accounts whose deal
-    was cancelled. Idempotent — safe to call on every register load."""
-    approved = [b for b in bookings_qs.select_related('revision_of') if is_fully_approved(b)]
-    latest = {}
-    for b in approved:
-        root = root_of(b)
-        cur = latest.get(root.id)
-        if cur is None or (b.revision_no or 0, b.id) > (cur[1].revision_no or 0, cur[1].id):
-            latest[root.id] = (root, b)
+    was cancelled. Idempotent and cheap — a few queries, no decryption, no
+    per-row inserts — because it runs on every register load."""
+    rows = list(bookings_qs.values(*_SYNC_FIELDS))
+    # Revision chains can reach outside the queryset (an older root that was
+    # later cancelled/revised), so resolve parents for everything referenced.
+    parent = {r['id']: r['revision_of_id'] for r in rows}
+    missing = {r['revision_of_id'] for r in rows if r['revision_of_id'] and r['revision_of_id'] not in parent}
+    while missing:
+        more = list(Booking.objects.filter(id__in=missing).values('id', 'revision_of_id'))
+        for m in more:
+            parent[m['id']] = m['revision_of_id']
+        missing = {m['revision_of_id'] for m in more if m['revision_of_id'] and m['revision_of_id'] not in parent}
 
-    existing = {a.root_booking_id: a for a in ARAccount.objects.filter(root_booking_id__in=list(latest))}
-    for root_id, (root, b) in latest.items():
-        acct = existing.get(root_id)
+    latest = {}   # root id → (company_id, latest approved booking id, (revision_no, id))
+    for r in rows:
+        if not (r['status'] == 'sold' and (r['accounts_status'] or 'approved') == 'approved' and not r['cancelled_at']):
+            continue
+        root = _root_id(r['id'], parent)
+        rank = (r['revision_no'] or 0, r['id'])
+        if root not in latest or rank > latest[root][2]:
+            latest[root] = (r['company_id'], r['id'], rank)
+
+    existing = {a.root_booking_id: a for a in ARAccount.objects.filter(root_booking_id__in=list(latest)).only(
+        'id', 'root_booking_id', 'booking_id', 'status')}
+    new_accounts, repoint = [], []
+    for root, (company_id, bid, _) in latest.items():
+        acct = existing.get(root)
         if acct is None:
-            ARAccount.objects.create(company_id=b.company_id, root_booking=root, booking=b)
-        elif acct.booking_id != b.id and acct.status == 'active':
+            new_accounts.append(ARAccount(company_id=company_id, root_booking_id=root, booking_id=bid))
+        elif acct.booking_id != bid and acct.status == 'active':
             # A revision was approved: the plan follows it, receipts stay put.
-            acct.booking = b
-            acct.save(update_fields=['booking', 'updated_at'])
+            acct.booking_id = bid
+            repoint.append(acct)
+    if new_accounts:
+        ARAccount.objects.bulk_create(new_accounts, ignore_conflicts=True)
+    if repoint:
+        ARAccount.objects.bulk_update(repoint, ['booking'])
 
     # Cancelled deals: freeze, keeping receipts and history.
-    for acct in ARAccount.objects.filter(status='active', booking__cancelled_at__isnull=False):
-        acct.status = 'frozen'
-        acct.frozen_at = timezone.now()
-        acct.save(update_fields=['status', 'frozen_at', 'updated_at'])
+    ARAccount.objects.filter(status='active', booking__cancelled_at__isnull=False).update(
+        status='frozen', frozen_at=timezone.now())
 
 
 def compute_account(acct: ARAccount, as_of=None, receipts=None):
