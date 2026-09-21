@@ -16,9 +16,7 @@ from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
 from .models import ARAccount, ARReceipt, ARReceiptAudit
 from .permissions import has_ar_access
-from .templatetags.ar import inr
-from .services import (SUSPECT_BELOW, booking_has_schedule, compute_account, expected_collectable,
-                       load_schedule, parse_date, schedule_target, sync_accounts, _d)
+from .services import SUSPECT_BELOW, compute_account, expected_collectable, parse_date, sync_accounts, _d
 
 ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
@@ -83,8 +81,6 @@ def _summary(acct, plan, r, mismatch):
         # entered): AR can't track dues until Sales enters one, so say that plainly
         # instead of showing a huge "plan mismatch".
         'no_schedule': no_schedule,
-        # Schedule entered in AR (booking had none).
-        'ar_schedule': any(l.key.startswith('s') and l.kind == 'inst' for l in plan),
         # A deal under ₹1 lakh is a mistyped amount, not a real sale.
         'suspect_amount': expected_collectable(b) < SUSPECT_BELOW,
     }
@@ -99,8 +95,7 @@ _BOOKING_COLS = (
     'booking__stamp_duty', 'booking__reg_fees', 'booking__total_extra', 'booking__installments',
     'booking__extra_work_inst', 'booking__cancelled_at', 'booking__project__name', 'booking__plot__number',
 )
-_ACCOUNT_COLS = ('id', 'company_id', 'root_booking_id', 'booking_id', 'status', 'frozen_at', 'legal_due_date',
-                 'schedule', 'schedule_at', 'schedule_by')
+_ACCOUNT_COLS = ('id', 'company_id', 'root_booking_id', 'booking_id', 'status', 'frozen_at', 'legal_due_date')
 
 
 def _slim(qs):
@@ -179,20 +174,15 @@ class ARAccountView(APIView):
             'overpaid_credit': rupees(r.overpaid_credit),
             'month_forecast': [{'label': lbl, 'amount': rupees(v)} for lbl, v in r.month_forecast],
         })
-        data.update(_schedule_info(acct))
         return Response(data)
 
     def patch(self, request, pk):
-        """Set (or clear) the Legal & Other Charges due date, or the AR schedule."""
+        """Set (or clear) the due date of the Legal & Other Charges line."""
         if not has_ar_access(request.user):
             return _deny()
         acct = self._get(request, pk)
         if not acct:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        if 'schedule' in request.data:
-            err = _save_schedule(acct, request.data.get('schedule'), request.user)
-            if err:
-                return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
         if 'legal_due_date' in request.data:
             raw = request.data.get('legal_due_date')
             d = parse_date(raw) if raw else None
@@ -201,51 +191,6 @@ class ARAccountView(APIView):
             acct.legal_due_date = d
             acct.save(update_fields=['legal_due_date', 'updated_at'])
         return self.get(request, pk)
-
-
-def _schedule_info(acct):
-    b = acct.booking
-    own = booking_has_schedule(b)
-    return {
-        # Only a booking with no installments of its own can be scheduled in AR.
-        'schedule_editable': not own and acct.status == 'active',
-        'schedule_target': rupees(schedule_target(b)),
-        'schedule_rows': [] if own else load_schedule(acct),
-        'schedule_by': acct.schedule_by.name if acct.schedule_by_id else '',
-        'schedule_at': acct.schedule_at.isoformat() if acct.schedule_at else None,
-    }
-
-
-def _save_schedule(acct, rows, user):
-    """Validate and store an AR schedule. Returns an error message, or None."""
-    if acct.status != 'active':
-        return 'This booking was cancelled — its account is frozen.'
-    if booking_has_schedule(acct.booking):
-        return 'This booking has its own installment schedule from the LOI. Change it in Sales.'
-    if rows in (None, '', []):
-        acct.schedule, acct.schedule_by, acct.schedule_at = '', user, timezone.now()
-        acct.save(update_fields=['schedule', 'schedule_by', 'schedule_at', 'updated_at'])
-        return None
-    if not isinstance(rows, list) or len(rows) > 60:
-        return 'Send the schedule as a list of installments.'
-    clean, total = [], ZERO
-    for i, row in enumerate(rows, start=1):
-        d = parse_date((row or {}).get('date'))
-        a = _d((row or {}).get('amount'))
-        if not d:
-            return f'Installment {i} needs a due date.'
-        if a <= 0:
-            return f'Installment {i} needs an amount greater than zero.'
-        clean.append({'date': d.isoformat(), 'amount': str(a)})
-        total += a
-    target = schedule_target(acct.booking)
-    if abs(total - target) > 10:
-        return (f'The installments add up to {inr(total)}, but they must add up to {inr(target)} '
-                f'(Total deal − stamp duty − registration − Legal & Other Charges).')
-    clean.sort(key=lambda x: x['date'])
-    acct.schedule, acct.schedule_by, acct.schedule_at = json.dumps(clean), user, timezone.now()
-    acct.save(update_fields=['schedule', 'schedule_by', 'schedule_at', 'updated_at'])
-    return None
 
 
 def _snap(rc):

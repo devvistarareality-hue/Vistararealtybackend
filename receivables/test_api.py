@@ -188,8 +188,8 @@ class ARApiTests(TestCase):
 
 
 class ARScheduleAndReportsTests(TestCase):
-    """Bookings with no installments (every Pratishtha flat), the AR-entered
-    schedule, the issue flags, the dashboard and the printable statement."""
+    """Bookings with no installments (every Pratishtha flat), the issue flags,
+    the dashboard and the printable statement."""
 
     def setUp(self):
         self.co = Company.objects.create(code='VIS', name='Vistara Realty')
@@ -215,36 +215,11 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertEqual([p['kind'] for p in d['plan']], ['legal', 'balance'])
         self.assertEqual(d['plan'][-1]['amount'], 2650000)             # 27,50,000 − legal 1,00,000
         self.assertEqual(d['net_interest'], 0)
-        self.assertTrue(d['schedule_editable'])
-        self.assertEqual(d['schedule_target'], 2650000)
+        self.assertNotIn('schedule_editable', d)             # no AR-side schedule: Sales owns it
 
-    def test_ar_schedule_must_add_up_then_drives_interest(self):
-        url = f'/api/ar/accounts/{self.id}/'
-        bad = self.api.patch(url, {'schedule': [{'date': '2026-01-01', 'amount': 1000000}]}, format='json')
-        self.assertEqual(bad.status_code, 400)
-        self.assertIn('26,50,000', bad.json()['detail'])
-        ok = self.api.patch(url, {'schedule': [{'date': '2026-06-01', 'amount': 1650000},
-                                               {'date': '2026-01-01', 'amount': 1000000}]}, format='json')
-        self.assertEqual(ok.status_code, 200)
-        d = self.ledger()
-        self.assertFalse(d['no_schedule'])
-        self.assertTrue(d['ar_schedule'])
-        self.assertEqual([(p['no'], p['due']) for p in d['plan'][:2]], [('1', '2026-01-01'), ('2', '2026-06-01')])
-        self.assertNotIn('balance', [p['kind'] for p in d['plan']])
-        self.assertEqual(d['overdue'], 2650000)
-        self.assertGreater(d['net_interest'], 0)
-        self.assertEqual(d['schedule_by'], 'AR User')
-        # Clearing puts the balance line back.
-        self.api.patch(url, {'schedule': []}, format='json')
-        self.assertTrue(self.ledger()['no_schedule'])
-
-    def test_a_booking_with_its_own_schedule_cannot_be_scheduled_in_ar(self):
-        own = make_booking(self.co, self.project, plot='10')
-        rows = self.api.get('/api/ar/accounts/').json()['results']
-        aid = next(r['id'] for r in rows if r['booking_id'] == own.id)
-        r = self.api.patch(f'/api/ar/accounts/{aid}/', {'schedule': [{'date': '2026-01-01', 'amount': 1}]}, format='json')
-        self.assertEqual(r.status_code, 400)
-        self.assertFalse(self.api.get(f'/api/ar/accounts/{aid}/').json()['schedule_editable'])
+    def test_the_schedule_cannot_be_set_from_ar(self):
+        self.api.patch(f'/api/ar/accounts/{self.id}/', {'schedule': [{'date': '2026-01-01', 'amount': 2650000}]}, format='json')
+        self.assertTrue(self.ledger()['no_schedule'])       # ignored — only Sales can add installments
 
     def test_suspect_amount_flag(self):
         make_booking(self.co, self.project, plot='51', final_amount=D('765'), total_extra=D('0'), installments=[])
@@ -254,7 +229,8 @@ class ARScheduleAndReportsTests(TestCase):
 
     def test_dashboard(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '500000', 'mode': 'bank'}, format='json')
-        self.api.patch(f'/api/ar/accounts/{self.id}/', {'schedule': [{'date': '2026-01-01', 'amount': 2650000}]}, format='json')
+        self.flat.installments = [{'no': 1, 'date': '2026-01-01', 'amt': 2650000}]   # Sales adds the schedule
+        self.flat.save()
         d = self.api.get('/api/ar/dashboard/?as_of=2026-09-21').json()
         self.assertEqual(d['accounts'], 1)
         self.assertEqual(d['totals']['received'], 500000)

@@ -8,7 +8,7 @@ one ARReceipt per payment, entered once. Allocation, interest, ageing and status
 are all computed (see engine.py), never typed, so they cannot drift.
 
 Everything about a payment is encrypted at rest — amount, date, mode, remarks,
-the audit snapshots, the AR schedule and the Legal & Other due date. So nothing
+the audit snapshots and the Legal & Other due date. So nothing
 is summed, filtered or ordered in SQL; the engine works in Python.
 """
 from django.db import models
@@ -30,10 +30,9 @@ class ARAccount(models.Model):
     # "Legal & Other Charges" are due at sale deed or possession, whichever is
     # earlier — unknown at booking time. No date means no interest until set.
     legal_due_date = EncryptedDateField(null=True, blank=True)
-    # Some bookings carry no dated installments at all (every Pratishtha flat: its
-    # form has a Regular / Down Payment plan but no schedule). For those only,
-    # Accounts enters the schedule here — JSON [{"date": "YYYY-MM-DD", "amount": "…"}].
-    # A booking that has its own schedule always wins; this is then ignored.
+    # No longer used: the schedule is owned by Sales (the booking's installments),
+    # and AR cannot set one. Kept, always empty, so that deploying this code and
+    # migrating the shared database never race each other; drop in a later release.
     schedule = EncryptedTextField(blank=True, default='')
     schedule_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     schedule_at = models.DateTimeField(null=True, blank=True)
