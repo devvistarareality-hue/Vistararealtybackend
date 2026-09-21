@@ -437,7 +437,8 @@ class ARStatementView(APIView):
         sm = _summary(acct, plan, r, mismatch)
         fmt = lambda d: d.strftime('%d/%m/%Y') if d else '—'
         html = render_to_string('receivables/statement.html', {
-            'company': acct.company, 's': sm, 'as_of': fmt(as_of), 'booked': fmt(acct.booking.booking_date), 'generated': timezone.localtime().strftime('%d/%m/%Y %I:%M %p'),
+            'company': acct.company, 's': sm, 'as_of': fmt(as_of), 'booked': fmt(acct.booking.booking_date),
+            'pct_bar': max(0, min(100, sm['pct_realised'])), 'generated': timezone.localtime().strftime('%d/%m/%Y %I:%M %p'),
             'plan': [{'no': x.line.no, 'label': x.line.label, 'due': fmt(x.line.due), 'amount': rupees(x.line.amount),
                       'paid': rupees(x.paid), 'pending': rupees(x.remaining), 'status': x.status} for x in r.lines],
             # Remarks are internal notes ("collected by …"), not for the client.
