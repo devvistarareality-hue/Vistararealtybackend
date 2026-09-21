@@ -6,11 +6,13 @@ insertion sorts and its FIFO loop — kept deliberately literal, NOT reusing any
 of engine.py. The tests run both on the workbook's own plots, on the live ERP
 booking, and on thousands of random plans, and require the same interest.
 
-Two documented differences are outside the macro and excluded here:
+Three documented differences are outside the macro and excluded here:
   * overpaid money: the workbook reads a hand-kept "Net Overpaid interst" column;
     engine.py computes 1%/month to date instead;
   * an installment with no due date: the macro has no such case (an empty Excel
-    date is 30/12/1899), engine.py charges nothing until a date is set.
+    date is 30/12/1899), engine.py charges nothing until a date is set;
+  * Legal & Other Charges paid early earn no credit in engine.py (company
+    decision, 21/09/26); the macro gives 1%/month on them like any installment.
 """
 import random
 from datetime import date, timedelta
@@ -153,3 +155,12 @@ class VbaParityTests(SimpleTestCase):
             vba = vba_interest(plan, payments, today)
             eng = engine_installment_interest(plan, payments, today)
             self.assertAlmostEqual(vba, eng, delta=0.01, msg=f'case {case}: plan={plan} paid={payments} today={today}')
+
+    def test_erp_plot10_with_the_no_legal_credit_rule(self):
+        """The same plot with the legal line marked as legal: the 3,17,000 paid
+        258 days before 31/03/2027 no longer earns 27,262 of credit."""
+        lines = [PlanLine(str(i), str(n), '', due, D(str(amt)), 'legal' if n == 'L' else 'inst')
+                 for i, (n, due, amt) in enumerate(ERP_PLOT10)]
+        recs = [Receipt(i, d, D(str(a))) for i, (d, a) in enumerate(PLOT10_PAID)]
+        r = compute(lines, recs, LEDGER_DATE)
+        self.assertEqual(rupees(r.net_interest), 551867)   # 5,24,604 + 27,262.3 of credit, rounded

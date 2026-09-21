@@ -159,3 +159,22 @@ class RealLoiShapeTests(SimpleTestCase):
     def test_a_date_set_by_accounts_overrides_the_loi(self):
         from .services import build_plan
         self.assertEqual(build_plan(self.booking(), date(2026, 6, 30))[-1].due, date(2026, 6, 30))
+
+
+class LegalNoEarlyCreditTests(SimpleTestCase):
+    """Legal & Other Charges paid early earn no credit; paid late they are charged."""
+
+    def test_early_legal_payment_earns_nothing(self):
+        plan = [PlanLine('legal', 'L', 'Legal', date(2027, 3, 31), D('640804'), 'legal')]
+        r = compute(plan, [Receipt(1, date(2026, 7, 16), D('317000'))], date(2026, 9, 21))
+        self.assertEqual(rupees(r.net_interest), 0)          # was −27,262 (258 days early)
+
+    def test_late_legal_payment_is_still_charged(self):
+        plan = [PlanLine('legal', 'L', 'Legal', date(2026, 1, 1), D('100000'), 'legal')]
+        r = compute(plan, [Receipt(1, date(2026, 1, 31), D('100000'))], date(2026, 9, 21))
+        self.assertEqual(rupees(r.net_interest), rupees(D('100000') * D('0.02') * 30 / 30))
+
+    def test_installments_still_get_early_credit(self):
+        plan = [PlanLine('1', '1', 'I1', date(2026, 1, 31), D('100000'))]
+        r = compute(plan, [Receipt(1, date(2026, 1, 1), D('100000'))], date(2026, 9, 21))
+        self.assertEqual(rupees(r.net_interest), -1000)

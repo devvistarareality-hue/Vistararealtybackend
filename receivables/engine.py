@@ -15,6 +15,9 @@ Plot Master macros) exactly:
   same 10-day grace) up to the as-of date.
 * Money received beyond the whole plan (overpaid) earns the 1% credit from the
   day it was paid to the as-of date.
+* Legal & Other Charges earn no early-payment credit (company decision,
+  21/09/26): money paid ahead of that line's date is simply held against it.
+  Paid late, it is charged like any installment.
 * A line with no due date (Legal & Other Charges before a date is set) absorbs
   money like any other line but carries no interest either way.
 
@@ -145,6 +148,8 @@ def compute(plan: List[PlanLine], receipts: List[Receipt], as_of: date, forecast
             if ln.due is not None:
                 days = (pays[ai].paid_on - ln.due).days
                 intr = _slice_interest(alloc, days)
+                if ln.kind == 'legal' and intr < 0:
+                    intr = ZERO
             else:
                 days, intr = None, ZERO
             rows.append(InterestRow(ln.key, ln.no, ln.due, pays[ai].paid_on, alloc, days, intr, pays[ai].id))
