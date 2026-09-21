@@ -37,7 +37,7 @@ def parse_date(s):
 
 def is_fully_approved(b: Booking) -> bool:
     """AR starts only once BOTH Sales (status='sold') and Accounts have approved."""
-    return b.status == 'sold' and (b.accounts_status or 'approved') == 'approved' and not b.cancelled_at
+    return b.status == 'sold' and b.accounts_status == 'approved' and not b.cancelled_at
 
 
 def legal_other_amount(b: Booking) -> Decimal:
@@ -90,14 +90,31 @@ def build_plan(b: Booking, legal_due=None):
     if legal > 0:
         lines.append(PlanLine('legal', 'L', 'Legal & Other Charges', due, legal, 'legal'))
 
-    if not has_schedule(lines):
-        # No dated installments on the booking: the unscheduled part becomes one
-        # undated "Balance" line, so the account's total is always the whole deal.
-        # It carries no interest and shows under "No date" until Sales adds a schedule.
-        gap = expected_collectable(b) - sum((l.amount for l in lines), ZERO)
-        if gap > 0:
-            lines.append(PlanLine('balance', '—', 'Balance — no schedule yet', None, gap, 'balance'))
+    # Whatever the booking's schedule doesn't cover (no installments at all, or an
+    # EOI whose schedule is only the token) becomes one undated "Balance" line, so
+    # the account always carries the whole deal less stamp and registration — the
+    # same figure the Bookings page starts from. No interest until Sales schedules it.
+    # A few rupees of rounding in hand-typed installments is not a real gap.
+    gap = expected_collectable(b) - sum((l.amount for l in lines), ZERO)
+    if gap > BALANCE_TOLERANCE:
+        label = 'Balance — not in the LOI schedule' if has_schedule(lines) else 'Balance — no schedule yet'
+        lines.append(PlanLine('balance', '—', label, None, gap, 'balance'))
     return lines
+
+
+BALANCE_TOLERANCE = Decimal('10')
+
+
+def current_approved_booking_ids(bookings_qs):
+    """The bookings AR may show: the CURRENT version of each deal (the same
+    superseded-revision rule as the Accounts & Finance Bookings page), approved by
+    both Sales (status 'sold') and Accounts, and not cancelled. A deal whose newest
+    revision is still awaiting approval is therefore left out until it is approved,
+    exactly as on the Bookings page."""
+    from sales.views import _drop_superseded_revisions
+    return {b.id for b in _drop_superseded_revisions(bookings_qs).only('id', 'status', 'accounts_status', 'approval_status', 'cancelled_at')
+            if b.status == 'sold' and b.accounts_status == 'approved' and not b.cancelled_at
+            and 'CANCEL' not in str(b.approval_status or '').upper()}
 
 
 def has_schedule(lines) -> bool:
@@ -144,7 +161,7 @@ def sync_accounts(bookings_qs):
 
     latest = {}   # root id → (company_id, latest approved booking id, (revision_no, id))
     for r in rows:
-        if not (r['status'] == 'sold' and (r['accounts_status'] or 'approved') == 'approved' and not r['cancelled_at']):
+        if not (r['status'] == 'sold' and r['accounts_status'] == 'approved' and not r['cancelled_at']):
             continue
         root = _root_id(r['id'], parent)
         rank = (r['revision_no'] or 0, r['id'])
@@ -179,5 +196,7 @@ def compute_account(acct: ARAccount, as_of=None, receipts=None):
         receipts = [r for r in acct.receipts.all() if not r.is_deleted]
     plan = build_plan(b, acct.legal_due_date)
     result = compute(plan, [Receipt(r.id, r.paid_on, _d(r.amount), r.mode, r.remarks or '') for r in receipts], as_of)
-    mismatch = result.collectable - expected_collectable(b)
+    # Compare the booking's own schedule (not the Balance line added above) with the deal.
+    scheduled = sum((l.amount for l in plan if l.kind != 'balance'), ZERO)
+    mismatch = scheduled - expected_collectable(b)
     return plan, result, mismatch

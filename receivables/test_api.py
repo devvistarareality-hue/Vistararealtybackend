@@ -106,11 +106,14 @@ class ARApiTests(TestCase):
         ARReceipt.objects.create(account_id=a['id'], paid_on=date(2025, 8, 1), amount=D('100000'), mode='bank')
         self.booking.cancelled_at = timezone.now()
         self.booking.save()
-        a = self.acct()
-        self.assertEqual(a['status'], 'frozen')
-        self.assertEqual(a['received'], 100000)  # history kept
+        # No longer approved, so it leaves AR (like the Bookings page)…
+        self.assertEqual(self.api.get('/api/ar/accounts/').json()['results'], [])
         r = self.api.post(f"/api/ar/accounts/{a['id']}/receipts/", {'paid_on': '2025-09-01', 'amount': '5', 'mode': 'bank'}, format='json')
-        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.status_code, 404)
+        # …but the account is frozen, not deleted, and its receipts are kept.
+        acct = ARAccount.objects.get(pk=a['id'])
+        self.assertEqual(acct.status, 'frozen')
+        self.assertEqual(acct.receipts.filter(is_deleted=False).count(), 1)
 
     def test_revision_replaces_plan_receipts_stay(self):
         a = self.acct()
@@ -314,3 +317,55 @@ class ARImportTemplateTests(TestCase):
         up = SimpleUploadedFile('t.xlsx', buf.read())
         d = self.api.post('/api/ar/import/', {'file': up, 'project_id': self.project.id}, format='multipart').json()
         self.assertEqual((d['ready'], d['skipped']), (1, 0))
+
+
+class ARMatchesBookingsTests(TestCase):
+    """AR must carry the same deal value the Bookings page shows (less stamp and
+    registration), and say why a deal appears in AR but not on that page."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='VIS', name='Vistara')
+        self.project = Project.objects.create(company=self.co, name='VIP Alindra')
+        self.user = User.objects.create_user('ar5@test.local', company=self.co, user_code='AR5', password='x', name='AR', role='Employee', modules=['AR'])
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+
+    def rows(self):
+        return {r['booking_id']: r for r in self.api.get('/api/ar/accounts/').json()['results']}
+
+    def test_token_only_eoi_schedule_still_carries_the_whole_deal(self):
+        # EOI-19: deal 2,09,31,220; the schedule holds only the 1,00,000 token.
+        b = make_booking(self.co, self.project, plot='EOI-19', final_amount=D('20931220'), total_extra=D('294220'),
+                         stamp_duty=D('0'), reg_fees=D('1500'),
+                         installments=[{'no': 1, 'amt': 100000, 'date': '2026-07-13', 'isNsd': True},
+                                       {'no': 'Extra', 'amt': 294220, 'date': '', 'isExtra': True}])
+        r = self.rows()[b.id]
+        self.assertEqual(r['collectable'], 20931220 - 1500)            # deal − stamp − reg, like the Bookings page
+        self.assertLess(r['plan_mismatch'], 0)                          # still flagged: the LOI schedule is short
+        ledger = self.api.get(f"/api/ar/accounts/{r['id']}/").json()
+        bal = [p for p in ledger['plan'] if p['kind'] == 'balance']
+        self.assertEqual(len(bal), 1)
+        self.assertIsNone(bal[0]['due'])
+
+    def test_rounding_does_not_add_a_balance_line(self):
+        b = make_booking(self.co, self.project, plot='5', final_amount=D('16716926'))   # schedule ₹3 short
+        ledger = self.api.get(f"/api/ar/accounts/{self.rows()[b.id]['id']}/").json()
+        self.assertNotIn('balance', [p['kind'] for p in ledger['plan']])
+
+    def test_only_deals_approved_by_sales_and_accounts_are_shown(self):
+        b = make_booking(self.co, self.project, plot='EOI-56')
+        self.assertIn(b.id, self.rows())
+        # A revision awaiting approval: the deal leaves AR, as it leaves the Bookings page…
+        r1 = make_booking(self.co, self.project, plot='EOI-56', revision_of=b, revision_no=1, status='pending',
+                          approval_status='REVISION R1 PENDING')
+        self.assertNotIn(b.id, self.rows())
+        self.assertNotIn(r1.id, self.rows())
+        self.assertEqual(self.api.get('/api/ar/dashboard/').json()['accounts'], 0)
+        # …and comes back on the approved revision once Sales and Accounts approve it.
+        r1.status, r1.accounts_status, r1.approval_status = 'sold', 'approved', 'REVISION R1 APPROVED'
+        r1.save()
+        self.assertIn(r1.id, self.rows())
+
+    def test_blank_accounts_status_is_not_approved(self):
+        b = make_booking(self.co, self.project, plot='9', accounts_status='')
+        self.assertNotIn(b.id, self.rows())

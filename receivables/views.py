@@ -16,7 +16,8 @@ from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
 from .models import ARAccount, ARReceipt, ARReceiptAudit
 from .permissions import has_ar_access
-from .services import SUSPECT_BELOW, compute_account, expected_collectable, parse_date, sync_accounts, _d
+from .services import (SUSPECT_BELOW, compute_account, current_approved_booking_ids, expected_collectable,
+                       parse_date, sync_accounts, _d)
 
 ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
@@ -30,20 +31,28 @@ def _as_of(request):
     return parse_date(request.query_params.get('as_of')) or timezone.localdate()
 
 
-def _accounts_qs(request):
-    qs = scope_to_company(ARAccount.objects.all(), request.user)
+def _bookings_qs(request):
+    qs = scope_to_company(Booking.objects.all(), request.user)
     cid = request.query_params.get('company_id')
     if cid and is_platform_admin(request.user):
         qs = qs.filter(company_id=cid)
     return qs
 
 
-def _sync(request):
-    qs = scope_to_company(Booking.objects.all(), request.user)
+def _accounts_qs(request):
+    """The accounts AR shows and acts on: only deals whose current booking is
+    approved by both Sales and Accounts — the same set as the Accounts & Finance
+    Bookings page. Others (a revision awaiting approval, cancelled) keep their
+    account and receipts but are hidden until they qualify again."""
+    qs = scope_to_company(ARAccount.objects.all(), request.user)
     cid = request.query_params.get('company_id')
     if cid and is_platform_admin(request.user):
         qs = qs.filter(company_id=cid)
-    sync_accounts(qs.filter(status='sold'))
+    return qs.filter(booking_id__in=current_approved_booking_ids(_bookings_qs(request)))
+
+
+def _sync(request):
+    sync_accounts(_bookings_qs(request).filter(status='sold'))
 
 
 def _summary(acct, plan, r, mismatch):
@@ -103,9 +112,9 @@ def _slim(qs):
 
 
 def _computed(qs, as_of):
-    qs = _slim(qs).prefetch_related('receipts')
+    accts = list(_slim(qs).prefetch_related('receipts'))
     out = []
-    for acct in qs:
+    for acct in accts:
         receipts = [x for x in acct.receipts.all() if not x.is_deleted]
         plan, r, mismatch = compute_account(acct, as_of, receipts)
         out.append((acct, plan, r, mismatch, receipts))
