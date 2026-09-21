@@ -239,7 +239,7 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertEqual(d['top_overdue'][0]['id'], self.id)
         self.assertEqual(d['top_over_180'][0]['amount'], 2150000)
         self.assertEqual(d['projects'], [{'id': self.project.id, 'name': 'Pratishtha'}])
-        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0})
+        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0, 'revision_pending': 0})
 
     def test_statement_is_print_ready_html(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '1234567', 'mode': 'cheque',
@@ -314,3 +314,45 @@ class ARImportTemplateTests(TestCase):
         up = SimpleUploadedFile('t.xlsx', buf.read())
         d = self.api.post('/api/ar/import/', {'file': up, 'project_id': self.project.id}, format='multipart').json()
         self.assertEqual((d['ready'], d['skipped']), (1, 0))
+
+
+class ARMatchesBookingsTests(TestCase):
+    """AR must carry the same deal value the Bookings page shows (less stamp and
+    registration), and say why a deal appears in AR but not on that page."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='VIS', name='Vistara')
+        self.project = Project.objects.create(company=self.co, name='VIP Alindra')
+        self.user = User.objects.create_user('ar5@test.local', company=self.co, user_code='AR5', password='x', name='AR', role='Employee', modules=['AR'])
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+
+    def rows(self):
+        return {r['booking_id']: r for r in self.api.get('/api/ar/accounts/').json()['results']}
+
+    def test_token_only_eoi_schedule_still_carries_the_whole_deal(self):
+        # EOI-19: deal 2,09,31,220; the schedule holds only the 1,00,000 token.
+        b = make_booking(self.co, self.project, plot='EOI-19', final_amount=D('20931220'), total_extra=D('294220'),
+                         stamp_duty=D('0'), reg_fees=D('1500'),
+                         installments=[{'no': 1, 'amt': 100000, 'date': '2026-07-13', 'isNsd': True},
+                                       {'no': 'Extra', 'amt': 294220, 'date': '', 'isExtra': True}])
+        r = self.rows()[b.id]
+        self.assertEqual(r['collectable'], 20931220 - 1500)            # deal − stamp − reg, like the Bookings page
+        self.assertLess(r['plan_mismatch'], 0)                          # still flagged: the LOI schedule is short
+        ledger = self.api.get(f"/api/ar/accounts/{r['id']}/").json()
+        bal = [p for p in ledger['plan'] if p['kind'] == 'balance']
+        self.assertEqual(len(bal), 1)
+        self.assertIsNone(bal[0]['due'])
+
+    def test_rounding_does_not_add_a_balance_line(self):
+        b = make_booking(self.co, self.project, plot='5', final_amount=D('16716926'))   # schedule ₹3 short
+        ledger = self.api.get(f"/api/ar/accounts/{self.rows()[b.id]['id']}/").json()
+        self.assertNotIn('balance', [p['kind'] for p in ledger['plan']])
+
+    def test_a_pending_revision_is_flagged(self):
+        b = make_booking(self.co, self.project, plot='EOI-56')
+        self.assertFalse(self.rows()[b.id]['revision_pending'])
+        make_booking(self.co, self.project, plot='EOI-56', revision_of=b, status='pending', approval_status='REVISION R1 PENDING')
+        r = self.rows()[b.id]                                           # AR stays on the approved version…
+        self.assertTrue(r['revision_pending'])                          # …and says a revision is waiting
+        self.assertEqual(self.api.get('/api/ar/dashboard/').json()['issues']['revision_pending'], 1)

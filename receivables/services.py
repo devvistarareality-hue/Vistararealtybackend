@@ -90,14 +90,27 @@ def build_plan(b: Booking, legal_due=None):
     if legal > 0:
         lines.append(PlanLine('legal', 'L', 'Legal & Other Charges', due, legal, 'legal'))
 
-    if not has_schedule(lines):
-        # No dated installments on the booking: the unscheduled part becomes one
-        # undated "Balance" line, so the account's total is always the whole deal.
-        # It carries no interest and shows under "No date" until Sales adds a schedule.
-        gap = expected_collectable(b) - sum((l.amount for l in lines), ZERO)
-        if gap > 0:
-            lines.append(PlanLine('balance', '—', 'Balance — no schedule yet', None, gap, 'balance'))
+    # Whatever the booking's schedule doesn't cover (no installments at all, or an
+    # EOI whose schedule is only the token) becomes one undated "Balance" line, so
+    # the account always carries the whole deal less stamp and registration — the
+    # same figure the Bookings page starts from. No interest until Sales schedules it.
+    # A few rupees of rounding in hand-typed installments is not a real gap.
+    gap = expected_collectable(b) - sum((l.amount for l in lines), ZERO)
+    if gap > BALANCE_TOLERANCE:
+        label = 'Balance — not in the LOI schedule' if has_schedule(lines) else 'Balance — no schedule yet'
+        lines.append(PlanLine('balance', '—', label, None, gap, 'balance'))
     return lines
+
+
+BALANCE_TOLERANCE = Decimal('10')
+
+
+def pending_revision_ids(booking_ids):
+    """Bookings (of the given ids) that have a newer revision still awaiting approval.
+    AR keeps such a deal on its last approved version — the money is still owed —
+    while the Bookings page, which shows only the newest revision, leaves it out."""
+    return set(Booking.objects.filter(revision_of_id__in=list(booking_ids), cancelled_at__isnull=True)
+               .exclude(approval_status__icontains='REJECT').values_list('revision_of_id', flat=True))
 
 
 def has_schedule(lines) -> bool:
@@ -179,5 +192,7 @@ def compute_account(acct: ARAccount, as_of=None, receipts=None):
         receipts = [r for r in acct.receipts.all() if not r.is_deleted]
     plan = build_plan(b, acct.legal_due_date)
     result = compute(plan, [Receipt(r.id, r.paid_on, _d(r.amount), r.mode, r.remarks or '') for r in receipts], as_of)
-    mismatch = result.collectable - expected_collectable(b)
+    # Compare the booking's own schedule (not the Balance line added above) with the deal.
+    scheduled = sum((l.amount for l in plan if l.kind != 'balance'), ZERO)
+    mismatch = scheduled - expected_collectable(b)
     return plan, result, mismatch
