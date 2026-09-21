@@ -440,8 +440,9 @@ class ARStatementView(APIView):
             'company': acct.company, 's': sm, 'as_of': fmt(as_of), 'booked': fmt(acct.booking.booking_date), 'generated': timezone.localtime().strftime('%d/%m/%Y %I:%M %p'),
             'plan': [{'no': x.line.no, 'label': x.line.label, 'due': fmt(x.line.due), 'amount': rupees(x.line.amount),
                       'paid': rupees(x.paid), 'pending': rupees(x.remaining), 'status': x.status} for x in r.lines],
-            'receipts': [{'date': fmt(x.paid_on), 'amount': rupees(_d(x.amount)), 'mode': MODES.get(x.mode, x.mode),
-                          'remarks': x.remarks or ''} for x in receipts],
+            # Remarks are internal notes ("collected by …"), not for the client.
+            'receipts': [{'date': fmt(x.paid_on), 'amount': rupees(_d(x.amount)), 'mode': MODES.get(x.mode, x.mode)}
+                         for x in receipts],
             'rows': [{'inst': x.inst_no, 'due': fmt(x.due), 'paid': fmt(x.paid_on) if x.paid_on else 'Unpaid',
                       'amount': rupees(x.amount), 'days': '—' if x.days is None else x.days, 'interest': rupees(x.interest)} for x in r.rows],
             'overpaid': rupees(r.overpaid), 'overpaid_credit': rupees(r.overpaid_credit),

@@ -64,11 +64,11 @@
 
   <h2>Payments received</h2>
   <table>
-    <thead><tr><th>Date</th><th class="num">Amount</th><th>Mode</th><th>Remarks</th></tr></thead>
+    <thead><tr><th>Date</th><th class="num">Amount</th><th>Mode</th></tr></thead>
     <tbody>{% for x in receipts %}
-      <tr><td>{{ x.date }}</td><td class="num">{{ x.amount|inr }}</td><td>{{ x.mode }}</td><td>{{ x.remarks }}</td></tr>
-    {% empty %}<tr><td colspan="4" class="muted">No payments received yet.</td></tr>{% endfor %}</tbody>
-    <tfoot><tr><td>Total</td><td class="num">{{ s.received|inr }}</td><td colspan="2"></td></tr></tfoot>
+      <tr><td>{{ x.date }}</td><td class="num">{{ x.amount|inr }}</td><td>{{ x.mode }}</td></tr>
+    {% empty %}<tr><td colspan="3" class="muted">No payments received yet.</td></tr>{% endfor %}</tbody>
+    <tfoot><tr><td>Total</td><td class="num">{{ s.received|inr }}</td><td></td></tr></tfoot>
   </table>
 
   {% if rows %}
@@ -87,7 +87,7 @@
 
   <div class="note">
     Interest is 2% a month on any amount paid more than 10 days after its due date, counted for every day late,
-    and on overdue amounts up to the statement date. Installments paid before their due date earn a 1% a month credit.
+    and on overdue amounts up to the statement date. Installments paid before their due date earn a 1% a month credit (not Legal &amp; Other Charges).
     Stamp duty and registration are paid directly to the government and are not included in the amount payable to us.
     Generated {{ generated }}.
   </div>

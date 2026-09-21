@@ -275,5 +275,5 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertIn('Statement of Account', html)
         self.assertIn('Asha Patel', html)
         self.assertIn('₹ 12,34,567', html)            # Indian grouping
-        self.assertIn('HDFC &lt;b&gt;', html)         # remarks are escaped
+        self.assertNotIn('HDFC', html)                # internal remarks stay off the client's copy
         self.assertIn('Vistara Realty', html)
