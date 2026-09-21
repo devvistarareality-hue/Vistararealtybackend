@@ -2525,12 +2525,18 @@ class TelecallerListView(APIView):
                 users = sales_qs
         elif crm_role == 'cp_module':
             # Everyone with access to the Channel Partner module — admins/staff/
-            # Sales Admin-Modules users, and CP-designation Managers (see
-            # is_cp_manager) — for the "who owns this CP lead" filter. Not a
-            # designation substring, so filtered in Python like the other
-            # cross-cutting permission checks in this file.
+            # Sales Admin-Modules users, CP Executives and CP-designation Managers
+            # (is_cp_designated) — plus anyone who currently owns a CP lead as its
+            # stm even without a CP designation (a lead transferred to a regular
+            # STM, say). Not a designation substring, so filtered in Python like
+            # the other cross-cutting permission checks in this file.
+            company_ids = base_qs.values_list('company_id', flat=True).distinct()
+            cp_lead_stm_ids = set(
+                Lead.objects.filter(cp_lead_q(), company_id__in=company_ids)
+                .exclude(stm__isnull=True).values_list('stm_id', flat=True)
+            )
             users = sorted(
-                (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                (u for u in base_qs if _is_sales_admin(u) or is_cp_designated(u) or u.id in cp_lead_stm_ids),
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'accounts_module':
