@@ -46,6 +46,7 @@ def _sync(request):
 
 def _summary(acct, plan, r, mismatch):
     b = acct.booking
+    no_schedule = not any(l.kind in ('inst', 'nsd', 'extra') for l in plan)
     return {
         'id': acct.id,
         'status': acct.status,
@@ -73,7 +74,11 @@ def _summary(acct, plan, r, mismatch):
         # so Accounts can see the LOI schedule doesn't cover the whole deal.
         # Installment amounts are typed by hand, so a few rupees of rounding is normal;
         # only a real gap (over ₹10) is worth a warning.
-        'plan_mismatch': rupees(mismatch) if abs(mismatch) > 10 else 0,
+        'plan_mismatch': 0 if no_schedule else (rupees(mismatch) if abs(mismatch) > 10 else 0),
+        # No installments on the booking (an EOI, or an LOI whose schedule was never
+        # entered): AR can't track dues until Sales enters one, so say that plainly
+        # instead of showing a huge "plan mismatch".
+        'no_schedule': no_schedule,
     }
 
 
