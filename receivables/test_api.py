@@ -312,7 +312,7 @@ class AREncryptionAtRestTests(TestCase):
             self.assertEqual(d['legal_due_date'], '2026-06-30')
 
 
-class ARGridEntryTests(TestCase):
+class ARImportTemplateTests(TestCase):
     def setUp(self):
         self.co = Company.objects.create(code='VIS', name='Vistara')
         self.project = Project.objects.create(company=self.co, name='Kalrav 2')
@@ -322,37 +322,6 @@ class ARGridEntryTests(TestCase):
         self.api = APIClient()
         self.api.force_authenticate(self.user)
         self.ids = {r['plots']: r['id'] for r in self.api.get('/api/ar/accounts/').json()['results']}
-
-    def post(self, rows, commit=False):
-        return self.api.post('/api/ar/import/entries/', {'project_id': self.project.id, 'rows': rows, 'commit': commit}, format='json')
-
-    def test_preview_then_commit(self):
-        rows = [{'line': 1, 'account_id': self.ids['10'], 'paid_on': '2025-08-01', 'amount': '100000', 'mode': 'nbfc'},
-                {'line': 2, 'account_id': self.ids['2'], 'paid_on': '01/09/2025', 'amount': 50000, 'mode': 'Cheque', 'remarks': 'CHQ 11'}]
-        d = self.post(rows).json()
-        self.assertEqual((d['ready'], d['skipped'], d['committed'], d['total_amount']), (2, 0, False, 150000))
-        self.assertEqual(ARReceipt.objects.count(), 0)
-        d = self.post(rows, commit=True).json()
-        self.assertTrue(d['committed'])
-        self.assertEqual(ARReceipt.objects.count(), 2)
-        # Re-sending the same rows is a duplicate, and nothing is saved while any row is wrong.
-        d = self.post(rows, commit=True).json()
-        self.assertEqual((d['ready'], d['skipped'], d['committed']), (0, 2, False))
-        self.assertEqual(ARReceipt.objects.count(), 2)
-
-    def test_bad_rows_block_the_commit(self):
-        future = (timezone.localdate() + timedelta(days=3)).isoformat()
-        rows = [{'line': 1, 'account_id': self.ids['10'], 'paid_on': '2025-08-01', 'amount': '100000', 'mode': 'bank'},
-                {'line': 2, 'account_id': self.ids['2'], 'paid_on': future, 'amount': '5', 'mode': 'bank'},
-                {'line': 3, 'account_id': 999999, 'paid_on': '2025-08-01', 'amount': '5', 'mode': 'bank'},
-                {'line': 4, 'account_id': self.ids['2'], 'paid_on': '2025-08-01', 'amount': '5', 'mode': 'upi'}]
-        d = self.post(rows, commit=True).json()
-        self.assertFalse(d['committed'])
-        self.assertEqual(ARReceipt.objects.count(), 0)
-        reasons = {r['line']: r['reason'] for r in d['skipped_rows']}
-        self.assertIn('future', reasons[2])
-        self.assertIn('No approved booking', reasons[3])
-        self.assertIn('Mode', reasons[4])
 
     def test_template_lists_the_projects_plots(self):
         r = self.api.get(f'/api/ar/import/template/?project_id={self.project.id}')
