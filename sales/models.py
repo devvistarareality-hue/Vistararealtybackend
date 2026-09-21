@@ -27,6 +27,7 @@ TC_STATUS = [
     ('not_interested', 'Not Interested'),
     ('not_reachable', 'Not Reachable'),
     ('callback', 'Callback'),
+    ('not_qualified', 'Not Qualified'),
 ]
 
 STM_STATUS = [
@@ -37,6 +38,17 @@ STM_STATUS = [
     ('sv_scheduled', 'SV Scheduled'),
     ('sv_done', 'SV Done'),
     ('closed', 'Closed'),
+    ('not_qualified', 'Not Qualified'),
+]
+
+# Reason captured when a lead is marked Not Qualified (TC or STM/CP status) —
+# shared by both status fields since a lead has one disqualification, not one
+# per stage. 'other' additionally requires disqualify_note.
+DISQUALIFY_REASON = [
+    ('religion', 'Religion'),
+    ('caste', 'Caste'),
+    ('budget', 'Budget'),
+    ('other', 'Other'),
 ]
 
 FOLLOWUP_STATUS = [
@@ -347,6 +359,12 @@ class Lead(models.Model):
     stm_status = models.CharField(max_length=30, choices=STM_STATUS, blank=True)
     stm_remarks = EncryptedTextField(blank=True)
     stm_assigned_at = models.DateTimeField(null=True, blank=True)
+
+    # Why a lead was marked Not Qualified (telecaller_status or stm_status) — one
+    # reason per lead, set whichever stage disqualified it. disqualify_note is
+    # only meaningful when disqualify_reason == 'other'.
+    disqualify_reason = models.CharField(max_length=20, choices=DISQUALIFY_REASON, blank=True)
+    disqualify_note = EncryptedTextField(blank=True)
 
     # Requirement
     budget_min = models.BigIntegerField(null=True, blank=True)
