@@ -1264,23 +1264,19 @@ class LeadListView(APIView):
         existing = dup_qs.first()
 
         # Self-sourced (manually added) leads are assigned to their creator so they
-        # land in that person's pipeline, and are marked actioned (status defaults to
-        # 'warm' if none given) so they appear in the "Called" bucket, not "To Call" —
-        # the creator already has the contact, there's nothing to call fresh.
+        # land in that person's pipeline. Bucket follows whatever status the creator
+        # actually set on the form: blank → "To Call" (they haven't spoken to the
+        # lead yet), any status → "Called" (they have). This used to force a status
+        # ('warm'/'callback') onto a blank field so a self-sourced lead always
+        # landed in "Called" — reversed on request: a status left blank while adding
+        # a lead must mean it still needs a call, for CP, STM and Telecaller alike.
         extra = {}
         if not can_assign:
-            # Callers self-source: own the lead + mark actioned → their "Called" bucket.
+            # Callers self-source: own the lead. Status is whatever they set — see above.
             if is_cp(request.user) or is_stm(request.user):
                 extra['stm'] = request.user
-                if not ser.validated_data.get('stm_status'):
-                    extra['stm_status'] = 'warm'
             elif is_telecaller(request.user):
                 extra['telecaller'] = request.user
-                if not ser.validated_data.get('telecaller_status'):
-                    # 'callback' (not 'warm') so a blank status lands in the telecaller's
-                    # "Called" bucket WITHOUT auto-transferring — 'warm' is a deliberate
-                    # transfer-to-STM action handled below.
-                    extra['telecaller_status'] = 'callback'
         else:
             # Admin/manager assigned via the form → stamp assignment time. Status is
             # left empty so the lead lands in the assignee's "To Call" bucket — a
