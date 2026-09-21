@@ -369,3 +369,29 @@ class ARMatchesBookingsTests(TestCase):
     def test_blank_accounts_status_is_not_approved(self):
         b = make_booking(self.co, self.project, plot='9', accounts_status='')
         self.assertNotIn(b.id, self.rows())
+
+
+class AROsSummaryTests(TestCase):
+    """Plot 25 (Ankitbhai Lathigara), Kalrav 2 workbook, ledger date 21/09/26: the
+    O/s Summary puts the overdue into the current month and totals to the O/s."""
+
+    def test_overdue_sits_in_the_current_month(self):
+        co = Company.objects.create(code='VIS', name='Vistara')
+        project = Project.objects.create(company=co, name='Kalrav 2')
+        user = User.objects.create_user('ar6@test.local', company=co, user_code='AR6', password='x', name='AR', role='Employee', modules=['AR'])
+        inst = [{'no': i, 'date': d, 'amt': 2158533, 'isNsd': True}
+                for i, d in enumerate(['2026-07-20', '2026-08-20', '2026-09-20', '2026-10-20', '2026-11-20'], start=1)]
+        make_booking(co, project, plot='25', installments=inst, total_extra=D('0'), stamp_duty=D('0'), reg_fees=D('0'),
+                     final_amount=D(2158533 * 5))
+        api = APIClient(); api.force_authenticate(user)
+        aid = api.get('/api/ar/accounts/').json()['results'][0]['id']
+        for d, a, m in (('2026-07-19', 100000, 'nbfc'), ('2026-07-29', 1000000, 'nbfc'), ('2026-08-17', 100000, 'bank'), ('2026-08-18', 1500000, 'nbfc')):
+            api.post(f'/api/ar/accounts/{aid}/receipts/', {'paid_on': d, 'amount': a, 'mode': m}, format='json')
+        led = api.get(f'/api/ar/accounts/{aid}/?as_of=2026-09-21').json()
+        rows = {x['label']: x['amount'] for x in led['os_summary']}
+        self.assertEqual(rows['Sep-26'], 3775599)                 # the workbook's Sep-26 row
+        self.assertEqual(rows['Oct-26'], 2158533)
+        self.assertEqual(rows['Nov-26'], 2158533)
+        self.assertEqual(sum(rows.values()), led['outstanding'])
+        self.assertEqual(led['net_interest'], 54501)              # the workbook's Interest Due (f); its row total
+                                                                  # shows 54,502 only because each row is rounded first
