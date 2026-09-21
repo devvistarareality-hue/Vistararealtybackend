@@ -1,0 +1,455 @@
+import json
+from datetime import date
+from decimal import Decimal
+
+from django.db import transaction
+from django.utils import timezone
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from accounts.permissions import is_platform_admin, scope_to_company
+from sales.models import Booking
+from .engine import rupees, AGEING_BUCKETS
+from .models import ARAccount, ARReceipt, ARReceiptAudit
+from .permissions import has_ar_access
+from .services import compute_account, parse_date, sync_accounts, _d
+
+ZERO = Decimal('0')
+MODES = dict(ARReceipt.MODES)
+
+
+def _deny():
+    return Response({'detail': 'You do not have access to Accounts Receivable.'}, status=status.HTTP_403_FORBIDDEN)
+
+
+def _as_of(request):
+    return parse_date(request.query_params.get('as_of')) or timezone.localdate()
+
+
+def _accounts_qs(request):
+    qs = scope_to_company(ARAccount.objects.all(), request.user)
+    cid = request.query_params.get('company_id')
+    if cid and is_platform_admin(request.user):
+        qs = qs.filter(company_id=cid)
+    return qs
+
+
+def _sync(request):
+    qs = scope_to_company(Booking.objects.all(), request.user)
+    cid = request.query_params.get('company_id')
+    if cid and is_platform_admin(request.user):
+        qs = qs.filter(company_id=cid)
+    sync_accounts(qs.filter(status='sold'))
+
+
+def _summary(acct, plan, r, mismatch):
+    b = acct.booking
+    return {
+        'id': acct.id,
+        'status': acct.status,
+        'booking_id': b.id,
+        'project_id': b.project_id,
+        'project': b.project.name if b.project_id else '',
+        'plots': b.plot_numbers or (b.plot.number if b.plot_id else ''),
+        'client_name': b.client_name or '',
+        'phone': b.phone or '',
+        'booking_date': b.booking_date.isoformat() if b.booking_date else None,
+        'total_deal': rupees(_d(b.final_amount)),
+        'stamp_duty': rupees(_d(b.stamp_duty)),
+        'reg_fees': rupees(_d(b.reg_fees)),
+        'collectable': rupees(r.collectable),
+        'received': rupees(r.received),
+        'pct_realised': round(float(r.received / r.collectable * 100), 2) if r.collectable else 0,
+        'outstanding': rupees(r.outstanding),
+        'overdue': rupees(r.overdue),
+        'not_due': rupees(r.not_due),
+        'net_interest': rupees(r.net_interest),
+        'os_with_interest': rupees(r.os_with_interest),
+        'ageing': {k: rupees(v) for k, v in r.ageing.items()},
+        'legal_due_date': acct.legal_due_date.isoformat() if acct.legal_due_date else None,
+        # The plan should add up to Total Deal − Stamp − Reg; flag it when it doesn't
+        # so Accounts can see the LOI schedule doesn't cover the whole deal.
+        'plan_mismatch': rupees(mismatch) if abs(mismatch) >= 1 else 0,
+    }
+
+
+def _computed(qs, as_of):
+    qs = qs.select_related('booking', 'booking__project', 'booking__plot').prefetch_related('receipts')
+    out = []
+    for acct in qs:
+        receipts = [x for x in acct.receipts.all() if not x.is_deleted]
+        plan, r, mismatch = compute_account(acct, as_of, receipts)
+        out.append((acct, plan, r, mismatch, receipts))
+    return out
+
+
+class ARRegisterView(APIView):
+    """The Plot Master equivalent: one row per account."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_ar_access(request.user):
+            return _deny()
+        _sync(request)
+        as_of = _as_of(request)
+        qs = _accounts_qs(request)
+        pid = request.query_params.get('project')
+        if pid:
+            qs = qs.filter(booking__project_id=pid)
+        rows = [_summary(a, p, r, m) for a, p, r, m, _ in _computed(qs, as_of)]
+        q = (request.query_params.get('q') or '').strip().lower()
+        if q:
+            rows = [x for x in rows if q in x['client_name'].lower() or q in x['phone'] or q in str(x['plots']).lower()]
+        if request.query_params.get('overdue') == '1':
+            rows = [x for x in rows if x['overdue'] > 0]
+        rows.sort(key=lambda x: (x['project'], str(x['plots'])))
+        return Response({'as_of': as_of.isoformat(), 'results': rows})
+
+
+class ARAccountView(APIView):
+    """The Ledger Format equivalent for one account."""
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        return _accounts_qs(request).select_related('booking', 'booking__project', 'booking__plot').filter(pk=pk).first()
+
+    def get(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = self._get(request, pk)
+        if not acct:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        as_of = _as_of(request)
+        receipts = list(acct.receipts.filter(is_deleted=False).select_related('created_by'))
+        plan, r, mismatch = compute_account(acct, as_of, receipts)
+        data = _summary(acct, plan, r, mismatch)
+        data.update({
+            'as_of': as_of.isoformat(),
+            'plan': [{
+                'key': s.line.key, 'no': s.line.no, 'label': s.line.label, 'kind': s.line.kind,
+                'due': s.line.due.isoformat() if s.line.due else None,
+                'amount': rupees(s.line.amount), 'paid': rupees(s.paid),
+                'pending': rupees(s.remaining), 'status': s.status,
+            } for s in r.lines],
+            'receipts': [{
+                'id': x.id, 'paid_on': x.paid_on.isoformat(), 'amount': float(_d(x.amount)),
+                'mode': x.mode, 'mode_label': MODES.get(x.mode, x.mode), 'remarks': x.remarks or '',
+                'source': x.source, 'created_by': x.created_by.name if x.created_by_id else '',
+            } for x in receipts],
+            'interest_rows': [{
+                'inst_no': row.inst_no, 'due': row.due.isoformat() if row.due else None,
+                'paid_on': row.paid_on.isoformat() if row.paid_on else None,
+                'amount': rupees(row.amount), 'days': row.days, 'interest': rupees(row.interest),
+            } for row in r.rows],
+            'overpaid': rupees(r.overpaid),
+            'overpaid_credit': rupees(r.overpaid_credit),
+            'month_forecast': [{'label': lbl, 'amount': rupees(v)} for lbl, v in r.month_forecast],
+        })
+        return Response(data)
+
+    def patch(self, request, pk):
+        """Set (or clear) the due date of the Legal & Other Charges line."""
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = self._get(request, pk)
+        if not acct:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if 'legal_due_date' in request.data:
+            raw = request.data.get('legal_due_date')
+            d = parse_date(raw) if raw else None
+            if raw and d is None:
+                return Response({'detail': 'Invalid date.'}, status=status.HTTP_400_BAD_REQUEST)
+            acct.legal_due_date = d
+            acct.save(update_fields=['legal_due_date', 'updated_at'])
+        return self.get(request, pk)
+
+
+def _snap(rc):
+    return json.dumps({'paid_on': rc.paid_on.isoformat() if rc.paid_on else None,
+                       'amount': str(_d(rc.amount)), 'mode': rc.mode, 'remarks': rc.remarks or ''})
+
+
+def _clean_receipt(data, partial=False):
+    out, errs = {}, {}
+    if 'paid_on' in data or not partial:
+        d = parse_date(data.get('paid_on'))
+        if not d:
+            errs['paid_on'] = 'A valid payment date is required.'
+        elif d > timezone.localdate():
+            errs['paid_on'] = 'Payment date cannot be in the future.'
+        else:
+            out['paid_on'] = d
+    if 'amount' in data or not partial:
+        a = _d(data.get('amount'))
+        if a <= 0:
+            errs['amount'] = 'Amount must be greater than zero.'
+        else:
+            out['amount'] = a
+    if 'mode' in data or not partial:
+        m = (data.get('mode') or '').lower()
+        if m not in MODES:
+            errs['mode'] = 'Mode must be Bank, NBFC, Cash or Cheque.'
+        else:
+            out['mode'] = m
+    if 'remarks' in data:
+        out['remarks'] = (data.get('remarks') or '').strip()[:500]
+    return out, errs
+
+
+class ARReceiptCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = _accounts_qs(request).filter(pk=pk).first()
+        if not acct:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if acct.status == 'frozen':
+            return Response({'detail': 'This booking was cancelled — its account is frozen.'}, status=status.HTTP_400_BAD_REQUEST)
+        vals, errs = _clean_receipt(request.data)
+        if errs:
+            return Response(errs, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            rc = ARReceipt.objects.create(account=acct, created_by=request.user, updated_by=request.user, **vals)
+            ARReceiptAudit.objects.create(receipt=rc, action='create', changed_by=request.user, after=_snap(rc))
+        return Response({'id': rc.id}, status=status.HTTP_201_CREATED)
+
+
+class ARReceiptView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, rid):
+        accts = _accounts_qs(request).values('id')
+        return ARReceipt.objects.filter(pk=rid, account_id__in=accts, is_deleted=False).select_related('account').first()
+
+    def patch(self, request, rid):
+        if not has_ar_access(request.user):
+            return _deny()
+        rc = self._get(request, rid)
+        if not rc:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        vals, errs = _clean_receipt(request.data, partial=True)
+        if errs:
+            return Response(errs, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            before = _snap(rc)
+            for k, v in vals.items():
+                setattr(rc, k, v)
+            rc.updated_by = request.user
+            rc.save()
+            ARReceiptAudit.objects.create(receipt=rc, action='update', changed_by=request.user, before=before, after=_snap(rc))
+        return Response({'id': rc.id})
+
+    def delete(self, request, rid):
+        if not has_ar_access(request.user):
+            return _deny()
+        rc = self._get(request, rid)
+        if not rc:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            before = _snap(rc)
+            rc.is_deleted = True
+            rc.updated_by = request.user
+            rc.save(update_fields=['is_deleted', 'updated_by', 'updated_at'])
+            ARReceiptAudit.objects.create(receipt=rc, action='delete', changed_by=request.user, before=before)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ARReceiptAuditView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, rid):
+        if not has_ar_access(request.user):
+            return _deny()
+        accts = _accounts_qs(request).values('id')
+        rc = ARReceipt.objects.filter(pk=rid, account_id__in=accts).first()
+        if not rc:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response([{
+            'action': a.action, 'changed_by': a.changed_by.name if a.changed_by_id else '',
+            'changed_at': a.changed_at.isoformat(),
+            'before': json.loads(a.before) if a.before else None,
+            'after': json.loads(a.after) if a.after else None,
+        } for a in rc.audit.select_related('changed_by')])
+
+
+class ARDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_ar_access(request.user):
+            return _deny()
+        _sync(request)
+        as_of = _as_of(request)
+        qs = _accounts_qs(request).filter(status='active')
+        pid = request.query_params.get('project')
+        if pid:
+            qs = qs.filter(booking__project_id=pid)
+        totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
+        ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
+        forecast, over180 = {}, {}
+        order = []
+        for acct, plan, r, m, _ in _computed(qs, as_of):
+            for k in totals:
+                totals[k] += getattr(r, k)
+            for k, v in r.ageing.items():
+                ageing[k] += v
+            for lbl, v in r.month_forecast:
+                if lbl not in forecast:
+                    order.append(lbl)
+                    forecast[lbl] = ZERO
+                forecast[lbl] += v
+            if r.ageing.get('>180', ZERO) > 0:
+                name = acct.booking.client_name or '—'
+                over180[name] = over180.get(name, ZERO) + r.ageing['>180']
+        top = sorted(over180.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        return Response({
+            'as_of': as_of.isoformat(),
+            'accounts': qs.count(),
+            'totals': {k: rupees(v) for k, v in totals.items()},
+            'ageing': {k: rupees(v) for k, v in ageing.items()},
+            'month_forecast': [{'label': lbl, 'amount': rupees(forecast[lbl])} for lbl in order],
+            'top_over_180': [{'client': n, 'amount': rupees(v)} for n, v in top],
+        })
+
+
+# ── Excel import: past receipts only ─────────────────────────────────────────
+# The old workbooks' Payment Tracker has one row per allocation, not per payment:
+# a receipt that spilled across installments appears once with its Paid amount and
+# again as Carry-In rows with Paid blank. So only rows with Paid > 0 are real
+# receipts — which is also all the user asked to import; the plan comes from the LOI.
+HEADER_ALIASES = {
+    'plot': ('plot no', 'plot', 'plot number', 'unit', 'unit no'),
+    'paid_on': ('paid dates', 'paid date', 'payment date', 'date'),
+    'amount': ('paid', 'amount', 'paid amount'),
+    'mode': ('mode', 'payment mode'),
+    'remarks': ('remarks', 'remark', 'narration'),
+}
+MODE_ALIASES = {'bank': 'bank', 'nbfc': 'nbfc', 'cash': 'cash', 'cheque': 'cheque', 'chq': 'cheque', 'check': 'cheque'}
+
+
+def _norm_plot(v):
+    s = str(v or '').strip().upper()
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s
+
+
+def _plots_of(b):
+    raw = b.plot_numbers or (b.plot.number if b.plot_id and b.plot else '')
+    out = set()
+    for p in str(raw).split(','):
+        p = _norm_plot(p)
+        if p:
+            out.add(p)
+            # "A-57" should also match a sheet that just says 57.
+            tail = p.split('-')[-1]
+            out.add(tail)
+    return out
+
+
+def _read_rows(fileobj):
+    import openpyxl
+    wb = openpyxl.load_workbook(fileobj, data_only=True, read_only=True)
+    ws = next((wb[n] for n in wb.sheetnames if n.strip().lower() == 'payment tracker'), wb[wb.sheetnames[0]])
+    rows = ws.iter_rows(values_only=True)
+    header_idx, cols = None, {}
+    for i, row in enumerate(rows):
+        names = [str(c or '').strip().lower() for c in row]
+        found = {}
+        for key, aliases in HEADER_ALIASES.items():
+            for j, n in enumerate(names):
+                if n in aliases:
+                    found[key] = j
+                    break
+        if {'plot', 'paid_on', 'amount'} <= set(found):
+            header_idx, cols = i, found
+            break
+        if i > 20:
+            break
+    if header_idx is None:
+        return None, 'Could not find the header row (need Plot No, Paid Date/Paid Dates and Paid/Amount columns).'
+    out = []
+    for n, row in enumerate(rows, start=header_idx + 2):
+        def cell(k):
+            j = cols.get(k)
+            return row[j] if j is not None and j < len(row) else None
+        amount = _d(cell('amount'))
+        if amount <= 0:
+            continue  # carry-in / budget rows, blank rows
+        out.append({
+            'line': n, 'plot': _norm_plot(cell('plot')), 'paid_on': parse_date(cell('paid_on')),
+            'amount': amount, 'mode': MODE_ALIASES.get(str(cell('mode') or '').strip().lower(), ''),
+            'remarks': str(cell('remarks') or '').strip()[:500],
+        })
+    return out, None
+
+
+class ARImportView(APIView):
+    """POST multipart: file (.xlsx), project_id, commit=1 to save (default preview)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not has_ar_access(request.user):
+            return _deny()
+        f = request.FILES.get('file')
+        pid = request.data.get('project_id')
+        if not f or not pid:
+            return Response({'detail': 'Choose the project and an .xlsx file.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            rows, err = _read_rows(f)
+        except Exception:
+            return Response({'detail': 'That file could not be read as an Excel workbook (.xlsx).'}, status=status.HTTP_400_BAD_REQUEST)
+        if err:
+            return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
+
+        _sync(request)
+        accts = list(_accounts_qs(request).filter(booking__project_id=pid).select_related('booking', 'booking__plot'))
+        by_plot = {}
+        for a in accts:
+            for p in _plots_of(a.booking):
+                by_plot.setdefault(p, a)
+        existing = {(r.account_id, r.paid_on, _d(r.amount)) for r in ARReceipt.objects.filter(account__in=accts, is_deleted=False)}
+
+        ok, skipped = [], []
+        for row in rows:
+            acct = by_plot.get(row['plot'])
+            reason = None
+            if not row['paid_on']:
+                reason = 'No valid payment date'
+            elif not row['mode']:
+                reason = 'Mode must be Bank, NBFC, Cash or Cheque'
+            elif not acct:
+                reason = f"No approved booking for plot {row['plot']} in this project"
+            elif acct.status == 'frozen':
+                reason = 'Booking cancelled — account frozen'
+            elif (acct.id, row['paid_on'], row['amount']) in existing:
+                reason = 'Already recorded (same plot, date and amount)'
+            entry = {**row, 'paid_on': row['paid_on'].isoformat() if row['paid_on'] else None,
+                     'amount': float(row['amount']), 'account_id': acct.id if acct else None,
+                     'client_name': acct.booking.client_name if acct else ''}
+            if reason:
+                skipped.append({**entry, 'reason': reason})
+            else:
+                ok.append(entry)
+                existing.add((acct.id, row['paid_on'], row['amount']))
+
+        committed = False
+        if request.data.get('commit') in ('1', 'true', True) and ok:
+            with transaction.atomic():
+                for e in ok:
+                    rc = ARReceipt.objects.create(
+                        account_id=e['account_id'], paid_on=parse_date(e['paid_on']), amount=_d(e['amount']),
+                        mode=e['mode'], remarks=e['remarks'], source='import',
+                        created_by=request.user, updated_by=request.user)
+                    ARReceiptAudit.objects.create(receipt=rc, action='create', changed_by=request.user, after=_snap(rc))
+            committed = True
+        return Response({
+            'committed': committed,
+            'ready': len(ok), 'skipped': len(skipped),
+            'total_amount': rupees(sum((_d(e['amount']) for e in ok), ZERO)),
+            'rows': ok, 'skipped_rows': skipped,
+        })
