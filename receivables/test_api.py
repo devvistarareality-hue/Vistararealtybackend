@@ -395,3 +395,30 @@ class AROsSummaryTests(TestCase):
         self.assertEqual(sum(rows.values()), led['outstanding'])
         self.assertEqual(led['net_interest'], 54501)              # the workbook's Interest Due (f); its row total
                                                                   # shows 54,502 only because each row is rounded first
+
+
+class ARBookingAndLoiTests(TestCase):
+    def setUp(self):
+        self.co = Company.objects.create(code='VIS', name='Vistara')
+        self.project = Project.objects.create(company=self.co, name='Anahata Florenza')
+        self.user = User.objects.create_user('ar8@test.local', company=self.co, user_code='AR8', password='x', name='AR', role='Employee', modules=['AR'])
+        self.b = make_booking(self.co, self.project, plot='Ananda1', client_name='Yashpalsinh Thakor')
+        self.api = APIClient(); self.api.force_authenticate(self.user)
+        self.aid = self.api.get('/api/ar/accounts/').json()['results'][0]['id']
+
+    def test_booking_details_for_an_ar_user(self):
+        r = self.api.get(f'/api/ar/accounts/{self.aid}/booking/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['client_name'], 'Yashpalsinh Thakor')
+        self.assertEqual(len(r.json()['installments']), 5)
+
+    def test_loi_link_says_why_when_there_is_none(self):
+        r = self.api.get(f'/api/ar/accounts/{self.aid}/loi-url/')
+        self.assertEqual(r.status_code, 404)
+        self.assertIn('No LOI', r.json()['detail'])
+
+    def test_no_ar_access_no_details(self):
+        other = User.objects.create_user('no8@test.local', company=self.co, user_code='NO8', password='x', name='N', role='Employee', modules=['Sales'])
+        c = APIClient(); c.force_authenticate(other)
+        self.assertEqual(c.get(f'/api/ar/accounts/{self.aid}/booking/').status_code, 403)
+        self.assertEqual(c.get(f'/api/ar/accounts/{self.aid}/loi-url/').status_code, 403)
