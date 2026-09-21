@@ -29,6 +29,13 @@ class ARAccount(models.Model):
     # "Legal & Other Charges" are due at sale deed or possession, whichever is
     # earlier — unknown at booking time. No date means no interest until set.
     legal_due_date = models.DateField(null=True, blank=True)
+    # Some bookings carry no dated installments at all (every Pratishtha flat: its
+    # form has a Regular / Down Payment plan but no schedule). For those only,
+    # Accounts enters the schedule here — JSON [{"date": "YYYY-MM-DD", "amount": "…"}].
+    # A booking that has its own schedule always wins; this is then ignored.
+    schedule = EncryptedTextField(blank=True, default='')
+    schedule_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    schedule_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

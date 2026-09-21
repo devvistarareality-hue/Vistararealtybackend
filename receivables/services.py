@@ -1,4 +1,5 @@
 """Glue between bookings, AR accounts and the engine."""
+import json
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
@@ -47,7 +48,7 @@ def legal_other_amount(b: Booking) -> Decimal:
     return max(ZERO, _d(b.total_extra) - _d(b.stamp_duty) - _d(b.reg_fees))
 
 
-def build_plan(b: Booking, legal_due=None):
+def build_plan(b: Booking, legal_due=None, ar_schedule=None):
     lines, seen = [], set()
 
     def add(inst, kind, prefix):
@@ -89,7 +90,47 @@ def build_plan(b: Booking, legal_due=None):
         due = legal_due
     if legal > 0:
         lines.append(PlanLine('legal', 'L', 'Legal & Other Charges', due, legal, 'legal'))
+
+    if not has_schedule(lines):
+        # No dated installments on the booking: use the schedule Accounts entered in
+        # AR, if any. Whatever is still not covered becomes one undated "Balance"
+        # line, so the account's total is always the whole deal — it carries no
+        # interest and shows under "No date" until a schedule exists.
+        for i, row in enumerate(ar_schedule or [], start=1):
+            amt = _d(row.get('amount'))
+            if amt > 0:
+                lines.insert(i - 1, PlanLine(f's{i}', str(i), f'Installment {i}', parse_date(row.get('date')), amt, 'inst'))
+        gap = expected_collectable(b) - sum((l.amount for l in lines), ZERO)
+        if gap > 0:
+            lines.append(PlanLine('balance', '—', 'Balance — no schedule yet', None, gap, 'balance'))
     return lines
+
+
+def has_schedule(lines) -> bool:
+    return any(l.kind in ('inst', 'nsd', 'extra') for l in lines)
+
+
+def booking_has_schedule(b: Booking) -> bool:
+    return has_schedule(build_plan(b))
+
+
+def load_schedule(acct: ARAccount):
+    try:
+        rows = json.loads(acct.schedule) if acct.schedule else []
+        return rows if isinstance(rows, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def schedule_target(b: Booking) -> Decimal:
+    """What an AR-entered schedule must add up to: everything collectable except
+    the Legal & Other Charges line, which keeps its own date."""
+    legal = sum((l.amount for l in build_plan(b) if l.kind == 'legal'), ZERO)
+    return expected_collectable(b) - legal
+
+
+# Deals this small are almost certainly a typo'd amount (e.g. entered in thousands).
+SUSPECT_BELOW = Decimal('100000')
 
 
 def expected_collectable(b: Booking) -> Decimal:
@@ -161,7 +202,7 @@ def compute_account(acct: ARAccount, as_of=None, receipts=None):
     as_of = as_of or timezone.localdate()
     if receipts is None:
         receipts = [r for r in acct.receipts.all() if not r.is_deleted]
-    plan = build_plan(b, acct.legal_due_date)
+    plan = build_plan(b, acct.legal_due_date, load_schedule(acct))
     result = compute(plan, [Receipt(r.id, r.paid_on, _d(r.amount), r.mode, r.remarks or '') for r in receipts], as_of)
     mismatch = result.collectable - expected_collectable(b)
     return plan, result, mismatch

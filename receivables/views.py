@@ -3,6 +3,8 @@ from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
+from django.http import HttpResponse
+from django.template.loader import render_to_string
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -14,7 +16,9 @@ from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
 from .models import ARAccount, ARReceipt, ARReceiptAudit
 from .permissions import has_ar_access
-from .services import compute_account, parse_date, sync_accounts, _d
+from .templatetags.ar import inr
+from .services import (SUSPECT_BELOW, booking_has_schedule, compute_account, expected_collectable,
+                       load_schedule, parse_date, schedule_target, sync_accounts, _d)
 
 ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
@@ -79,6 +83,10 @@ def _summary(acct, plan, r, mismatch):
         # entered): AR can't track dues until Sales enters one, so say that plainly
         # instead of showing a huge "plan mismatch".
         'no_schedule': no_schedule,
+        # Schedule entered in AR (booking had none).
+        'ar_schedule': any(l.key.startswith('s') and l.kind == 'inst' for l in plan),
+        # A deal under ₹1 lakh is a mistyped amount, not a real sale.
+        'suspect_amount': expected_collectable(b) < SUSPECT_BELOW,
     }
 
 
@@ -91,7 +99,8 @@ _BOOKING_COLS = (
     'booking__stamp_duty', 'booking__reg_fees', 'booking__total_extra', 'booking__installments',
     'booking__extra_work_inst', 'booking__cancelled_at', 'booking__project__name', 'booking__plot__number',
 )
-_ACCOUNT_COLS = ('id', 'company_id', 'root_booking_id', 'booking_id', 'status', 'frozen_at', 'legal_due_date')
+_ACCOUNT_COLS = ('id', 'company_id', 'root_booking_id', 'booking_id', 'status', 'frozen_at', 'legal_due_date',
+                 'schedule', 'schedule_at', 'schedule_by')
 
 
 def _slim(qs):
@@ -170,15 +179,20 @@ class ARAccountView(APIView):
             'overpaid_credit': rupees(r.overpaid_credit),
             'month_forecast': [{'label': lbl, 'amount': rupees(v)} for lbl, v in r.month_forecast],
         })
+        data.update(_schedule_info(acct))
         return Response(data)
 
     def patch(self, request, pk):
-        """Set (or clear) the due date of the Legal & Other Charges line."""
+        """Set (or clear) the Legal & Other Charges due date, or the AR schedule."""
         if not has_ar_access(request.user):
             return _deny()
         acct = self._get(request, pk)
         if not acct:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if 'schedule' in request.data:
+            err = _save_schedule(acct, request.data.get('schedule'), request.user)
+            if err:
+                return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
         if 'legal_due_date' in request.data:
             raw = request.data.get('legal_due_date')
             d = parse_date(raw) if raw else None
@@ -187,6 +201,51 @@ class ARAccountView(APIView):
             acct.legal_due_date = d
             acct.save(update_fields=['legal_due_date', 'updated_at'])
         return self.get(request, pk)
+
+
+def _schedule_info(acct):
+    b = acct.booking
+    own = booking_has_schedule(b)
+    return {
+        # Only a booking with no installments of its own can be scheduled in AR.
+        'schedule_editable': not own and acct.status == 'active',
+        'schedule_target': rupees(schedule_target(b)),
+        'schedule_rows': [] if own else load_schedule(acct),
+        'schedule_by': acct.schedule_by.name if acct.schedule_by_id else '',
+        'schedule_at': acct.schedule_at.isoformat() if acct.schedule_at else None,
+    }
+
+
+def _save_schedule(acct, rows, user):
+    """Validate and store an AR schedule. Returns an error message, or None."""
+    if acct.status != 'active':
+        return 'This booking was cancelled — its account is frozen.'
+    if booking_has_schedule(acct.booking):
+        return 'This booking has its own installment schedule from the LOI. Change it in Sales.'
+    if rows in (None, '', []):
+        acct.schedule, acct.schedule_by, acct.schedule_at = '', user, timezone.now()
+        acct.save(update_fields=['schedule', 'schedule_by', 'schedule_at', 'updated_at'])
+        return None
+    if not isinstance(rows, list) or len(rows) > 60:
+        return 'Send the schedule as a list of installments.'
+    clean, total = [], ZERO
+    for i, row in enumerate(rows, start=1):
+        d = parse_date((row or {}).get('date'))
+        a = _d((row or {}).get('amount'))
+        if not d:
+            return f'Installment {i} needs a due date.'
+        if a <= 0:
+            return f'Installment {i} needs an amount greater than zero.'
+        clean.append({'date': d.isoformat(), 'amount': str(a)})
+        total += a
+    target = schedule_target(acct.booking)
+    if abs(total - target) > 10:
+        return (f'The installments add up to {inr(total)}, but they must add up to {inr(target)} '
+                f'(Total deal − stamp duty − registration − Legal & Other Charges).')
+    clean.sort(key=lambda x: x['date'])
+    acct.schedule, acct.schedule_by, acct.schedule_at = json.dumps(clean), user, timezone.now()
+    acct.save(update_fields=['schedule', 'schedule_by', 'schedule_at', 'updated_at'])
+    return None
 
 
 def _snap(rc):
@@ -300,6 +359,8 @@ class ARReceiptAuditView(APIView):
 
 
 class ARDashboardView(APIView):
+    """Portfolio view: totals, ageing, month-wise dues, worst accounts and the
+    accounts whose booking data needs fixing."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -307,14 +368,19 @@ class ARDashboardView(APIView):
             return _deny()
         _sync(request)
         as_of = _as_of(request)
-        qs = _accounts_qs(request).filter(status='active')
+        base = _accounts_qs(request).filter(status='active')
+        projects = {}
+        for pid, name in base.values_list('booking__project_id', 'booking__project__name').distinct():
+            if pid:
+                projects[pid] = name or ''
+        qs = base
         pid = request.query_params.get('project')
         if pid:
             qs = qs.filter(booking__project_id=pid)
         totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
-        forecast, over180 = {}, {}
-        order = []
+        forecast, order, rows = {}, [], []
+        issues = {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0}
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
@@ -325,18 +391,62 @@ class ARDashboardView(APIView):
                     order.append(lbl)
                     forecast[lbl] = ZERO
                 forecast[lbl] += v
-            if r.ageing.get('>180', ZERO) > 0:
-                name = acct.booking.client_name or '—'
-                over180[name] = over180.get(name, ZERO) + r.ageing['>180']
-        top = sorted(over180.items(), key=lambda kv: kv[1], reverse=True)[:10]
+            sm = _summary(acct, plan, r, m)
+            issues['no_schedule'] += sm['no_schedule']
+            issues['plan_mismatch'] += bool(sm['plan_mismatch'])
+            issues['suspect_amount'] += sm['suspect_amount']
+            rows.append((sm, r.ageing.get('>180', ZERO)))
+
+        def brief(sm, amount):
+            return {'id': sm['id'], 'client': sm['client_name'] or '—', 'project': sm['project'],
+                    'plots': sm['plots'], 'amount': rupees(amount)}
+
+        top_overdue = sorted((x for x in rows if x[0]['overdue'] > 0), key=lambda x: x[0]['overdue'], reverse=True)[:10]
+        top_180 = sorted((x for x in rows if x[1] > 0), key=lambda x: x[1], reverse=True)[:10]
+        n = len(rows)
         return Response({
             'as_of': as_of.isoformat(),
-            'accounts': qs.count(),
+            'accounts': n,
+            'overdue_accounts': sum(1 for x in rows if x[0]['overdue'] > 0),
+            'projects': [{'id': k, 'name': v} for k, v in sorted(projects.items(), key=lambda kv: kv[1])],
             'totals': {k: rupees(v) for k, v in totals.items()},
+            'pct_realised': round(float(totals['received'] / totals['collectable'] * 100), 1) if totals['collectable'] else 0,
             'ageing': {k: rupees(v) for k, v in ageing.items()},
             'month_forecast': [{'label': lbl, 'amount': rupees(forecast[lbl])} for lbl in order],
-            'top_over_180': [{'client': n, 'amount': rupees(v)} for n, v in top],
+            'top_overdue': [brief(sm, sm['overdue']) for sm, _ in top_overdue],
+            'top_over_180': [brief(sm, v) for sm, v in top_180],
+            'issues': issues,
         })
+
+
+class ARStatementView(APIView):
+    """The account statement a client can be sent, as a print-ready HTML page.
+    The web prints it to PDF in the browser; the app turns it into a PDF with
+    expo-print. One template, so both look the same."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = _slim(_accounts_qs(request)).select_related('company').filter(pk=pk).first()
+        if not acct:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        as_of = _as_of(request)
+        receipts = list(acct.receipts.filter(is_deleted=False))
+        plan, r, mismatch = compute_account(acct, as_of, receipts)
+        sm = _summary(acct, plan, r, mismatch)
+        fmt = lambda d: d.strftime('%d/%m/%Y') if d else '—'
+        html = render_to_string('receivables/statement.html', {
+            'company': acct.company, 's': sm, 'as_of': fmt(as_of), 'booked': fmt(acct.booking.booking_date), 'generated': timezone.localtime().strftime('%d/%m/%Y %I:%M %p'),
+            'plan': [{'no': x.line.no, 'label': x.line.label, 'due': fmt(x.line.due), 'amount': rupees(x.line.amount),
+                      'paid': rupees(x.paid), 'pending': rupees(x.remaining), 'status': x.status} for x in r.lines],
+            'receipts': [{'date': fmt(x.paid_on), 'amount': rupees(_d(x.amount)), 'mode': MODES.get(x.mode, x.mode),
+                          'remarks': x.remarks or ''} for x in receipts],
+            'rows': [{'inst': x.inst_no, 'due': fmt(x.due), 'paid': fmt(x.paid_on) if x.paid_on else 'Unpaid',
+                      'amount': rupees(x.amount), 'days': '—' if x.days is None else x.days, 'interest': rupees(x.interest)} for x in r.rows],
+            'overpaid': rupees(r.overpaid), 'overpaid_credit': rupees(r.overpaid_credit),
+        })
+        return HttpResponse(html, content_type='text/html; charset=utf-8')
 
 
 # ── Excel import: past receipts only ─────────────────────────────────────────

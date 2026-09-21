@@ -1,0 +1,94 @@
+{% load ar %}<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Statement · {{ s.client_name }} · {{ s.project }} {{ s.plots }}</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: #1c2430; font-size: 11px; margin: 0; }
+  .top { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #1c2430; padding-bottom: 10px; margin-bottom: 14px; }
+  .co { font-size: 17px; font-weight: 800; }
+  .doc { text-align: right; }
+  .doc h1 { font-size: 15px; margin: 0 0 3px; letter-spacing: .5px; text-transform: uppercase; }
+  .muted { color: #5b6573; }
+  .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 24px; margin-bottom: 14px; }
+  .meta b { display: inline-block; min-width: 92px; color: #5b6573; font-weight: 600; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; margin: 16px 0 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 5px 6px; border-bottom: 1px solid #dfe3e8; text-align: left; vertical-align: top; }
+  th { background: #f1f3f6; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: #3a4452; }
+  .num { text-align: right; white-space: nowrap; }
+  tfoot td { font-weight: 800; border-top: 1.5px solid #1c2430; border-bottom: 0; }
+  .sum { width: 58%; }
+  .sum td:first-child { color: #3a4452; }
+  .sum tr.total td { font-weight: 800; font-size: 12.5px; border-top: 1.5px solid #1c2430; border-bottom: 0; }
+  .credit { color: #1b7f4b; }
+  .note { margin-top: 18px; font-size: 10px; color: #5b6573; line-height: 1.5; }
+  .avoid { page-break-inside: avoid; }
+</style></head>
+<body>
+  <div class="top">
+    <div><div class="co">{{ company.name }}</div><div class="muted">Accounts Receivable</div></div>
+    <div class="doc"><h1>Statement of Account</h1><div class="muted">As of {{ as_of }}</div></div>
+  </div>
+
+  <div class="meta">
+    <div><b>Client</b> {{ s.client_name|default:"—" }}</div>
+    <div><b>Project</b> {{ s.project }}</div>
+    <div><b>Phone</b> {{ s.phone|default:"—" }}</div>
+    <div><b>Plot / Unit</b> {{ s.plots }}</div>
+    <div><b>Booking date</b> {{ booked }}</div>
+    <div><b>Status</b> {% if s.status == 'frozen' %}Cancelled{% else %}Active{% endif %}</div>
+  </div>
+
+  <h2>Summary</h2>
+  <table class="sum avoid">
+    <tr><td>Total deal</td><td class="num">{{ s.total_deal|inr }}</td></tr>
+    <tr><td>Less: stamp duty</td><td class="num">{{ s.stamp_duty|inr }}</td></tr>
+    <tr><td>Less: registration</td><td class="num">{{ s.reg_fees|inr }}</td></tr>
+    <tr><td>Payable to us</td><td class="num">{{ s.collectable|inr }}</td></tr>
+    <tr><td>Received</td><td class="num">{{ s.received|inr }}</td></tr>
+    <tr><td>Outstanding</td><td class="num">{{ s.outstanding|inr }}</td></tr>
+    <tr><td>of which overdue</td><td class="num">{{ s.overdue|inr }}</td></tr>
+    <tr><td>Interest</td><td class="num">{{ s.net_interest|inr }}</td></tr>
+    <tr class="total"><td>Total payable</td><td class="num">{{ s.os_with_interest|inr }}</td></tr>
+  </table>
+
+  <h2>Payment schedule</h2>
+  <table>
+    <thead><tr><th>Inst</th><th>Description</th><th>Due</th><th class="num">Amount</th><th class="num">Paid</th><th class="num">Pending</th><th>Status</th></tr></thead>
+    <tbody>{% for p in plan %}
+      <tr><td>{{ p.no }}</td><td>{{ p.label }}</td><td>{{ p.due }}</td><td class="num">{{ p.amount|inr }}</td>
+        <td class="num">{{ p.paid|inr }}</td><td class="num">{{ p.pending|inr }}</td><td>{{ p.status|capfirst }}</td></tr>
+    {% endfor %}</tbody>
+  </table>
+
+  <h2>Payments received</h2>
+  <table>
+    <thead><tr><th>Date</th><th class="num">Amount</th><th>Mode</th><th>Remarks</th></tr></thead>
+    <tbody>{% for x in receipts %}
+      <tr><td>{{ x.date }}</td><td class="num">{{ x.amount|inr }}</td><td>{{ x.mode }}</td><td>{{ x.remarks }}</td></tr>
+    {% empty %}<tr><td colspan="4" class="muted">No payments received yet.</td></tr>{% endfor %}</tbody>
+    <tfoot><tr><td>Total</td><td class="num">{{ s.received|inr }}</td><td colspan="2"></td></tr></tfoot>
+  </table>
+
+  {% if rows %}
+  <h2>Interest</h2>
+  <table>
+    <thead><tr><th>Inst</th><th>Due</th><th>Paid</th><th class="num">Amount</th><th class="num">Days</th><th class="num">Interest</th></tr></thead>
+    <tbody>{% for x in rows %}
+      <tr><td>{{ x.inst }}</td><td>{{ x.due }}</td><td>{{ x.paid }}</td><td class="num">{{ x.amount|inr }}</td>
+        <td class="num">{{ x.days }}</td><td class="num{% if x.interest < 0 %} credit{% endif %}">{{ x.interest|inr }}</td></tr>
+    {% endfor %}
+    {% if overpaid > 0 %}<tr><td colspan="5">Paid in excess {{ overpaid|inr }} — credit to date</td><td class="num credit">{{ overpaid_credit|inr }}</td></tr>{% endif %}
+    </tbody>
+    <tfoot><tr><td colspan="5">Net interest</td><td class="num">{{ s.net_interest|inr }}</td></tr></tfoot>
+  </table>
+  {% endif %}
+
+  <div class="note">
+    Interest is 2% a month on any amount paid more than 10 days after its due date, counted for every day late,
+    and on overdue amounts up to the statement date. Installments paid before their due date earn a 1% a month credit.
+    Stamp duty and registration are paid directly to the government and are not included in the amount payable to us.
+    Generated {{ generated }}.
+  </div>
+</body></html>

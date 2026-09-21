@@ -56,7 +56,7 @@ class PlanLine:
     label: str
     due: Optional[date]
     amount: Decimal
-    kind: str = 'inst'       # inst | nsd | extra | legal
+    kind: str = 'inst'       # inst | nsd | extra | legal | balance
 
 
 @dataclass

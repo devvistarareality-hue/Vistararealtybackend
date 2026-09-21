@@ -185,3 +185,95 @@ class ARApiTests(TestCase):
         self.assertEqual(d['accounts'], 1)
         self.assertEqual(d['totals']['received'], 100000)
         self.assertEqual(d['top_over_180'][0]['client'], 'Jigar Makwana')
+
+
+class ARScheduleAndReportsTests(TestCase):
+    """Bookings with no installments (every Pratishtha flat), the AR-entered
+    schedule, the issue flags, the dashboard and the printable statement."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='VIS', name='Vistara Realty')
+        self.project = Project.objects.create(company=self.co, name='Pratishtha')
+        self.user = User.objects.create_user('ar2@test.local', company=self.co, user_code='AR2', password='x', name='AR User',
+                                             role='Employee', modules=['AR'])
+        # A flat: 28,00,000 deal, no installments; 1,50,000 extra of which stamp 40,000 + reg 10,000.
+        self.flat = make_booking(self.co, self.project, plot='1003', client_name='Asha Patel', installments=[],
+                                 total_extra=D('150000'), stamp_duty=D('40000'), reg_fees=D('10000'),
+                                 final_amount=D('2800000'))
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+        self.id = self.api.get('/api/ar/accounts/').json()['results'][0]['id']
+
+    def ledger(self, as_of='2026-09-21'):
+        return self.api.get(f'/api/ar/accounts/{self.id}/?as_of={as_of}').json()
+
+    def test_no_schedule_still_totals_the_whole_deal(self):
+        d = self.ledger()
+        self.assertTrue(d['no_schedule'])
+        self.assertEqual(d['collectable'], 2750000)                    # deal − stamp − reg
+        self.assertEqual(d['plan_mismatch'], 0)
+        self.assertEqual([p['kind'] for p in d['plan']], ['legal', 'balance'])
+        self.assertEqual(d['plan'][-1]['amount'], 2650000)             # 27,50,000 − legal 1,00,000
+        self.assertEqual(d['net_interest'], 0)
+        self.assertTrue(d['schedule_editable'])
+        self.assertEqual(d['schedule_target'], 2650000)
+
+    def test_ar_schedule_must_add_up_then_drives_interest(self):
+        url = f'/api/ar/accounts/{self.id}/'
+        bad = self.api.patch(url, {'schedule': [{'date': '2026-01-01', 'amount': 1000000}]}, format='json')
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn('26,50,000', bad.json()['detail'])
+        ok = self.api.patch(url, {'schedule': [{'date': '2026-06-01', 'amount': 1650000},
+                                               {'date': '2026-01-01', 'amount': 1000000}]}, format='json')
+        self.assertEqual(ok.status_code, 200)
+        d = self.ledger()
+        self.assertFalse(d['no_schedule'])
+        self.assertTrue(d['ar_schedule'])
+        self.assertEqual([(p['no'], p['due']) for p in d['plan'][:2]], [('1', '2026-01-01'), ('2', '2026-06-01')])
+        self.assertNotIn('balance', [p['kind'] for p in d['plan']])
+        self.assertEqual(d['overdue'], 2650000)
+        self.assertGreater(d['net_interest'], 0)
+        self.assertEqual(d['schedule_by'], 'AR User')
+        # Clearing puts the balance line back.
+        self.api.patch(url, {'schedule': []}, format='json')
+        self.assertTrue(self.ledger()['no_schedule'])
+
+    def test_a_booking_with_its_own_schedule_cannot_be_scheduled_in_ar(self):
+        own = make_booking(self.co, self.project, plot='10')
+        rows = self.api.get('/api/ar/accounts/').json()['results']
+        aid = next(r['id'] for r in rows if r['booking_id'] == own.id)
+        r = self.api.patch(f'/api/ar/accounts/{aid}/', {'schedule': [{'date': '2026-01-01', 'amount': 1}]}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(self.api.get(f'/api/ar/accounts/{aid}/').json()['schedule_editable'])
+
+    def test_suspect_amount_flag(self):
+        make_booking(self.co, self.project, plot='51', final_amount=D('765'), total_extra=D('0'), installments=[])
+        rows = {r['plots']: r for r in self.api.get('/api/ar/accounts/').json()['results']}
+        self.assertTrue(rows['51']['suspect_amount'])
+        self.assertFalse(rows['1003']['suspect_amount'])
+
+    def test_dashboard(self):
+        self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '500000', 'mode': 'bank'}, format='json')
+        self.api.patch(f'/api/ar/accounts/{self.id}/', {'schedule': [{'date': '2026-01-01', 'amount': 2650000}]}, format='json')
+        d = self.api.get('/api/ar/dashboard/?as_of=2026-09-21').json()
+        self.assertEqual(d['accounts'], 1)
+        self.assertEqual(d['totals']['received'], 500000)
+        self.assertEqual(d['totals']['overdue'], 2150000)
+        self.assertEqual(d['overdue_accounts'], 1)
+        self.assertEqual(d['top_overdue'][0]['id'], self.id)
+        self.assertEqual(d['top_over_180'][0]['amount'], 2150000)
+        self.assertEqual(d['projects'], [{'id': self.project.id, 'name': 'Pratishtha'}])
+        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0})
+
+    def test_statement_is_print_ready_html(self):
+        self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '1234567', 'mode': 'cheque',
+                                                                'remarks': 'HDFC <b>'}, format='json')
+        r = self.api.get(f'/api/ar/accounts/{self.id}/statement/?as_of=2026-09-21')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('text/html', r['Content-Type'])
+        html = r.content.decode()
+        self.assertIn('Statement of Account', html)
+        self.assertIn('Asha Patel', html)
+        self.assertIn('₹ 12,34,567', html)            # Indian grouping
+        self.assertIn('HDFC &lt;b&gt;', html)         # remarks are escaped
+        self.assertIn('Vistara Realty', html)
