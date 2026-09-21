@@ -7,13 +7,14 @@ account pointing at the new booking. What IS stored is money actually received:
 one ARReceipt per payment, entered once. Allocation, interest, ageing and status
 are all computed (see engine.py), never typed, so they cannot drift.
 
-Amounts and remarks are encrypted at rest like every other money field in the
-system; the engine aggregates in Python for that reason.
+Everything about a payment is encrypted at rest — amount, date, mode, remarks,
+the audit snapshots, the AR schedule and the Legal & Other due date. So nothing
+is summed, filtered or ordered in SQL; the engine works in Python.
 """
 from django.db import models
 from django.conf import settings
 
-from sales.fields import EncryptedDecimalField, EncryptedTextField
+from sales.fields import EncryptedDateField, EncryptedDecimalField, EncryptedTextField
 
 
 class ARAccount(models.Model):
@@ -28,7 +29,7 @@ class ARAccount(models.Model):
     frozen_at = models.DateTimeField(null=True, blank=True)
     # "Legal & Other Charges" are due at sale deed or possession, whichever is
     # earlier — unknown at booking time. No date means no interest until set.
-    legal_due_date = models.DateField(null=True, blank=True)
+    legal_due_date = EncryptedDateField(null=True, blank=True)
     # Some bookings carry no dated installments at all (every Pratishtha flat: its
     # form has a Regular / Down Payment plan but no schedule). For those only,
     # Accounts enters the schedule here — JSON [{"date": "YYYY-MM-DD", "amount": "…"}].
@@ -51,9 +52,9 @@ class ARReceipt(models.Model):
     SOURCES = [('manual', 'Entered'), ('import', 'Excel import')]
 
     account = models.ForeignKey(ARAccount, on_delete=models.CASCADE, related_name='receipts')
-    paid_on = models.DateField()
+    paid_on = EncryptedDateField()
     amount = EncryptedDecimalField(max_digits=16, decimal_places=2)
-    mode = models.CharField(max_length=10, choices=MODES)
+    mode = EncryptedTextField(choices=MODES)
     remarks = EncryptedTextField(blank=True)
     source = models.CharField(max_length=10, choices=SOURCES, default='manual')
     # Soft delete: a removed receipt stays in the audit trail, never vanishes.
@@ -64,8 +65,9 @@ class ARReceipt(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['paid_on', 'id']
-        indexes = [models.Index(fields=['account', 'is_deleted', 'paid_on'])]
+        # paid_on is encrypted, so SQL can't order by it — callers sort in Python.
+        ordering = ['id']
+        indexes = [models.Index(fields=['account', 'is_deleted'])]
 
 
 class ARReceiptAudit(models.Model):

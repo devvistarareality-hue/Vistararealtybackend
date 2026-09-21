@@ -277,3 +277,95 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertIn('₹ 12,34,567', html)            # Indian grouping
         self.assertNotIn('HDFC', html)                # internal remarks stay off the client's copy
         self.assertIn('Vistara Realty', html)
+
+
+class AREncryptionAtRestTests(TestCase):
+    """Every payment detail must be ciphertext in the database, never plaintext."""
+
+    def test_receipt_and_account_columns_are_ciphertext(self):
+        import os
+        from unittest import mock
+        from cryptography.fernet import Fernet
+        from django.db import connection
+        with mock.patch.dict(os.environ, {'FIELD_ENCRYPTION_KEY': Fernet.generate_key().decode()}):
+            co = Company.objects.create(code='VIS', name='Vistara')
+            project = Project.objects.create(company=co, name='Kalrav 2')
+            user = User.objects.create_user('ar9@test.local', company=co, user_code='AR9', password='x', name='AR', role='Employee', modules=['AR'])
+            make_booking(co, project)
+            api = APIClient()
+            api.force_authenticate(user)
+            aid = api.get('/api/ar/accounts/').json()['results'][0]['id']
+            api.post(f'/api/ar/accounts/{aid}/receipts/', {'paid_on': '2025-08-01', 'amount': '100000', 'mode': 'nbfc',
+                                                          'remarks': 'HDFC 1234'}, format='json')
+            api.patch(f'/api/ar/accounts/{aid}/', {'legal_due_date': '2026-06-30'}, format='json')
+            with connection.cursor() as c:
+                c.execute('SELECT paid_on, amount, mode, remarks FROM receivables_arreceipt')
+                raw = c.fetchone()
+                c.execute('SELECT legal_due_date FROM receivables_araccount')
+                raw_legal = c.fetchone()[0]
+            for v in (*raw, raw_legal):
+                self.assertTrue(str(v).startswith('gAAAAA'), f'not encrypted: {v!r}')
+            self.assertNotIn('2025-08-01', ' '.join(map(str, raw)))
+            # …and the API still reads it all back, figures intact.
+            d = api.get(f'/api/ar/accounts/{aid}/').json()
+            self.assertEqual((d['receipts'][0]['paid_on'], d['receipts'][0]['mode'], d['received']), ('2025-08-01', 'nbfc', 100000))
+            self.assertEqual(d['legal_due_date'], '2026-06-30')
+
+
+class ARGridEntryTests(TestCase):
+    def setUp(self):
+        self.co = Company.objects.create(code='VIS', name='Vistara')
+        self.project = Project.objects.create(company=self.co, name='Kalrav 2')
+        self.user = User.objects.create_user('ar7@test.local', company=self.co, user_code='AR7', password='x', name='AR', role='Employee', modules=['AR'])
+        make_booking(self.co, self.project, plot='10')
+        make_booking(self.co, self.project, plot='2', client_name='Second')
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+        self.ids = {r['plots']: r['id'] for r in self.api.get('/api/ar/accounts/').json()['results']}
+
+    def post(self, rows, commit=False):
+        return self.api.post('/api/ar/import/entries/', {'project_id': self.project.id, 'rows': rows, 'commit': commit}, format='json')
+
+    def test_preview_then_commit(self):
+        rows = [{'line': 1, 'account_id': self.ids['10'], 'paid_on': '2025-08-01', 'amount': '100000', 'mode': 'nbfc'},
+                {'line': 2, 'account_id': self.ids['2'], 'paid_on': '01/09/2025', 'amount': 50000, 'mode': 'Cheque', 'remarks': 'CHQ 11'}]
+        d = self.post(rows).json()
+        self.assertEqual((d['ready'], d['skipped'], d['committed'], d['total_amount']), (2, 0, False, 150000))
+        self.assertEqual(ARReceipt.objects.count(), 0)
+        d = self.post(rows, commit=True).json()
+        self.assertTrue(d['committed'])
+        self.assertEqual(ARReceipt.objects.count(), 2)
+        # Re-sending the same rows is a duplicate, and nothing is saved while any row is wrong.
+        d = self.post(rows, commit=True).json()
+        self.assertEqual((d['ready'], d['skipped'], d['committed']), (0, 2, False))
+        self.assertEqual(ARReceipt.objects.count(), 2)
+
+    def test_bad_rows_block_the_commit(self):
+        future = (timezone.localdate() + timedelta(days=3)).isoformat()
+        rows = [{'line': 1, 'account_id': self.ids['10'], 'paid_on': '2025-08-01', 'amount': '100000', 'mode': 'bank'},
+                {'line': 2, 'account_id': self.ids['2'], 'paid_on': future, 'amount': '5', 'mode': 'bank'},
+                {'line': 3, 'account_id': 999999, 'paid_on': '2025-08-01', 'amount': '5', 'mode': 'bank'},
+                {'line': 4, 'account_id': self.ids['2'], 'paid_on': '2025-08-01', 'amount': '5', 'mode': 'upi'}]
+        d = self.post(rows, commit=True).json()
+        self.assertFalse(d['committed'])
+        self.assertEqual(ARReceipt.objects.count(), 0)
+        reasons = {r['line']: r['reason'] for r in d['skipped_rows']}
+        self.assertIn('future', reasons[2])
+        self.assertIn('No approved booking', reasons[3])
+        self.assertIn('Mode', reasons[4])
+
+    def test_template_lists_the_projects_plots(self):
+        r = self.api.get(f'/api/ar/import/template/?project_id={self.project.id}')
+        self.assertEqual(r.status_code, 200)
+        wb = openpyxl.load_workbook(io.BytesIO(r.content))
+        ws = wb['Payment Tracker']
+        self.assertEqual([c.value for c in ws[1]], ['Plot No', 'Client', 'Paid Date', 'Paid', 'Mode', 'Remarks'])
+        self.assertEqual([ws.cell(i, 1).value for i in (2, 3)], ['2', '10'])     # plot order, not text order
+        # The filled-in template goes straight back through the importer.
+        ws.cell(3, 3).value = date(2025, 8, 1)
+        ws.cell(3, 4).value = 100000
+        ws.cell(3, 5).value = 'NBFC'
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        up = SimpleUploadedFile('t.xlsx', buf.read())
+        d = self.api.post('/api/ar/import/', {'file': up, 'project_id': self.project.id}, format='multipart').json()
+        self.assertEqual((d['ready'], d['skipped']), (1, 0))

@@ -154,7 +154,7 @@ class ARAccountView(APIView):
         if not acct:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         as_of = _as_of(request)
-        receipts = list(acct.receipts.filter(is_deleted=False).select_related('created_by'))
+        receipts = sorted(acct.receipts.filter(is_deleted=False).select_related('created_by'), key=lambda x: (x.paid_on, x.id))
         plan, r, mismatch = compute_account(acct, as_of, receipts)
         data = _summary(acct, plan, r, mismatch)
         data.update({
@@ -432,7 +432,7 @@ class ARStatementView(APIView):
         if not acct:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         as_of = _as_of(request)
-        receipts = list(acct.receipts.filter(is_deleted=False))
+        receipts = sorted(acct.receipts.filter(is_deleted=False), key=lambda x: (x.paid_on, x.id))
         plan, r, mismatch = compute_account(acct, as_of, receipts)
         sm = _summary(acct, plan, r, mismatch)
         fmt = lambda d: d.strftime('%d/%m/%Y') if d else '—'
@@ -522,6 +522,73 @@ def _read_rows(fileobj):
     return out, None
 
 
+def _check_rows(request, pid, rows):
+    """Validate receipt rows for one project. Each row names its account (grid
+    entry) or its plot (Excel file). Returns (ok, skipped); ok rows carry
+    account_id. Same plot + date + amount as a receipt already on the account is
+    a duplicate, so re-running an import adds nothing."""
+    _sync(request)
+    accts = list(_slim(_accounts_qs(request).filter(booking__project_id=pid)))
+    by_id = {a.id: a for a in accts}
+    by_plot = {}
+    for a in accts:
+        for p in _plots_of(a.booking):
+            by_plot.setdefault(p, a)
+    existing = {(r.account_id, r.paid_on, _d(r.amount)) for r in ARReceipt.objects.filter(account__in=accts, is_deleted=False)}
+    today = timezone.localdate()
+    ok, skipped = [], []
+    for row in rows:
+        acct = by_id.get(row.get('account_id')) if row.get('account_id') else by_plot.get(row.get('plot'))
+        reason = None
+        if not row['paid_on']:
+            reason = 'No valid payment date'
+        elif row['paid_on'] > today:
+            reason = 'Payment date is in the future'
+        elif row['amount'] <= 0:
+            reason = 'Amount must be more than zero'
+        elif not row['mode']:
+            reason = 'Mode must be Bank, NBFC, Cash or Cheque'
+        elif not acct:
+            reason = f"No approved booking for plot {row.get('plot') or '?'} in this project"
+        elif acct.status == 'frozen':
+            reason = 'Booking cancelled — account frozen'
+        elif (acct.id, row['paid_on'], row['amount']) in existing:
+            reason = 'Already recorded (same plot, date and amount)'
+        entry = {**row, 'paid_on': row['paid_on'].isoformat() if row['paid_on'] else None,
+                 'amount': float(row['amount']), 'account_id': acct.id if acct else None,
+                 'plot': row.get('plot') or (str(acct.booking.plot_numbers or '') if acct else ''),
+                 'client_name': acct.booking.client_name if acct else ''}
+        if reason:
+            skipped.append({**entry, 'reason': reason})
+        else:
+            ok.append(entry)
+            existing.add((acct.id, row['paid_on'], row['amount']))
+    return ok, skipped
+
+
+def _save_rows(request, ok, source):
+    with transaction.atomic():
+        for e in ok:
+            rc = ARReceipt.objects.create(
+                account_id=e['account_id'], paid_on=parse_date(e['paid_on']), amount=_d(e['amount']),
+                mode=e['mode'], remarks=e['remarks'], source=source,
+                created_by=request.user, updated_by=request.user)
+            ARReceiptAudit.objects.create(receipt=rc, action='create', changed_by=request.user, after=_snap(rc))
+
+
+def _result(ok, skipped, committed):
+    return Response({
+        'committed': committed,
+        'ready': len(ok), 'skipped': len(skipped),
+        'total_amount': rupees(sum((_d(e['amount']) for e in ok), ZERO)),
+        'rows': ok, 'skipped_rows': skipped,
+    })
+
+
+def _wants_commit(request):
+    return request.data.get('commit') in ('1', 'true', True, 1)
+
+
 class ARImportView(APIView):
     """POST multipart: file (.xlsx), project_id, commit=1 to save (default preview)."""
     permission_classes = [IsAuthenticated]
@@ -539,51 +606,109 @@ class ARImportView(APIView):
             return Response({'detail': 'That file could not be read as an Excel workbook (.xlsx).'}, status=status.HTTP_400_BAD_REQUEST)
         if err:
             return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
+        ok, skipped = _check_rows(request, pid, rows)
+        commit = _wants_commit(request) and bool(ok)
+        if commit:
+            _save_rows(request, ok, 'import')
+        return _result(ok, skipped, commit)
 
+
+class ARBulkEntryView(APIView):
+    """Receipts typed into the on-screen grid, plot-wise within one project.
+    JSON {project_id, rows: [{line, account_id, paid_on, amount, mode, remarks}], commit}.
+    Preview first (nothing saved), then commit — same checks as the Excel import."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not has_ar_access(request.user):
+            return _deny()
+        pid = request.data.get('project_id')
+        raw = request.data.get('rows')
+        if not pid or not isinstance(raw, list) or not raw:
+            return Response({'detail': 'Choose a project and enter at least one payment.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(raw) > 2000:
+            return Response({'detail': 'Enter at most 2,000 payments at a time.'}, status=status.HTTP_400_BAD_REQUEST)
+        rows = []
+        for i, r in enumerate(raw, start=1):
+            r = r if isinstance(r, dict) else {}
+            try:
+                aid = int(r.get('account_id'))
+            except (TypeError, ValueError):
+                aid = None
+            rows.append({
+                'line': r.get('line') or i, 'account_id': aid, 'plot': str(r.get('plot') or '')[:40],
+                'paid_on': parse_date(r.get('paid_on')), 'amount': _d(r.get('amount')),
+                'mode': MODE_ALIASES.get(str(r.get('mode') or '').strip().lower(), ''),
+                'remarks': str(r.get('remarks') or '').strip()[:500],
+            })
+        ok, skipped = _check_rows(request, pid, rows)
+        commit = _wants_commit(request) and bool(ok) and not skipped
+        if commit:
+            _save_rows(request, ok, 'manual')
+        return _result(ok, skipped, commit)
+
+
+class ARImportTemplateView(APIView):
+    """GET ?project_id= → an .xlsx with one row per approved plot of the project,
+    ready to fill in and upload (or to copy into the on-screen grid)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not has_ar_access(request.user):
+            return _deny()
+        pid = request.query_params.get('project_id')
+        if not pid:
+            return Response({'detail': 'Choose a project.'}, status=status.HTTP_400_BAD_REQUEST)
+        import io
+        import openpyxl
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.worksheet.datavalidation import DataValidation
         _sync(request)
-        accts = list(_accounts_qs(request).filter(booking__project_id=pid).select_related('booking', 'booking__plot'))
-        by_plot = {}
+        accts = [a for a in _slim(_accounts_qs(request).filter(booking__project_id=pid, status='active'))]
+        accts.sort(key=lambda a: _plot_sort_key(str(a.booking.plot_numbers or '')))
+        project = accts[0].booking.project.name if accts else 'Project'
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'Payment Tracker'
+        head = ['Plot No', 'Client', 'Paid Date', 'Paid', 'Mode', 'Remarks']
+        ws.append(head)
+        fill = PatternFill('solid', fgColor='1F5490')
+        for c in ws[1]:
+            c.font = Font(bold=True, color='FFFFFF')
+            c.fill = fill
+            c.alignment = Alignment(vertical='center')
         for a in accts:
-            for p in _plots_of(a.booking):
-                by_plot.setdefault(p, a)
-        existing = {(r.account_id, r.paid_on, _d(r.amount)) for r in ARReceipt.objects.filter(account__in=accts, is_deleted=False)}
+            ws.append([str(a.booking.plot_numbers or ''), a.booking.client_name or '', None, None, None, None])
+        for col, w in zip('ABCDEF', (12, 32, 14, 16, 12, 40)):
+            ws.column_dimensions[col].width = w
+        n = ws.max_row
+        for r in range(2, max(n, 2) + 200):
+            ws.cell(r, 3).number_format = 'DD/MM/YYYY'
+            ws.cell(r, 4).number_format = '#,##,##0'
+        dv = DataValidation(type='list', formula1='"Bank,NBFC,Cash,Cheque"', allow_blank=True)
+        ws.add_data_validation(dv)
+        dv.add(f'E2:E{max(n, 2) + 200}')
+        ws.freeze_panes = 'A2'
+        note = wb.create_sheet('How to fill')
+        for line in (
+            f'{project} — receipts template',
+            'One row per payment. For a second payment on the same plot, add a row with the same Plot No.',
+            'Paid Date: the date the money was received (not in the future).',
+            'Paid: the amount in rupees. Mode: Bank, NBFC, Cash or Cheque.',
+            'Leave a plot row blank if nothing was received — blank rows are ignored.',
+            'Upload this file on the Import page; you will see a preview before anything is saved.',
+        ):
+            note.append([line])
+        note.column_dimensions['A'].width = 100
+        buf = io.BytesIO()
+        wb.save(buf)
+        name = f"AR receipts - {project}.xlsx".replace('/', '-')
+        resp = HttpResponse(buf.getvalue(), content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = f'attachment; filename="{name}"'
+        return resp
 
-        ok, skipped = [], []
-        for row in rows:
-            acct = by_plot.get(row['plot'])
-            reason = None
-            if not row['paid_on']:
-                reason = 'No valid payment date'
-            elif not row['mode']:
-                reason = 'Mode must be Bank, NBFC, Cash or Cheque'
-            elif not acct:
-                reason = f"No approved booking for plot {row['plot']} in this project"
-            elif acct.status == 'frozen':
-                reason = 'Booking cancelled — account frozen'
-            elif (acct.id, row['paid_on'], row['amount']) in existing:
-                reason = 'Already recorded (same plot, date and amount)'
-            entry = {**row, 'paid_on': row['paid_on'].isoformat() if row['paid_on'] else None,
-                     'amount': float(row['amount']), 'account_id': acct.id if acct else None,
-                     'client_name': acct.booking.client_name if acct else ''}
-            if reason:
-                skipped.append({**entry, 'reason': reason})
-            else:
-                ok.append(entry)
-                existing.add((acct.id, row['paid_on'], row['amount']))
 
-        committed = False
-        if request.data.get('commit') in ('1', 'true', True) and ok:
-            with transaction.atomic():
-                for e in ok:
-                    rc = ARReceipt.objects.create(
-                        account_id=e['account_id'], paid_on=parse_date(e['paid_on']), amount=_d(e['amount']),
-                        mode=e['mode'], remarks=e['remarks'], source='import',
-                        created_by=request.user, updated_by=request.user)
-                    ARReceiptAudit.objects.create(receipt=rc, action='create', changed_by=request.user, after=_snap(rc))
-            committed = True
-        return Response({
-            'committed': committed,
-            'ready': len(ok), 'skipped': len(skipped),
-            'total_amount': rupees(sum((_d(e['amount']) for e in ok), ZERO)),
-            'rows': ok, 'skipped_rows': skipped,
-        })
+def _plot_sort_key(p):
+    import re
+    m = re.match(r'([A-Za-z-]*)(\d+)', p.strip())
+    return (m.group(1).upper(), int(m.group(2))) if m else (p.upper(), 0)
