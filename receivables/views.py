@@ -182,6 +182,10 @@ class ARAccountView(APIView):
             'overpaid': rupees(r.overpaid),
             'overpaid_credit': rupees(r.overpaid_credit),
             'month_forecast': [{'label': lbl, 'amount': rupees(v)} for lbl, v in r.month_forecast],
+            # The workbook's "O/s Summary": what is already overdue sits in the current
+            # month, later months show what falls due, and the rows add up to the O/s.
+            'os_summary': [{'label': lbl, 'amount': rupees(v + (r.overdue if i == 0 else ZERO))}
+                           for i, (lbl, v) in enumerate(r.month_forecast)],
         })
         return Response(data)
 
