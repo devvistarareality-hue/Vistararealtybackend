@@ -377,6 +377,49 @@ class ARDashboardView(APIView):
         })
 
 
+class ARBookingView(APIView):
+    """The booking behind an AR account, in full (the same view Accounts & Finance
+    gets), so AR can check the deal without needing Sales access."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = _accounts_qs(request).filter(pk=pk).first()
+        if not acct:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from sales.serializers import BookingSerializer
+        b = Booking.objects.select_related('project', 'plot', 'stm', 'approved_by', 'accounts_approved_by').get(pk=acct.booking_id)
+        return Response(BookingSerializer(b, context={'request': request}).data)
+
+
+class ARLoiUrlView(APIView):
+    """A short-lived signed link to the account's LOI / EOI PDF, for AR users.
+    Same rules as Sales' own link: the company must have LOI documents enabled,
+    and the bucket stays private — this link is the only way in."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        acct = _accounts_qs(request).select_related('booking', 'booking__company').filter(pk=pk).first()
+        b = acct.booking if acct else None
+        if not b or not b.loi_document:
+            return Response({'detail': 'No LOI / EOI document is stored for this booking.'}, status=status.HTTP_404_NOT_FOUND)
+        if not getattr(b.company, 'loi_enabled', False):
+            return Response({'detail': 'LOI / EOI documents are not enabled for this company.'}, status=status.HTTP_403_FORBIDDEN)
+        from sales.supabase_storage import create_signed_url
+        url = create_signed_url(b.loi_document.name, expires_in=120)
+        if not url:
+            try:
+                url = request.build_absolute_uri(b.loi_document.url)   # local dev storage
+            except Exception:
+                url = None
+        if not url:
+            return Response({'detail': 'LOI unavailable.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'url': url, 'kind': 'EOI' if str(b.plot_numbers or '').upper().startswith('EOI') else 'LOI'})
+
+
 class ARStatementView(APIView):
     """The account statement a client can be sent, as a print-ready HTML page.
     The web prints it to PDF in the browser; the app turns it into a PDF with
