@@ -91,6 +91,9 @@ def delete_object(name, bucket='erp-media'):
         pass
 
 
+SIGN_SAFE = "/,()'!*@:;"
+
+
 def create_signed_url(name, expires_in=120):
     """Short-lived signed URL for a private-bucket object. Returned only to
     authenticated, authorised users — so confidential LOIs aren't publicly reachable.
@@ -102,7 +105,11 @@ def create_signed_url(name, expires_in=120):
         return None
     try:
         r = requests.post(
-            f'{base}/storage/v1/object/sign/{bucket}/{quote(name)}',
+            # Commas and brackets stay as they are: Supabase signs the path exactly as
+            # sent, then checks it against the decoded file name, so "%2C" in the
+            # signing request made every link to a joint-buyer LOI ("A (50) ,B (50)")
+            # fail with InvalidSignature.
+            f'{base}/storage/v1/object/sign/{bucket}/{quote(name, safe=SIGN_SAFE)}',
             json={'expiresIn': int(expires_in)},
             headers={'Authorization': f'Bearer {key}', 'apikey': key, 'Content-Type': 'application/json'},
             timeout=10,
