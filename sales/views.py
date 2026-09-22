@@ -4756,10 +4756,25 @@ class BookingListCreateView(APIView):
             sname = (data.get('source') or '').strip()
             if sname:
                 src = LeadSource.objects.filter(company=company, name__iexact=sname).first()
+            # cp_name means different things depending on source (CP name, a plain
+            # Reference person, or "Other") — only resolve it against the Channel
+            # Partner directory when the source actually is Channel Partner, or a
+            # reference person's typed name would wrongly link to a same-named CP.
+            # name is encrypted (no blind index), so this has to compare in Python —
+            # fine at this scale, same as other encrypted-field lookups in this file.
+            channel_partner = None
+            cp_name = (data.get('cp_name') or '').strip()
+            if cp_name and sname.lower() == 'channel partner':
+                channel_partner = next(
+                    (cp for cp in ChannelPartner.objects.filter(company=company)
+                     if cp.name.strip().lower() == cp_name.lower()),
+                    None,
+                )
             lead = Lead.objects.create(
                 company=company, name=data.get('client_name', '').strip(),
                 phone=(data.get('phone') or '').strip(), status='new',
                 project_id=data.get('project') or None, source=src,
+                channel_partner=channel_partner,
                 # STM self-sourced this client straight into a booking — no
                 # telecaller ever touched it. stm must be set (same value the
                 # Booking itself gets below), or _distribute's telecaller pool
