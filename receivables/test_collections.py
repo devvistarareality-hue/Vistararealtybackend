@@ -56,6 +56,16 @@ class CollectionsTests(TestCase):
         d = self.api.get('/api/ar/collections/?view=upcoming&days=90').json()
         self.assertEqual(d['results'][0]['upcoming_amount'], 700000)
 
+    def test_today_window(self):
+        today = timezone.localdate()
+        self.booking.installments = self.booking.installments + [{'no': 5, 'date': today.isoformat(), 'amt': 50000}]
+        self.booking.final_amount = 1050000
+        self.booking.save()
+        d = self.api.get('/api/ar/collections/?view=upcoming&days=0').json()
+        self.assertEqual(d['days'], 0)
+        self.assertEqual(d['results'][0]['upcoming_amount'], 50000)
+        self.assertEqual(d['results'][0]['next_due']['date'], today.isoformat())
+
     def test_payment_clears_overdue(self):
         self.api.post(f'/api/ar/accounts/{self.aid}/receipts/',
                       {'paid_on': timezone.localdate().isoformat(), 'amount': 300000, 'mode': 'bank'}, format='json')
