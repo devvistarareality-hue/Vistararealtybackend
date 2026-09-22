@@ -4,6 +4,7 @@ import hmac
 import re
 import secrets
 from datetime import datetime, time as dt_time, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import requests as http_requests
 from django.conf import settings
@@ -1022,6 +1023,88 @@ def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
     return set(qs.values_list('id', flat=True))
 
 
+def _merge_into_existing_lead(existing, validated, user, can_assign):
+    """Same phone + same project as an already-live lead: update that lead in
+    place instead of inserting a duplicate row, regardless of who's adding it
+    or who already owns it. Whoever adds it now takes over their own stage
+    (telecaller or STM/CP) — an STM/CP taking over always replaces the
+    previous STM/CP, by design: two people chasing the same contact should
+    collapse onto one record, not fork into two.
+
+    If the lead has a telecaller but NO STM/CP yet and an STM/CP is the one
+    taking it over, that's the first handoff — the telecaller's independent
+    work just got confirmed by someone else finding the same contact, which
+    is exactly the signal 'warm' already means, so it's set automatically
+    (reusing the same warm-transfer path a telecaller picking 'warm'
+    themselves triggers, further down in post()). If an STM/CP is ALREADY
+    assigned, that handoff already happened — a later STM/CP taking over from
+    the previous one is a pure ownership swap on the STM side; the telecaller
+    side is left untouched.
+    """
+    old_tc_status = existing.telecaller_status
+    if is_cp(user) or is_stm(user):
+        first_handoff = existing.telecaller_id and not existing.stm_id
+        existing.stm = user
+        existing.stm_assigned_at = timezone.now()
+        if validated.get('stm_status'):
+            existing.stm_status = validated['stm_status']
+        if validated.get('stm_remarks'):
+            existing.stm_remarks = validated['stm_remarks']
+        if first_handoff and existing.telecaller_status != 'warm':
+            existing.telecaller_status = 'warm'
+    elif is_telecaller(user):
+        existing.telecaller = user
+        existing.telecaller_assigned_at = timezone.now()
+        if validated.get('telecaller_status'):
+            existing.telecaller_status = validated['telecaller_status']
+        if validated.get('telecaller_remarks'):
+            existing.telecaller_remarks = validated['telecaller_remarks']
+    elif can_assign:
+        # Admin/manager re-adding the same contact — apply whatever assignment
+        # and status fields they explicitly submitted.
+        for field in ('telecaller', 'stm', 'telecaller_status', 'telecaller_remarks',
+                      'stm_status', 'stm_remarks'):
+            if validated.get(field):
+                setattr(existing, field, validated[field])
+        if validated.get('telecaller') or validated.get('stm'):
+            existing.telecaller_assigned_at = timezone.now() if validated.get('telecaller') else existing.telecaller_assigned_at
+            existing.stm_assigned_at = timezone.now() if validated.get('stm') else existing.stm_assigned_at
+
+    existing.duplicate_count += 1
+    existing.save()
+    LeadStatusHistory.objects.create(
+        lead=existing, changed_by=user, field_changed='lead_merged',
+        old_value='', new_value=f'Re-added by {user.name or user.username}',
+    )
+
+    # Same warm-transfer sync the create path runs: telecaller_status becoming
+    # 'warm' here (set above) moves the lead into the STM pipeline exactly like
+    # a telecaller picking 'warm' themselves would — except the STM is already
+    # the one who just took ownership above, so no auto-distribution is needed.
+    if old_tc_status != 'warm' and existing.telecaller_status == 'warm' and existing.status != 'warm_transferred':
+        old_status = existing.status
+        existing.status = 'warm_transferred'
+        existing.save(update_fields=['status'])
+        LeadStatusHistory.objects.create(
+            lead=existing, changed_by=user,
+            field_changed='status', old_value=old_status, new_value=existing.status,
+        )
+        LeadStatusHistory.objects.create(
+            lead=existing, changed_by=user,
+            field_changed='warm_transfer', old_value='', new_value='Transferred to STM',
+        )
+    if existing.stm_status and existing.status != existing.stm_status:
+        old_status = existing.status
+        existing.status = existing.stm_status
+        existing.save(update_fields=['status'])
+        LeadStatusHistory.objects.create(
+            lead=existing, changed_by=user,
+            field_changed='status', old_value=old_status, new_value=existing.status,
+        )
+    existing.refresh_from_db()
+    return existing
+
+
 class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1250,37 +1333,51 @@ class LeadListView(APIView):
         if project and not _project_in_scope(request, project.id):
             return Response({'detail': 'Invalid project for your company.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        phone = ser.validated_data['phone']
+        clean = ''.join(c for c in phone if c.isdigit())[-10:]
+        phone_idx = phone_blind_index(clean) if clean else ''
+
+        # Same phone + same project as an already-live lead → update that lead
+        # in place instead of inserting a duplicate row (see
+        # _merge_into_existing_lead). A different project is a genuinely
+        # separate inquiry and falls through to the normal create path below.
+        # A lead already closed/lost is left alone too — re-adding one of
+        # those is a new inquiry, not the same live conversation.
+        if phone_idx and project:
+            same_lead = (
+                Lead.objects.filter(company=company, project=project, phone_key=phone_idx)
+                .exclude(status__in=('closed', 'lost'))
+                .order_by('-created_at').first()
+            )
+            if same_lead:
+                merged = _merge_into_existing_lead(same_lead, ser.validated_data, request.user, can_assign)
+                return Response(LeadDetailSerializer(merged).data, status=status.HTTP_200_OK)
+
         # Duplicate check — match last 10 digits regardless of +91 prefix. Scoped to
         # the creator's own bucket (telecaller→their leads, STM/CP→their leads) so a
         # CP's lead is only a duplicate of another CP lead, not of someone else's.
         # Admins/managers keep the company-wide check.
-        phone = ser.validated_data['phone']
-        clean = ''.join(c for c in phone if c.isdigit())[-10:]
         dup_qs = (
             scope_leads_to_role(scope_to_company(Lead.objects.all(), request.user), request.user)
-            .filter(phone_key=phone_blind_index(clean))
+            .filter(phone_key=phone_idx)
             if clean else Lead.objects.none()
         )
         existing = dup_qs.first()
 
         # Self-sourced (manually added) leads are assigned to their creator so they
-        # land in that person's pipeline, and are marked actioned (status defaults to
-        # 'warm' if none given) so they appear in the "Called" bucket, not "To Call" —
-        # the creator already has the contact, there's nothing to call fresh.
+        # land in that person's pipeline. Bucket follows whatever status the creator
+        # actually set on the form: blank → "To Call" (they haven't spoken to the
+        # lead yet), any status → "Called" (they have). This used to force a status
+        # ('warm'/'callback') onto a blank field so a self-sourced lead always
+        # landed in "Called" — reversed on request: a status left blank while adding
+        # a lead must mean it still needs a call, for CP, STM and Telecaller alike.
         extra = {}
         if not can_assign:
-            # Callers self-source: own the lead + mark actioned → their "Called" bucket.
+            # Callers self-source: own the lead. Status is whatever they set — see above.
             if is_cp(request.user) or is_stm(request.user):
                 extra['stm'] = request.user
-                if not ser.validated_data.get('stm_status'):
-                    extra['stm_status'] = 'warm'
             elif is_telecaller(request.user):
                 extra['telecaller'] = request.user
-                if not ser.validated_data.get('telecaller_status'):
-                    # 'callback' (not 'warm') so a blank status lands in the telecaller's
-                    # "Called" bucket WITHOUT auto-transferring — 'warm' is a deliberate
-                    # transfer-to-STM action handled below.
-                    extra['telecaller_status'] = 'callback'
         else:
             # Admin/manager assigned via the form → stamp assignment time. Status is
             # left empty so the lead lands in the assignee's "To Call" bucket — a
@@ -2143,6 +2240,7 @@ class LeadCompanySearchView(APIView):
                 'name': l.name,
                 'phone': l.phone,
                 'status': l.status,
+                'project_id': l.project_id,
                 'project_name': l.project.name if l.project_id else '',
                 'telecaller_name': l.telecaller.name if l.telecaller_id else '',
                 'stm_name': l.stm.name if l.stm_id else '',
@@ -2529,12 +2627,18 @@ class TelecallerListView(APIView):
                 users = sales_qs
         elif crm_role == 'cp_module':
             # Everyone with access to the Channel Partner module — admins/staff/
-            # Sales Admin-Modules users, and CP-designation Managers (see
-            # is_cp_manager) — for the "who owns this CP lead" filter. Not a
-            # designation substring, so filtered in Python like the other
-            # cross-cutting permission checks in this file.
+            # Sales Admin-Modules users, CP Executives and CP-designation Managers
+            # (is_cp_designated) — plus anyone who currently owns a CP lead as its
+            # stm even without a CP designation (a lead transferred to a regular
+            # STM, say). Not a designation substring, so filtered in Python like
+            # the other cross-cutting permission checks in this file.
+            company_ids = base_qs.values_list('company_id', flat=True).distinct()
+            cp_lead_stm_ids = set(
+                Lead.objects.filter(cp_lead_q(), company_id__in=company_ids)
+                .exclude(stm__isnull=True).values_list('stm_id', flat=True)
+            )
             users = sorted(
-                (u for u in base_qs if _is_sales_admin(u) or is_cp_manager(u)),
+                (u for u in base_qs if _is_sales_admin(u) or is_cp_designated(u) or u.id in cp_lead_stm_ids),
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'accounts_module':
@@ -4310,6 +4414,60 @@ def _next_eoi_no(company, project_id, prefer='', block=None):
     return f'EOI-{n}'
 
 
+# A schedule typed a few hundred rupees short (or over) used to slip through: the
+# form checked percentages to ±0.01% (about ₹1,500 on a ₹1.5 Cr schedule), and the
+# server did not add the installments up at all. Rounding each installment to the
+# rupee can leave a rupee or two; anything beyond this is a typing mistake.
+SCHEDULE_TOLERANCE = Decimal('10')
+
+
+def _schedule_gap(data):
+    """How far a booking's payment schedule is from its deal, in rupees (schedule −
+    deal), or None when there is no schedule to check. The deal is every sale-deed
+    and Extra Work (NSD) installment, the "Extra" row (Legal & Other Charges with
+    stamp duty and registration) and any extra-work installments. EOIs carry only a
+    token by design and are not checked; neither is a booking whose schedule has no
+    amounts (a Pratishtha Regular plan)."""
+    if data.get('eoi') or str(data.get('plot_numbers') or '').upper().startswith('EOI'):
+        return None
+
+    def amt(x):
+        try:
+            return Decimal(str((x or {}).get('amt') or 0))
+        except (InvalidOperation, ValueError, TypeError, AttributeError):
+            return Decimal('0')
+
+    inst = data.get('installments') or []
+    ew = data.get('extra_work_inst') or []
+    if not isinstance(inst, list):
+        return None
+    is_extra_row = lambda i: str((i or {}).get('no', '')).strip().lower() == 'extra'
+    # Only a schedule whose unit / Extra Work installments carry amounts is checked —
+    # the Legal & Other row alone is not a schedule.
+    if not any(amt(i) > 0 for i in inst if not is_extra_row(i)):
+        return None
+    try:
+        deal = Decimal(str(data.get('final_amount') or 0))
+    except (InvalidOperation, ValueError):
+        return None
+    total = sum((amt(i) for i in inst), Decimal('0')) + sum((amt(i) for i in (ew if isinstance(ew, list) else [])), Decimal('0'))
+    if not any(is_extra_row(i) for i in inst):
+        try:
+            total += Decimal(str(data.get('total_extra') or 0))
+        except (InvalidOperation, ValueError):
+            pass
+    return total - deal
+
+
+def _schedule_error(data):
+    gap = _schedule_gap(data)
+    if gap is None or abs(gap) <= SCHEDULE_TOLERANCE:
+        return None
+    word = 'short of' if gap < 0 else 'more than'
+    return (f'The payment schedule is Rs. {abs(gap):,.0f} {word} the total deal. '
+            f'Adjust the installments so they add up to the deal amount exactly.')
+
+
 class BookingListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -4444,6 +4602,10 @@ class BookingListCreateView(APIView):
                     {'detail': f'File too large (max {settings.MAX_UPLOAD_FILE_MB} MB).'},
                     status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
+
+        schedule_err = _schedule_error(data)
+        if schedule_err:
+            return Response({'detail': schedule_err, 'installments': [schedule_err]}, status=status.HTTP_400_BAD_REQUEST)
 
         # A booking against a project that HAS plots mapped must name one. Without
         # this the API accepted a booking with no plot, so nothing was reserved and

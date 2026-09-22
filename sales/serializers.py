@@ -396,6 +396,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
             'stm', 'stm_name', 'stm_status', 'sv_outcome', 'stm_assigned_at',
+            'disqualify_reason', 'disqualify_note',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
         ]
@@ -425,6 +426,7 @@ class LeadCreateSerializer(serializers.ModelSerializer):
             'city', 'address', 'purpose', 'budget_bucket',
             'telecaller', 'stm',
             'telecaller_status', 'telecaller_remarks', 'stm_status', 'stm_remarks',
+            'disqualify_reason', 'disqualify_note',
         ]
 
     def validate_phone(self, value):
@@ -439,6 +441,7 @@ class LeadUpdateSerializer(serializers.ModelSerializer):
             'project', 'source', 'channel_partner', 'status',
             'telecaller', 'telecaller_status', 'telecaller_remarks', 'telecaller_assigned_at',
             'stm', 'stm_status', 'stm_remarks', 'stm_assigned_at',
+            'disqualify_reason', 'disqualify_note',
             'budget_min', 'budget_max', 'requirement', 'preferred_location',
             'city', 'address', 'purpose', 'budget_bucket',
         ]

@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     'attendance',
     'sales',
     'club1000',
+    'receivables',
 ]
 
 MIDDLEWARE = [

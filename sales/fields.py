@@ -164,6 +164,53 @@ class EncryptedDecimalField(models.DecimalField):
         return self.get_prep_value(value)
 
 
+class EncryptedDateField(models.DateField):
+    """Confidential date: read/write a datetime.date as usual, but the column holds
+    Fernet ciphertext of its ISO form. No key set -> plaintext ISO passthrough.
+    Reads tolerate ciphertext, legacy plaintext and native date values (safe,
+    resumable migration). Not usable in SQL filter/order — sort in Python.
+    """
+
+    def get_internal_type(self):
+        return 'TextField'
+
+    def db_type(self, connection):
+        return 'text'
+
+    @staticmethod
+    def _plain(value):
+        if isinstance(value, str):
+            f = get_fernet()
+            if f is not None:
+                try:
+                    return f.decrypt(value.encode()).decode()
+                except (InvalidToken, Exception):
+                    pass
+        return value
+
+    def from_db_value(self, value, expression, connection):
+        if value in (None, ''):
+            return None
+        return super().to_python(self._plain(value))
+
+    def to_python(self, value):
+        if value in (None, ''):
+            return None
+        return super().to_python(self._plain(value))
+
+    def get_prep_value(self, value):
+        d = self.to_python(value)
+        if d is None:
+            return None
+        s = d.isoformat()
+        f = get_fernet()
+        return f.encrypt(s.encode()).decode() if f is not None else s
+
+    def get_db_prep_value(self, value, connection, prepared=False):
+        # Skip DateField's date adaptation — the column stores text.
+        return value if prepared else self.get_prep_value(value)
+
+
 def sorted_by_name(rows, reverse=False):
     """Order people by name in Python.
 
