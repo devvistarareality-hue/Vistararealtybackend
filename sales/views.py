@@ -4369,18 +4369,31 @@ def _loi_enabled(company):
     return bool(getattr(company, 'loi_enabled', False))
 
 
+LOI_NAME_ALLOWED = r'[^A-Za-z0-9 ._-]+'
+
+
+def _loi_safe(s):
+    """A file/folder name that can never break a signed link: letters, digits,
+    spaces, dot, underscore and hyphen only. Everything else a buyer's name can
+    hold — "&", "%", ",", brackets, slashes, non-Latin script — is dropped.
+
+    This used to be a list of characters to remove, grown one broken booking at a
+    time ("&" for "PARAG & SAHIL BHAI", then "," for joint buyers "A (50) ,B (50)"),
+    each failing every open with Supabase's InvalidSignature. An allow-list can't
+    be surprised by the next character."""
+    import re
+    import unicodedata
+    text = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode()
+    text = re.sub(LOI_NAME_ALLOWED, ' ', text)
+    return re.sub(r'\s+', ' ', text).strip(' .') or 'NA'
+
+
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
-    import re
-    # Also strips &%#+;= — safe as literal filesystem chars, but they break Supabase's
-    # signed-URL scheme (an "&" in the path produced a token whose embedded path didn't
-    # match the actual object key, failing signature verification on every open —
-    # confirmed against a real booking, "PARAG & SAHIL BHAI").
-    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
-    proj = san(b.project.name if b.project_id else 'Project')
+    proj = _loi_safe(b.project.name if b.project_id else 'Project')
     # EOI bookings have no plot — fall back to the EOI code held in plot_numbers.
-    plot = san(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
-    client = san(b.client_name)
+    plot = _loi_safe(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
+    client = _loi_safe(b.client_name)
     rev = b.revision_no or 0
     return f'{proj}/Plot {plot} - {client}/R{rev}_LOI_Plot{plot}_{client}.pdf'
 
