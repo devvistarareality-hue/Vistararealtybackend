@@ -83,3 +83,34 @@ class ARReceiptAudit(models.Model):
 
     class Meta:
         ordering = ['-changed_at']
+
+
+class ARFollowUp(models.Model):
+    """A collections follow-up on an account: who calls the customer, when, what was
+    said and what they promised. The time stays plain so reminders can find what is
+    due; everything the customer said is encrypted."""
+    CHANNELS = [('call', 'Call'), ('whatsapp', 'WhatsApp'), ('visit', 'Visit'),
+                ('email', 'Email'), ('other', 'Other')]
+    STATUS = [('pending', 'Pending'), ('done', 'Done'), ('cancelled', 'Cancelled')]
+
+    account = models.ForeignKey(ARAccount, on_delete=models.CASCADE, related_name='followups')
+    scheduled_at = models.DateTimeField()
+    channel = models.CharField(max_length=10, choices=CHANNELS, default='call')
+    status = models.CharField(max_length=10, choices=STATUS, default='pending')
+    note = EncryptedTextField(blank=True)
+    outcome = EncryptedTextField(blank=True)
+    # What the customer promised on this follow-up, if anything.
+    promised_amount = EncryptedDecimalField(max_digits=16, decimal_places=2, null=True, blank=True)
+    promised_on = EncryptedDateField(null=True, blank=True)
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    done_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    done_at = models.DateTimeField(null=True, blank=True)
+    # Stamped once each by the scheduled-notification job, so it never double-notifies.
+    reminder_sent_at = models.DateTimeField(null=True, blank=True)
+    escalated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['scheduled_at', 'id']
+        indexes = [models.Index(fields=['status', 'scheduled_at']), models.Index(fields=['account', 'status'])]

@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'sales',
     'club1000',
     'receivables',
+    'activity',
 ]
 
 MIDDLEWARE = [
@@ -61,6 +62,8 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Who did what: one row per change made through the API (see activity/recorder.py).
+    'activity.recorder.ActivityLogMiddleware',
 ]
 
 ROOT_URLCONF = 'vistararealtybackend.urls'
