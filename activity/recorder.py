@@ -83,6 +83,8 @@ def describe(method, path, body, response_id=None):
     body_action = str((body or {}).get('action') or '').lower() if isinstance(body, dict) else ''
     if sub in ('action', 'accounts-action') and body_action:
         sub = body_action
+    elif not sub and body_action in VERBS and method in ('POST', 'PATCH'):
+        sub = body_action    # e.g. attendance/leave-action/<id>/ {"action": "approve"}
     target_type = _singular(resource)
     label = _human(target_type)
     ref = (' #%s' % target_id) if target_id else ''
@@ -115,11 +117,16 @@ def _body_details(body):
     return out
 
 
+# A status change that is really a decision reads as that decision.
+STATUS_VERBS = {'approved': 'Approved', 'rejected': 'Rejected', 'cancelled': 'Cancelled', 'canceled': 'Cancelled',
+                'completed': 'Completed', 'done': 'Completed', 'withdrawn': 'Withdrew'}
+
+
 def ref_in(summary, tid):
     return bool(tid) and ('#%s' % tid) in (summary or '')
 
 
-PLOT_VERBS = {'hold': 'Held', 'release': 'Released', 'cancel-hold': 'Cancelled hold on',
+PLOT_VERBS = {'hold': 'Held', 'release': 'Released', 'cancel-hold': 'Cancelled hold on', 'bulk': 'Added',
               'bulk-delete': 'Deleted', 'rename-type': 'Renamed type of'}
 
 
@@ -134,6 +141,18 @@ def plot_names(ids):
             groups.setdefault(pl.project.name if pl.project_id else '', []).append(str(pl.number))
         return ' · '.join('%s Plot %s' % (proj, ', '.join(nums)) if proj else 'Plot ' + ', '.join(nums)
                           for proj, nums in groups.items())
+    except Exception:
+        return ''
+
+
+def _new_plots(body):
+    """"Audit Tower Plot A1, A2" for a bulk create (the plots don't exist yet)."""
+    try:
+        from sales.models import Project
+        proj = Project.objects.filter(pk=body.get('project_id')).values_list('name', flat=True).first() or ''
+        nums = [str(p.get('number')) for p in body.get('plots') if isinstance(p, dict) and p.get('number')]
+        shown = ', '.join(nums[:30]) + (' +%d more' % (len(nums) - 30) if len(nums) > 30 else '')
+        return '%d plot%s — %s Plot %s' % (len(nums), '' if len(nums) == 1 else 's', proj, shown)
     except Exception:
         return ''
 
@@ -175,6 +194,8 @@ class ActivityLogMiddleware:
             ids = _plot_ids(body)
             if ids:
                 plots = plot_names(ids)
+            elif request.path.endswith('/plots/bulk/') and isinstance(body, dict) and body.get('plots'):
+                plots = _new_plots(body)
         if watch:
             ch.start()
         try:
@@ -236,10 +257,25 @@ class ActivityLogMiddleware:
             if not extra.get('summary'):
                 noun = _human(primary['type'])
                 who = (' — ' + label) if label else (' #%s' % primary['id'])
-                if primary.get('deleted'):
+                same = [c for c in captured if c['type'] == primary['type']
+                        and c['created'] == primary['created'] and c.get('deleted') == primary.get('deleted')]
+                status_to = next((d['to'] for d in primary['changes'] if d['field'] == 'Status'), '')
+                status_verb = STATUS_VERBS.get(status_to.strip().lower())
+                if len(same) > 1 and (primary['created'] or primary.get('deleted')):
+                    # Many at once (bulk delete, import): one line naming them.
+                    names = [c['label'] for c in same if c['label']]
+                    summary = '%s %d %ss — %s%s' % ('Deleted' if primary.get('deleted') else 'Created', len(same), noun,
+                                                   ', '.join(names[:8]), ' +%d more' % (len(names) - 8) if len(names) > 8 else '')
+                    details['all'] = [c['label'] for c in same][:200]
+                elif primary.get('deleted'):
                     summary = 'Deleted %s%s' % (noun, who)
+                elif primary['created'] and 'apply-leave' in request.path:
+                    summary = 'Applied for leave%s' % who
                 elif primary['created']:
                     summary = 'Created %s%s' % (noun, who)
+                elif status_verb and action in ('updated', 'approve', 'reject', 'cancel'):
+                    rest = [d for d in primary['changes'] if d['field'] != 'Status']
+                    summary = '%s %s%s%s' % (status_verb, noun, who, (' · ' + change_text(rest)) if rest else '')
                 elif primary['changes'] and action == 'updated':
                     summary = 'Updated %s%s · %s' % (noun, who, change_text(primary['changes']))
                 elif label and ref_in(summary, tid):
