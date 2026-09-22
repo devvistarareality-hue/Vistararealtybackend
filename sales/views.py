@@ -636,8 +636,20 @@ class StatsView(APIView):
             unassigned_leads=Count('id', filter=Q(
                 status='new', telecaller__isnull=True, stm__isnull=True)),
             leads_today=Count('id', filter=Q(created_at__date=today)),
-            called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
         )
+
+        # "Called/MQL" and "Total Called" must mean "worked within this range", not
+        # "created within this range and currently has a status" — same fix already
+        # applied to the "Called" tab's own date filter (see _leads_worked_in_range),
+        # which this used to disagree with: a lead created outside the window but
+        # actually called inside it was missed here and counted there, and vice
+        # versa. Without a date range there's no "worked in range" to compute, so it
+        # falls back to the plain "currently called" snapshot, same as before.
+        if date_from or date_to:
+            status_field = 'stm_status' if (is_stm(request.user) or is_cp(request.user)) else 'telecaller_status'
+            called_count = len(_leads_worked_in_range(leads_scope, status_field, '', date_from, date_to))
+        else:
+            called_count = leads_qs.exclude(telecaller_status='').count()
 
         # Status-bucket counts (hot/warm/callback/not_reachable/cold, and the STM
         # equivalents) are counted by the date the lead's status actually CHANGED
@@ -805,13 +817,13 @@ class StatsView(APIView):
             'new_leads':          agg['new_leads'],
             'unassigned_leads':   agg['unassigned_leads'],
             'leads_today':        agg['leads_today'],
-            'called_count':       agg['called_count'],
+            'called_count':       called_count,
             'to_call_count':      to_call_count,
             'followup_call_count': followup_call_count,
             'followup_pending_count': followup_pending_count,
             'followup_overdue_count': followup_overdue_count,
             # Every call made in the window: new leads worked plus follow-up calls.
-            'total_called_count': agg['called_count'] + followup_call_count,
+            'total_called_count': called_count + followup_call_count,
             'hot_count':          hot_count,
             'warm_count':         warm_count,
             'callback_count':     callback_count,
