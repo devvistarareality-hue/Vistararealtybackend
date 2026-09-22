@@ -37,6 +37,38 @@ def serialize(row):
     }
 
 
+def _booking_legacy(company_id, booking_id, logged_actions):
+    """What a booking's own fields already record — who submitted, approved,
+    rejected or cancelled it — for the steps the log itself does not have (they
+    happened before the log existed)."""
+    from sales.models import Booking
+    b = (Booking.objects.filter(pk=booking_id, company_id=company_id)
+         .select_related('stm', 'approved_by', 'rejected_by', 'accounts_approved_by',
+                         'accounts_rejected_by', 'cancelled_by').first()) if booking_id.isdigit() else None
+    if not b:
+        return []
+    out = []
+
+    def add(key, module, at, who, summary):
+        if at and key not in logged_actions:
+            out.append({'id': 'b%s-%s' % (b.id, key), 'at': at.isoformat(), 'actor': {'id': None, 'name': who or ''},
+                        'module': module, 'action': key.split(':')[0], 'target_type': 'booking',
+                        'target_id': str(b.id), 'summary': summary, 'details': {}, 'method': '', 'legacy': True})
+
+    stm = b.manual_stm_name or (b.stm.name if b.stm_id else '')
+    add('submitted:Sales', 'Sales', getattr(b, 'created_at', None), stm, 'Submitted booking')
+    add('approved:Sales', 'Sales', b.approved_at, b.approved_by.name if b.approved_by_id else '', 'Approved booking')
+    add('approved:Accounts & Finance', 'Accounts & Finance', b.accounts_approved_at,
+        b.accounts_approved_by.name if b.accounts_approved_by_id else '', 'Approved (Accounts) booking')
+    add('rejected:Accounts & Finance', 'Accounts & Finance', b.accounts_rejected_at,
+        b.accounts_rejected_by.name if b.accounts_rejected_by_id else '',
+        'Rejected (Accounts) booking' + ((' — ' + b.accounts_rejected_reason) if b.accounts_rejected_reason else ''))
+    if not b.accounts_rejected_at:
+        add('rejected:Sales', 'Sales', b.rejected_at, b.rejected_by.name if b.rejected_by_id else '', 'Rejected booking')
+    add('cancelled:Sales', 'Sales', b.cancelled_at, b.cancelled_by.name if b.cancelled_by_id else '', 'Cancelled booking')
+    return out
+
+
 class ActivityLogView(APIView):
     """The activity log. Admins see everyone in their company (platform admins any
     company); everyone else sees what they did themselves. The history of one
@@ -89,10 +121,21 @@ class ActivityLogView(APIView):
                 if aid and aid not in seen:
                     seen[aid] = name
             actors = sorted(({'id': k, 'name': v or ''} for k, v in seen.items()), key=lambda a: a['name'].lower())
+        results = [serialize(r) for r in chunk[:PAGE]]
+        if record and 'booking' in types and page == 1 and not needle:
+            logged = set()
+            for r in qs.values_list('action', 'module'):
+                mod = 'Sales' if r[1] == 'Channel Partner' else r[1]
+                logged.add('%s:%s' % (r[0], mod))
+            cid = p.get('company_id') if is_platform_admin(u) else u.company_id
+            if is_platform_admin(u) and not cid:
+                from sales.models import Booking
+                cid = Booking.objects.filter(pk=p['target_id']).values_list('company_id', flat=True).first() if p['target_id'].isdigit() else None
+            results = sorted(results + _booking_legacy(cid, p['target_id'], logged), key=lambda x: x['at'], reverse=True)
         return Response({
             'page': page,
             'has_more': len(chunk) > PAGE,
-            'results': [serialize(r) for r in chunk[:PAGE]],
+            'results': results,
             'modules': modules,
             'actors': actors,
             'can_see_all': is_log_admin(u),

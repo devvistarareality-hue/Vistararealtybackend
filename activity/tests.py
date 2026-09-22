@@ -62,3 +62,26 @@ class ActivityLogTests(TestCase):
         d = self.api.get('/api/activity/?target_type=booking&target_id=5').json()
         self.assertEqual([x['actor']['name'] for x in d['results']], ['Boss'])
         self.assertEqual(len(self.api.get('/api/activity/?q=booking').json()['results']), 0)
+
+
+class BookingHistoryTests(TestCase):
+    def test_history_is_filled_from_the_booking_for_steps_before_the_log(self):
+        from django.utils import timezone
+        from sales.models import Booking
+        co = Company.objects.create(code='BH', name='BH')
+        admin = User.objects.create_user('bh@x.com', company=co, user_code='B1', password='x', name='Boss', role='Admin')
+        acc = User.objects.create_user('bh2@x.com', company=co, user_code='B2', password='x', name='Acc', role='Manager')
+        p = Project.objects.create(company=co, name='P')
+        b = Booking.objects.create(company=co, project=p, stm=admin, status='sold', client_name='C', phone='9000000001',
+                                   approved_by=admin, approved_at=timezone.now(),
+                                   accounts_approved_by=acc, accounts_approved_at=timezone.now())
+        api = APIClient()
+        api.force_authenticate(admin)
+        rows = api.get(f'/api/activity/?target_type=booking&target_id={b.id}').json()['results']
+        self.assertEqual({(r['summary'], r['actor']['name']) for r in rows},
+                         {('Submitted booking', 'Boss'), ('Approved booking', 'Boss'), ('Approved (Accounts) booking', 'Acc')})
+        # Once the log has the Sales approval, the booking field is not repeated.
+        ActivityLog.objects.create(company=co, actor=admin, actor_name='Boss', module='Sales', action='approved',
+                                   target_type='booking', target_id=str(b.id), summary='Approved booking — C')
+        rows = api.get(f'/api/activity/?target_type=booking&target_id={b.id}').json()['results']
+        self.assertEqual(sum(1 for r in rows if r['action'] == 'approved' and r['module'] == 'Sales'), 1)
