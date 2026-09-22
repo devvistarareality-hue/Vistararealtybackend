@@ -93,3 +93,38 @@ class BookingHistoryTests(TestCase):
                                    target_type='booking', target_id=str(b.id), summary='Approved booking — C')
         rows = api.get(f'/api/activity/?target_type=booking&target_id={b.id}').json()['results']
         self.assertEqual(sum(1 for r in rows if r['action'] == 'approved' and r['module'] == 'Sales'), 1)
+
+
+class ChangeCaptureTests(TestCase):
+    def setUp(self):
+        from sales.models import Lead
+        self.co = Company.objects.create(code='CC', name='CC')
+        self.admin = User.objects.create_user('cc@x.com', company=self.co, user_code='CC1', password='x', name='Boss', role='Admin')
+        self.lead = Lead.objects.create(company=self.co, name='Rahul Shah', phone='9825012345', status='new')
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin)
+
+    def test_lead_edit_logs_what_changed_and_names_the_lead(self):
+        r = self.api.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'name': 'Rahul Shah', 'phone': '9825012345', 'city': 'Vadodara', 'status': 'new'}, format='json')
+        self.assertLess(r.status_code, 400, r.content)
+        row = ActivityLog.objects.latest('id')
+        self.assertIn('Rahul Shah (9825012345)', row.summary)
+        self.assertIn('City: — → Vadodara', row.summary)
+        self.assertNotIn('Name', row.summary, 'unchanged fields are not listed')
+        from django.db import connection
+        with connection.cursor() as c:
+            c.execute('SELECT details, summary FROM activity_activitylog WHERE id=%s', [row.id])
+            raw = ' '.join(c.fetchone())
+        self.assertNotIn('Rahul', raw)
+
+    def test_saving_without_changes_writes_no_line(self):
+        self.api.patch(f'/api/sales/leads/{self.lead.id}/', {'name': 'Rahul Shah', 'phone': '9825012345'}, format='json')
+        self.assertFalse(ActivityLog.objects.exists())
+
+    def test_old_rows_get_the_lead_name(self):
+        ActivityLog.objects.create(company=self.co, actor=self.admin, actor_name='Boss', module='Sales', action='updated',
+                                   target_type='lead', target_id=str(self.lead.id), summary=f'Updated lead #{self.lead.id}')
+        d = self.api.get('/api/activity/').json()
+        self.assertEqual(d['results'][0]['label'], 'Rahul Shah (9825012345)')
+        self.assertEqual([a['name'] for a in d['actors']], ['Boss'])

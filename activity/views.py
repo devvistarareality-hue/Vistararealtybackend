@@ -18,12 +18,52 @@ def is_log_admin(user):
     return bool(is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin')
 
 
+def _models_by_type():
+    from sales.models import Lead, FollowUp, SiteVisit, Booking, Closure, Plot, Project
+    from receivables.models import ARAccount
+    return {
+        'lead': (Lead, ()), 'follow-up': (FollowUp, ('lead',)), 'site-visit': (SiteVisit, ('lead',)),
+        'booking': (Booking, ('project', 'plot')), 'closure': (Closure, ('project',)),
+        'plot': (Plot, ('project',)), 'project': (Project, ()),
+        'ar_account': (ARAccount, ('booking', 'booking__project', 'booking__plot')),
+    }
+
+
+def _labels(rows):
+    """Name the records of log lines written before names were stored with them,
+    one query per record type on the page."""
+    from .changes import record_label
+    want = {}
+    for r in rows:
+        if r['target_id'].isdigit() and not r.get('label'):
+            want.setdefault(r['target_type'], set()).add(int(r['target_id']))
+    if not want:
+        return rows
+    found = {}
+    for ttype, ids in want.items():
+        spec = _models_by_type().get(ttype)
+        if not spec:
+            continue
+        model, rel = spec
+        try:
+            for obj in model._base_manager.filter(pk__in=ids).select_related(*rel):
+                found[(ttype, str(obj.pk))] = record_label(obj)
+        except Exception:
+            continue
+    for r in rows:
+        if not r.get('label'):
+            r['label'] = found.get((r['target_type'], r['target_id']), '')
+    return rows
+
+
 def serialize(row):
     try:
         details = json.loads(row.details) if row.details else {}
     except ValueError:
         details = {}
     return {
+        'label': details.get('label', ''),
+        'changes': details.get('changes') or [],
         'id': row.id,
         'at': row.created_at.isoformat(),
         'actor': {'id': row.actor_id, 'name': row.actor_name or ''},
@@ -114,15 +154,15 @@ class ActivityLogView(APIView):
             chunk = rows[(page - 1) * PAGE: page * PAGE + 1]
         else:
             chunk = list(qs[(page - 1) * PAGE: page * PAGE + 1])
-        modules = sorted(set(qs.values_list('module', flat=True).distinct()[:50])) if not record else []
+        # The filter lists are only needed with the first page.
+        modules = sorted(set(qs.order_by().values_list('module', flat=True).distinct()[:50])) if not record and page == 1 else []
         actors = []
-        if is_log_admin(u) and not record:
-            seen = {}
-            for aid, name in qs.values_list('actor_id', 'actor_name')[:2000]:
-                if aid and aid not in seen:
-                    seen[aid] = name
-            actors = sorted(({'id': k, 'name': v or ''} for k, v in seen.items()), key=lambda a: a['name'].lower())
-        results = [serialize(r) for r in chunk[:PAGE]]
+        if is_log_admin(u) and not record and page == 1:
+            from accounts.models import User
+            ids = set(qs.order_by().exclude(actor__isnull=True).values_list('actor_id', flat=True).distinct()[:500])
+            actors = [{'id': uid, 'name': name or ''} for uid, name in
+                      User.objects.filter(id__in=ids).order_by('name').values_list('id', 'name')]
+        results = _labels([serialize(r) for r in chunk[:PAGE]])
         if record and 'booking' in types and page == 1 and not needle:
             logged = set()
             for r in qs.values_list('action', 'module'):
