@@ -871,26 +871,30 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             leads_qs = leads_qs.filter(company_id=company_id)
 
-        # MQL: of the leads that ARRIVED on each day, how many have had their
-        # telecaller status set — "called" means a new lead came in and its status
-        # was changed. Grouped by created_at so the chart counts exactly the leads
-        # the Called/MQL tile counts over the same date filter.
+        # MQL: leads actually WORKED (their status/stm_status first left blank) on
+        # each day, same as the Called/MQL tile's own date filter (StatsView —
+        # _leads_worked_in_range) — not leads that merely arrived that day.
         #
-        # This was grouped by updated_at, which is neither: that column moves on any
-        # edit, so a lead touched for an unrelated reason counted as a call and a
-        # lead edited on several days counted on each one. On a live telecaller it
-        # read 50 against a tile of 25.
+        # This used to group by created_at, i.e. "of the leads that ARRIVED on each
+        # day, how many currently have a status" — a lead received one day but
+        # called days later (or vice versa) landed on the wrong day, or wasn't
+        # worked at all yet, and disagreed with the tile above it (17 on the chart
+        # against 29 on the tile, on the exact same filter). Grouping instead by
+        # when the status-history row shows it first left blank is what actually
+        # answers "worked on this day" — same event _leads_worked_in_range counts.
+        mql_status_field = 'stm_status' if (is_stm(request.user) or is_cp(request.user)) else 'telecaller_status'
         mql_rows = (
-            leads_qs
+            LeadStatusHistory.objects
             .filter(
+                lead__in=leads_qs,
+                field_changed=mql_status_field,
+                old_value='',
                 created_at__date__gte=date_from,
                 created_at__date__lte=date_to,
-                telecaller_status__isnull=False,
             )
-            .exclude(telecaller_status='')
             .annotate(day=TruncDate('created_at'))
             .values('day')
-            .annotate(count=Count('id'))
+            .annotate(count=Count('lead_id', distinct=True))
             .order_by('day')
         )
 
