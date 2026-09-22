@@ -121,10 +121,6 @@ def has_schedule(lines) -> bool:
     return any(l.kind in ('inst', 'nsd', 'extra') for l in lines)
 
 
-# Deals this small are almost certainly a typo'd amount (e.g. entered in thousands).
-SUSPECT_BELOW = Decimal('100000')
-
-
 def expected_collectable(b: Booking) -> Decimal:
     return _d(b.final_amount) - _d(b.stamp_duty) - _d(b.reg_fees)
 

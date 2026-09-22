@@ -4,6 +4,7 @@ import hmac
 import re
 import secrets
 from datetime import datetime, time as dt_time, timedelta
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 import requests as http_requests
 from django.conf import settings
@@ -4413,6 +4414,60 @@ def _next_eoi_no(company, project_id, prefer='', block=None):
     return f'EOI-{n}'
 
 
+# A schedule typed a few hundred rupees short (or over) used to slip through: the
+# form checked percentages to ±0.01% (about ₹1,500 on a ₹1.5 Cr schedule), and the
+# server did not add the installments up at all. Rounding each installment to the
+# rupee can leave a rupee or two; anything beyond this is a typing mistake.
+SCHEDULE_TOLERANCE = Decimal('10')
+
+
+def _schedule_gap(data):
+    """How far a booking's payment schedule is from its deal, in rupees (schedule −
+    deal), or None when there is no schedule to check. The deal is every sale-deed
+    and Extra Work (NSD) installment, the "Extra" row (Legal & Other Charges with
+    stamp duty and registration) and any extra-work installments. EOIs carry only a
+    token by design and are not checked; neither is a booking whose schedule has no
+    amounts (a Pratishtha Regular plan)."""
+    if data.get('eoi') or str(data.get('plot_numbers') or '').upper().startswith('EOI'):
+        return None
+
+    def amt(x):
+        try:
+            return Decimal(str((x or {}).get('amt') or 0))
+        except (InvalidOperation, ValueError, TypeError, AttributeError):
+            return Decimal('0')
+
+    inst = data.get('installments') or []
+    ew = data.get('extra_work_inst') or []
+    if not isinstance(inst, list):
+        return None
+    is_extra_row = lambda i: str((i or {}).get('no', '')).strip().lower() == 'extra'
+    # Only a schedule whose unit / Extra Work installments carry amounts is checked —
+    # the Legal & Other row alone is not a schedule.
+    if not any(amt(i) > 0 for i in inst if not is_extra_row(i)):
+        return None
+    try:
+        deal = Decimal(str(data.get('final_amount') or 0))
+    except (InvalidOperation, ValueError):
+        return None
+    total = sum((amt(i) for i in inst), Decimal('0')) + sum((amt(i) for i in (ew if isinstance(ew, list) else [])), Decimal('0'))
+    if not any(is_extra_row(i) for i in inst):
+        try:
+            total += Decimal(str(data.get('total_extra') or 0))
+        except (InvalidOperation, ValueError):
+            pass
+    return total - deal
+
+
+def _schedule_error(data):
+    gap = _schedule_gap(data)
+    if gap is None or abs(gap) <= SCHEDULE_TOLERANCE:
+        return None
+    word = 'short of' if gap < 0 else 'more than'
+    return (f'The payment schedule is Rs. {abs(gap):,.0f} {word} the total deal. '
+            f'Adjust the installments so they add up to the deal amount exactly.')
+
+
 class BookingListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -4547,6 +4602,10 @@ class BookingListCreateView(APIView):
                     {'detail': f'File too large (max {settings.MAX_UPLOAD_FILE_MB} MB).'},
                     status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
+
+        schedule_err = _schedule_error(data)
+        if schedule_err:
+            return Response({'detail': schedule_err, 'installments': [schedule_err]}, status=status.HTTP_400_BAD_REQUEST)
 
         # A booking against a project that HAS plots mapped must name one. Without
         # this the API accepted a booking with no plot, so nothing was reserved and

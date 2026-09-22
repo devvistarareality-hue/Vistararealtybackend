@@ -16,7 +16,7 @@ from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
 from .models import ARAccount, ARReceipt, ARReceiptAudit
 from .permissions import has_ar_access
-from .services import (SUSPECT_BELOW, compute_account, current_approved_booking_ids, expected_collectable,
+from .services import (compute_account, current_approved_booking_ids, expected_collectable,
                        parse_date, sync_accounts, _d)
 
 ZERO = Decimal('0')
@@ -90,8 +90,6 @@ def _summary(acct, plan, r, mismatch):
         # entered): AR can't track dues until Sales enters one, so say that plainly
         # instead of showing a huge "plan mismatch".
         'no_schedule': no_schedule,
-        # A deal under ₹1 lakh is a mistyped amount, not a real sale.
-        'suspect_amount': expected_collectable(b) < SUSPECT_BELOW,
     }
 
 
@@ -338,7 +336,7 @@ class ARDashboardView(APIView):
         totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
         forecast, order, rows = {}, [], []
-        issues = {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0}
+        issues = {'no_schedule': 0, 'plan_mismatch': 0}
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
@@ -352,7 +350,6 @@ class ARDashboardView(APIView):
             sm = _summary(acct, plan, r, m)
             issues['no_schedule'] += sm['no_schedule']
             issues['plan_mismatch'] += bool(sm['plan_mismatch'])
-            issues['suspect_amount'] += sm['suspect_amount']
             rows.append((sm, r.ageing.get('>180', ZERO)))
 
         def brief(sm, amount):

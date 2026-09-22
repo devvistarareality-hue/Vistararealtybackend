@@ -224,12 +224,6 @@ class ARScheduleAndReportsTests(TestCase):
         self.api.patch(f'/api/ar/accounts/{self.id}/', {'schedule': [{'date': '2026-01-01', 'amount': 2650000}]}, format='json')
         self.assertTrue(self.ledger()['no_schedule'])       # ignored — only Sales can add installments
 
-    def test_suspect_amount_flag(self):
-        make_booking(self.co, self.project, plot='51', final_amount=D('765'), total_extra=D('0'), installments=[])
-        rows = {r['plots']: r for r in self.api.get('/api/ar/accounts/').json()['results']}
-        self.assertTrue(rows['51']['suspect_amount'])
-        self.assertFalse(rows['1003']['suspect_amount'])
-
     def test_dashboard(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '500000', 'mode': 'bank'}, format='json')
         self.flat.installments = [{'no': 1, 'date': '2026-01-01', 'amt': 2650000}]   # Sales adds the schedule
@@ -242,7 +236,7 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertEqual(d['top_overdue'][0]['id'], self.id)
         self.assertEqual(d['top_over_180'][0]['amount'], 2150000)
         self.assertEqual(d['projects'], [{'id': self.project.id, 'name': 'Pratishtha'}])
-        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'suspect_amount': 0})
+        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0})
 
     def test_statement_is_print_ready_html(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '1234567', 'mode': 'cheque',
