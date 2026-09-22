@@ -70,6 +70,8 @@ def describe(method, path, body, response_id=None):
     segs = parts[1:]
     if 'accounts-action' in segs:
         module = 'Accounts & Finance'
+    elif 'channel-partners' in segs:
+        module = 'Channel Partner'
     ids = [i for i, s in enumerate(segs) if s.isdigit()]
     target_id = segs[ids[0]] if ids else (str(response_id) if response_id else '')
     if ids:
@@ -113,6 +115,10 @@ def _body_details(body):
     return out
 
 
+def ref_in(summary, tid):
+    return bool(tid) and ('#%s' % tid) in (summary or '')
+
+
 def _client_ip(request):
     fwd = request.META.get('HTTP_X_FORWARDED_FOR', '')
     return (fwd.split(',')[0].strip() if fwd else request.META.get('REMOTE_ADDR', '')) or ''
@@ -135,15 +141,21 @@ class ActivityLogMiddleware:
                     body = json.loads(request.body or b'{}')
             except Exception:
                 body = None
-        response = self.get_response(request)
+        from . import changes as ch
+        if watch:
+            ch.start()
+        try:
+            response = self.get_response(request)
+        finally:
+            captured = ch.stop() if watch else []
         if watch:
             try:
-                self._record(request, response, body)
+                self._record(request, response, body, captured)
             except Exception:
                 logger.exception('activity log failed for %s %s', request.method, request.path)
         return response
 
-    def _record(self, request, response, body):
+    def _record(self, request, response, body, captured=()):
         if response.status_code >= 400 or getattr(request, '_activity_skip', False):
             return
         user = getattr(request, 'user', None)
@@ -162,6 +174,38 @@ class ActivityLogMiddleware:
         details = _body_details(body)
         if extra.get('details'):
             details['info'] = extra['details']
+        # What the saves in this request actually changed. The record the URL points
+        # at comes first; anything else that changed alongside it is kept as well.
+        from .changes import change_text
+        primary = next((c for c in captured if c['type'] == ttype and str(c['id']) == str(tid)), None) \
+            or next((c for c in captured if c['type'] == ttype), None) or (captured[0] if captured else None)
+        if primary:
+            if not tid:
+                tid = str(primary['id'])
+            label = primary.get('label') or ''
+            if label:
+                details['label'] = label
+            details['changes'] = primary['changes']
+            others = [c for c in captured if c is not primary and (c['changes'] or c['created'] or c.get('deleted'))]
+            if others:
+                details['also'] = [{'type': c['type'], 'id': c['id'], 'label': c['label'], 'changes': c['changes'],
+                                    'created': c['created'], 'deleted': c.get('deleted', False)} for c in others[:10]]
+            if request.method in ('PATCH', 'PUT') and not primary['created'] and not primary['changes'] and not others \
+                    and not extra:
+                return   # saved, but nothing changed — not worth a line
+            if not extra.get('summary'):
+                noun = _human(primary['type'])
+                who = (' — ' + label) if label else (' #%s' % primary['id'])
+                if primary.get('deleted'):
+                    summary = 'Deleted %s%s' % (noun, who)
+                elif primary['created']:
+                    summary = 'Created %s%s' % (noun, who)
+                elif primary['changes'] and action == 'updated':
+                    summary = 'Updated %s%s · %s' % (noun, who, change_text(primary['changes']))
+                elif label and ref_in(summary, tid):
+                    summary = summary.replace('#%s' % tid, '— %s' % label, 1)
+                    if primary['changes']:
+                        summary += ' · ' + change_text(primary['changes'])
         from .models import ActivityLog
         ActivityLog.objects.create(
             company_id=getattr(user, 'company_id', None),

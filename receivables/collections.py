@@ -144,6 +144,10 @@ def collection_row(acct, plan, r, receipts, as_of, window_end, fu):
     in_window = [s for s in later if s.line.due <= window_end]
     oldest = overdue_lines[0].line.due if overdue_lines else None
     nxt = later[0] if later else None
+    if window_end == as_of:
+        # "Today": what falls due today (those lines also count in overdue from today).
+        in_window = [s for s in open_lines if s.line.due == as_of]
+        nxt = in_window[0] if in_window else nxt
     last = max(receipts, key=lambda x: (x.paid_on, x.id)) if receipts else None
     sm = _summary(acct, plan, r, ZERO)
     return {
@@ -211,7 +215,9 @@ class ARCollectionsView(APIView):
         _sync(request)
         as_of = _as_of(request)
         try:
-            days = max(1, min(365, int(request.query_params.get('days') or 30)))
+            raw_days = request.query_params.get('days')
+            # 0 = due today; otherwise the next N days.
+            days = max(0, min(365, int(raw_days if raw_days not in (None, '') else 30)))
         except ValueError:
             days = 30
         qs = _accounts_qs(request)
