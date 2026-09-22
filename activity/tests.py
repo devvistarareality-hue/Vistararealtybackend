@@ -132,3 +132,20 @@ class ChangeCaptureTests(TestCase):
         User.objects.create_user('cc2@x.com', company=self.co, user_code='CC2', password='x', name='Quiet Rep', role='Employee')
         d = self.api.get('/api/activity/').json()
         self.assertEqual([a['name'] for a in d['actors']], ['Boss', 'Quiet Rep'])
+
+
+class PlotActionTests(TestCase):
+    def test_plot_hold_names_project_and_plot(self):
+        from sales.models import Plot
+        co = Company.objects.create(code='PH', name='PH')
+        admin = User.objects.create_user('ph@x.com', company=co, user_code='PH1', password='x', name='Boss', role='Admin')
+        proj = Project.objects.create(company=co, name='Kalrav 2')
+        p1 = Plot.objects.create(project=proj, number='12', status='available')
+        p2 = Plot.objects.create(project=proj, number='13', status='available')
+        api = APIClient()
+        api.force_authenticate(admin)
+        r = api.post('/api/sales/plots/hold/', {'plot_ids': [p1.id, p2.id]}, format='json')
+        self.assertLess(r.status_code, 400, r.content)
+        row = ActivityLog.objects.latest('id')
+        self.assertEqual(row.summary, 'Held Kalrav 2 Plot 12, 13')
+        self.assertEqual(row.target_type, 'plot')
