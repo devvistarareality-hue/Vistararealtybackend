@@ -23,6 +23,23 @@ ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
 
 
+def _log(request, acct, summary, action, target_type='ar_account', target_id=None):
+    """A readable activity-log line naming the customer and unit."""
+    try:
+        from activity.recorder import note
+        b = acct.booking
+        unit = b.plot_numbers or (b.plot.number if b.plot_id else '')
+        note(request, '%s — %s · %s Plot %s' % (summary, b.client_name or '—', b.project.name if b.project_id else '', unit),
+             action=action, target_type=target_type, target_id=target_id or acct.id, module='AR')
+    except Exception:
+        pass
+
+
+def _rc_text(rc):
+    return '₹{:,} on {} ({})'.format(rupees(_d(rc.amount)), rc.paid_on.strftime('%d/%m/%Y') if rc.paid_on else '—',
+                                     MODES.get(rc.mode, rc.mode))
+
+
 def _deny():
     return Response({'detail': 'You do not have access to Accounts Receivable.'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -201,6 +218,7 @@ class ARAccountView(APIView):
                 return Response({'detail': 'Invalid date.'}, status=status.HTTP_400_BAD_REQUEST)
             acct.legal_due_date = d
             acct.save(update_fields=['legal_due_date', 'updated_at'])
+            _log(request, acct, 'Set Legal & Other due date to %s' % (d.strftime('%d/%m/%Y') if d else 'none'), 'updated')
         return self.get(request, pk)
 
 
@@ -253,6 +271,7 @@ class ARReceiptCreateView(APIView):
         with transaction.atomic():
             rc = ARReceipt.objects.create(account=acct, created_by=request.user, updated_by=request.user, **vals)
             ARReceiptAudit.objects.create(receipt=rc, action='create', changed_by=request.user, after=_snap(rc))
+        _log(request, acct, 'Recorded receipt ' + _rc_text(rc), 'created', 'ar_account', acct.id)
         return Response({'id': rc.id}, status=status.HTTP_201_CREATED)
 
 
@@ -279,6 +298,7 @@ class ARReceiptView(APIView):
             rc.updated_by = request.user
             rc.save()
             ARReceiptAudit.objects.create(receipt=rc, action='update', changed_by=request.user, before=before, after=_snap(rc))
+        _log(request, rc.account, 'Edited receipt, now ' + _rc_text(rc), 'updated', 'ar_account', rc.account_id)
         return Response({'id': rc.id})
 
     def delete(self, request, rid):
@@ -293,6 +313,7 @@ class ARReceiptView(APIView):
             rc.updated_by = request.user
             rc.save(update_fields=['is_deleted', 'updated_by', 'updated_at'])
             ARReceiptAudit.objects.create(receipt=rc, action='delete', changed_by=request.user, before=before)
+        _log(request, rc.account, 'Deleted receipt ' + _rc_text(rc), 'deleted', 'ar_account', rc.account_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -609,6 +630,12 @@ class ARImportView(APIView):
         commit = _wants_commit(request) and bool(ok)
         if commit:
             _save_rows(request, ok, 'import')
+            from activity.recorder import note
+            note(request, 'Imported %d receipt(s) from %s' % (len(ok), getattr(f, 'name', 'Excel')),
+                 action='imported', target_type='ar_import', module='AR')
+        else:
+            from activity.recorder import skip
+            skip(request)
         return _result(ok, skipped, commit)
 
 

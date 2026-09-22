@@ -4866,7 +4866,7 @@ class BookingListCreateView(APIView):
         _notify_booking_approvers(company, booking, request.user)
         # The rep gets a receipt, and Accounts & Finance follow the money from the
         # moment it is submitted — a revised LOI changes the figure they track.
-        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval')
+        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval', request=request)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -5742,13 +5742,48 @@ def _booking_accounts_side(company, booking):
             if 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])]
 
 
-def _notify_booking_event(company, booking, event, actor=None, detail=''):
+BOOKING_LOG = {  # event -> (action, verb, module) for the activity log
+    'submitted':         ('submitted', 'Submitted', 'Sales'),
+    'sales_approved':    ('approved', 'Approved', 'Sales'),
+    'sales_rejected':    ('rejected', 'Rejected', 'Sales'),
+    'accounts_approved': ('approved', 'Approved', 'Accounts & Finance'),
+    'accounts_rejected': ('rejected', 'Rejected', 'Accounts & Finance'),
+    'cancelled':         ('cancelled', 'Cancelled', 'Sales'),
+}
+
+
+def _log_booking_event(request, booking, event, detail=''):
+    """One clear line in the activity log for a booking event."""
+    try:
+        from activity.recorder import note
+        action, verb, module = BOOKING_LOG[event]
+        if event.startswith('sales_') or event == 'submitted':
+            if _is_cp_sourced_booking(booking.lead_id, booking.source):
+                module = 'Channel Partner'
+        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
+        rev = (' R%d' % booking.revision_no) if booking.revision_no else ''
+        what = 'booking%s — %s · %s Unit %s · ₹%s' % (
+            rev, booking.client_name or '—', booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0))
+        stage = ' (Accounts)' if event.startswith('accounts_') else ''
+        reason = ''
+        if 'rejected' in event and ': ' in (detail or ''):
+            reason = ' — ' + detail.split(': ', 1)[1]
+        note(request, '%s%s %s%s' % (verb, stage, what, reason), action=action,
+             target_type='booking', target_id=booking.id, module=module)
+    except Exception:
+        logger.exception('Could not note booking event %s', event)
+
+
+def _notify_booking_event(company, booking, event, actor=None, detail='', request=None):
     """Tell the owner, the Sales/CP side and the Accounts side about a booking event
     (see BOOKING_EVENTS). Everyone is told once — the first audience they belong to
     wins — and the person who acted is not told about their own action, except the
     rep's own "submitted" receipt. In-app + push via notifications.notify.
     Best-effort — never raises."""
     try:
+        if request is not None:
+            _log_booking_event(request, booking, event, detail)
         from notifications import notify
         spec = BOOKING_EVENTS[event]
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
@@ -6007,7 +6042,7 @@ class BookingActionView(APIView):
                 # Rep, the project's Sales/CP approvers, and its Accounts approvers
                 # (who now have to act on it).
                 _notify_booking_event(company, b, 'sales_approved', request.user,
-                                      'approved by %s, awaiting Accounts' % (request.user.name or 'Sales'))
+                                      'approved by %s, awaiting Accounts' % (request.user.name or 'Sales'), request=request)
                 if b.stm:
                     if not is_rev:
                         notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
@@ -6030,7 +6065,7 @@ class BookingActionView(APIView):
                     if b.closure_id:
                         Closure.objects.filter(id=b.closure_id).delete()
                 _notify_booking_event(company, b, 'sales_rejected', request.user,
-                                      'rejected by %s' % (request.user.name or 'Sales'))
+                                      'rejected by %s' % (request.user.name or 'Sales'), request=request)
             else:
                 return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -6078,7 +6113,7 @@ class AccountsBookingActionView(APIView):
                 b.accounts_approved_at = timezone.now()
                 b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
                 _notify_booking_event(company, b, 'accounts_approved', request.user,
-                                      'approved by %s (Accounts)' % (request.user.name or 'Accounts'))
+                                      'approved by %s (Accounts)' % (request.user.name or 'Accounts'), request=request)
             elif action == 'reject':
                 reason = (request.data.get('reason') or '').strip()
                 if not reason:
@@ -6100,7 +6135,7 @@ class AccountsBookingActionView(APIView):
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
                 _notify_booking_event(company, b, 'accounts_rejected', request.user,
-                                      'rejected by %s (Accounts): %s' % (request.user.name or 'Accounts', reason))
+                                      'rejected by %s (Accounts): %s' % (request.user.name or 'Accounts', reason), request=request)
             else:
                 return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -6252,7 +6287,7 @@ class ClosureCancelView(APIView):
                          .order_by('-revision_no', '-id').first())
         if notif_booking:
             _notify_booking_event(company, notif_booking, 'cancelled', request.user,
-                                  'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'))
+                                  'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'), request=request)
         else:
             _notify_closure_cancellation(
                 notif_stm, notif_project, company,

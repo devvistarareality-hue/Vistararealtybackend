@@ -112,6 +112,11 @@ class BookingNotificationTests(APITestCase):
         self.assertIn(self.stm.id, ids)
         self.assertIn(self.sales_mgr.id, ids)
         self.assertIn(self.acc.id, ids)
+        # …and the approval is in the activity log, naming who did it and the deal.
+        from activity.models import ActivityLog
+        row = ActivityLog.objects.filter(target_type='booking', target_id=str(self.booking.id)).latest('id')
+        self.assertEqual((row.actor_id, row.module, row.action), (self.admin.id, 'Accounts & Finance', 'approved'))
+        self.assertIn('Approved (Accounts) booking — Asha', row.summary)
 
     def test_cancel_endpoint_notifies_accounts(self):
         lead = Lead.objects.create(company=self.co, name='Asha', phone='9000000200',
