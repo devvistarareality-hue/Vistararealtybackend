@@ -70,6 +70,8 @@ def describe(method, path, body, response_id=None):
     segs = parts[1:]
     if 'accounts-action' in segs:
         module = 'Accounts & Finance'
+    elif 'channel-partners' in segs:
+        module = 'Channel Partner'
     ids = [i for i, s in enumerate(segs) if s.isdigit()]
     target_id = segs[ids[0]] if ids else (str(response_id) if response_id else '')
     if ids:

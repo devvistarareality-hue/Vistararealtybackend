@@ -19,6 +19,7 @@ class DescribeTests(TestCase):
         self.assertEqual(describe('POST', '/api/sales/leads/', {}, 77)[4], 'Created lead #77')
         self.assertEqual(describe('POST', '/api/attendance/sign-in/', {})[4], 'Sign in')
         self.assertEqual(describe('POST', '/api/sales/closures/3/cancel/', {})[4], 'Cancelled closure #3')
+        self.assertEqual(describe('PATCH', '/api/sales/channel-partners/4/', {})[0], 'Channel Partner')
 
 
 class ActivityLogTests(TestCase):
@@ -62,6 +63,13 @@ class ActivityLogTests(TestCase):
         d = self.api.get('/api/activity/?target_type=booking&target_id=5').json()
         self.assertEqual([x['actor']['name'] for x in d['results']], ['Boss'])
         self.assertEqual(len(self.api.get('/api/activity/?q=booking').json()['results']), 0)
+        # A module's Log tab can ask for several module names at once.
+        self.api.force_authenticate(self.admin)
+        ActivityLog.objects.create(company=self.co, actor=self.admin, actor_name='Boss', module='Channel Partner',
+                                   action='created', summary='CP thing')
+        d = self.api.get('/api/activity/?module=Sales,Channel Partner').json()
+        self.assertEqual(len(d['results']), 3)
+        self.assertEqual(len(self.api.get('/api/activity/?module=Channel Partner').json()['results']), 1)
 
 
 class BookingHistoryTests(TestCase):

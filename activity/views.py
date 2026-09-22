@@ -91,7 +91,8 @@ class ActivityLogView(APIView):
         elif not is_log_admin(u):
             qs = qs.filter(actor=u)
         if p.get('module'):
-            qs = qs.filter(module=p['module'])
+            # One module's Log tab may cover several names (Sales + Channel Partner).
+            qs = qs.filter(module__in=[m.strip() for m in p['module'].split(',') if m.strip()])
         if p.get('actor'):
             qs = qs.filter(actor_id=p['actor'])
         if p.get('action'):
