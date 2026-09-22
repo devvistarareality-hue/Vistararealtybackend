@@ -3112,14 +3112,19 @@ class DistributionWeightView(APIView):
             return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
         updates = request.data.get('updates', [])  # [{user_id, weight}]
+        saved = []
         for item in updates:
             uid = item.get('user_id')
             w   = max(1, int(item.get('weight', 1)))
             try:
                 user = User.objects.get(pk=uid, company=company)
                 UserDistributionWeight.objects.update_or_create(user=user, defaults={'weight': w})
+                saved.append('%s = %d' % (user.name, w))
             except User.DoesNotExist:
                 pass
+        from activity.recorder import note
+        note(request, 'Set distribution weights: %s' % (', '.join(saved) or 'none'),
+             action='updated', target_type='distribution')
         return Response({'detail': 'Weights saved.'})
 
 
@@ -3564,6 +3569,11 @@ class DistributeView(APIView):
         company   = _resolve_company(request)
         # Manual admin trigger: weight-based, allowed before sign-in, blocked after sign-out.
         resp = _run_distribution(company, dist_type, triggered_by=request.user, gate='signout')
+        from activity.recorder import note
+        n = int(resp.get('distributed') or 0)
+        note(request, ('Distributed %d lead%s to %ss' % (n, '' if n == 1 else 's', dist_type)) if n
+             else 'Ran %s distribution — %s' % (dist_type, resp.get('message') or 'nothing to distribute'),
+             action='distributed', target_type='distribution')
         return Response(resp)
 
 
@@ -6776,6 +6786,10 @@ class UserProjectAssignmentView(APIView):
         UserProjectAssignment.objects.bulk_create([
             UserProjectAssignment(user=user, project_id=pid) for pid in valid_ids
         ], ignore_conflicts=True)
+        from activity.recorder import note
+        names = sorted(Project.objects.filter(pk__in=valid_ids).values_list('name', flat=True))
+        note(request, 'Set projects for %s: %s' % (user.name, ', '.join(names) or 'none'),
+             action='updated', target_type='user', target_id=user.id)
         return Response({'user_id': user_id, 'project_ids': valid_ids})
 
 

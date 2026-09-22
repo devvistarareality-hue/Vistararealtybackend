@@ -167,3 +167,41 @@ class ApprovalNamingTests(TestCase):
         self.assertLess(r.status_code, 400, r.content)
         row = ActivityLog.objects.filter(target_type='lead-transfer').latest('id')
         self.assertIn('Approved lead transfer — Pankaj Valvai (9000000300)', row.summary)
+
+
+class NamedLinesAcrossModulesTests(TestCase):
+    def setUp(self):
+        self.co = Company.objects.create(code='NL', name='NL')
+        self.admin = User.objects.create_user('nl@x.com', company=self.co, user_code='NL1', password='x', name='Boss', role='Admin')
+        self.api = APIClient()
+        self.api.force_authenticate(self.admin)
+        self.proj = Project.objects.create(company=self.co, name='Kalrav 2')
+
+    def last(self):
+        return ActivityLog.objects.latest('id').summary
+
+    def test_bulk_delete_names_every_lead(self):
+        from sales.models import Lead
+        ids = [Lead.objects.create(company=self.co, name='L%d' % i, phone='90000001%02d' % i).id for i in range(3)]
+        self.assertLess(self.api.delete('/api/sales/leads/bulk-delete/', {'ids': ids}, format='json').status_code, 400)
+        self.assertTrue(self.last().startswith('Deleted 3 leads — '))
+        self.assertIn('L1 (9000000101)', self.last())
+
+    def test_bulk_plots_named_with_project(self):
+        r = self.api.post('/api/sales/plots/bulk/', {'project_id': self.proj.id, 'plots': [{'number': '1'}, {'number': '2'}]}, format='json')
+        self.assertLess(r.status_code, 400, r.content)
+        self.assertEqual(self.last(), 'Added 2 plots — Kalrav 2 Plot 1, 2')
+
+    def test_project_assignment_names_user_and_projects(self):
+        self.api.post('/api/sales/user-projects/', {'user_id': self.admin.id, 'project_ids': [self.proj.id]}, format='json')
+        self.assertEqual(self.last(), 'Set projects for Boss: Kalrav 2')
+
+    def test_leave_apply_and_approve_read_as_decisions(self):
+        from datetime import date
+        self.api.post('/api/attendance/apply-leave/', {'leave_type': 'casual_leave', 'from_date': date.today().isoformat(),
+                                                       'to_date': date.today().isoformat(), 'reason': 'x'}, format='json')
+        self.assertTrue(self.last().startswith('Applied for leave — Boss · Casual Leave'))
+        from attendance.models import LeaveApplication
+        la = LeaveApplication.objects.latest('id')
+        self.api.patch(f'/api/attendance/leave-action/{la.id}/', {'status': 'approved'}, format='json')
+        self.assertTrue(self.last().startswith('Approved leave — Boss · Casual Leave'), self.last())

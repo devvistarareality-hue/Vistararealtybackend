@@ -29,7 +29,7 @@ TYPE_OF = {
     'channelpartner': 'channel-partner', 'user': 'user', 'leadtransfer': 'lead-transfer',
     'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account',
     'investor': 'investor', 'payout': 'payout', 'referralreward': 'referral-reward', 'scheme': 'scheme',
-    'leaveapplication': 'leave-action',
+    'leaveapplication': 'leave',
 }
 
 MAX_VALUE = 80

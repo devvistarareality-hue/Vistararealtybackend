@@ -28,7 +28,7 @@ def _models_by_type(module=''):
     common = {
         'investor': (c1k.Investor, ()), 'payout': (c1k.Payout, ('investor',)),
         'referral-reward': (c1k.ReferralReward, ('investor',)), 'scheme': (c1k.Scheme, ()),
-        'leave-action': (LeaveApplication, ('user',)),
+        'leave-action': (LeaveApplication, ('user',)), 'leave': (LeaveApplication, ('user',)),
         'ar_account': (ARAccount, ('booking', 'booking__project', 'booking__plot')),
     }
     if module == 'Club 1000':
