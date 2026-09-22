@@ -119,6 +119,34 @@ def ref_in(summary, tid):
     return bool(tid) and ('#%s' % tid) in (summary or '')
 
 
+PLOT_VERBS = {'hold': 'Held', 'release': 'Released', 'cancel-hold': 'Cancelled hold on',
+              'bulk-delete': 'Deleted', 'rename-type': 'Renamed type of'}
+
+
+def plot_names(ids):
+    """"Kalrav 2 · Plot 12, 13 · Pratishtha · Plot 4" for a list of plot ids."""
+    try:
+        from sales.models import Plot
+        rows = (Plot.objects.filter(id__in=ids).select_related('project')
+                .only('id', 'number', 'project__name').order_by('project__name', 'id'))
+        groups = {}
+        for pl in rows:
+            groups.setdefault(pl.project.name if pl.project_id else '', []).append(str(pl.number))
+        return ' · '.join('%s Plot %s' % (proj, ', '.join(nums)) if proj else 'Plot ' + ', '.join(nums)
+                          for proj, nums in groups.items())
+    except Exception:
+        return ''
+
+
+def _plot_ids(body):
+    if not isinstance(body, dict):
+        return []
+    raw = body.get('plot_ids') or ([body['plot_id']] if body.get('plot_id') else [])
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    return [int(x) for x in raw if str(x).isdigit()][:200]
+
+
 def _client_ip(request):
     fwd = request.META.get('HTTP_X_FORWARDED_FOR', '')
     return (fwd.split(',')[0].strip() if fwd else request.META.get('REMOTE_ADDR', '')) or ''
@@ -142,6 +170,11 @@ class ActivityLogMiddleware:
             except Exception:
                 body = None
         from . import changes as ch
+        plots = ''
+        if watch and '/plots/' in request.path:
+            ids = _plot_ids(body)
+            if ids:
+                plots = plot_names(ids)
         if watch:
             ch.start()
         try:
@@ -150,12 +183,12 @@ class ActivityLogMiddleware:
             captured = ch.stop() if watch else []
         if watch:
             try:
-                self._record(request, response, body, captured)
+                self._record(request, response, body, captured, plots)
             except Exception:
                 logger.exception('activity log failed for %s %s', request.method, request.path)
         return response
 
-    def _record(self, request, response, body, captured=()):
+    def _record(self, request, response, body, captured=(), plots=''):
         if response.status_code >= 400 or getattr(request, '_activity_skip', False):
             return
         user = getattr(request, 'user', None)
@@ -171,6 +204,13 @@ class ActivityLogMiddleware:
                 pass
         module, action, ttype, tid, summary = describe(request.method, request.path, body, response_id)
         extra = getattr(request, '_activity', None) or {}
+        if plots and not extra.get('summary'):
+            # Name the units: "Held Kalrav 2 Plot 12, 13", not "Hold · plot".
+            sub = [x for x in request.path.split('/') if x][-1]
+            verb = PLOT_VERBS.get(sub) or ('Updated' if request.method in ('PATCH', 'PUT') else _human(sub).capitalize())
+            extra = {**extra, 'summary': '%s %s' % (verb, plots), 'target_type': 'plot'}
+            if len(_plot_ids(body)) == 1:
+                extra['target_id'] = _plot_ids(body)[0]
         details = _body_details(body)
         if extra.get('details'):
             details['info'] = extra['details']
