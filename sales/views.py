@@ -4864,12 +4864,9 @@ class BookingListCreateView(APIView):
 
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
-        # Accounts & Finance follow the money from the moment it is submitted, not
-        # only once it clears — a revised LOI changes the figure they are tracking.
-        _notify_accounts_booking(
-            company, booking, 'booking_approval',
-            'Booking revised — approval pending' if booking.revision_no else 'New booking — approval pending',
-            'awaiting approval')
+        # The rep gets a receipt, and Accounts & Finance follow the money from the
+        # moment it is submitted — a revised LOI changes the figure they track.
+        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval')
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -5628,14 +5625,10 @@ def _notify_booking_approvers(company, booking, submitter):
             return
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
-        # The rep who sold the unit should hear about it even when someone else
-        # submitted the revision on their behalf. A revision is saved with the
-        # submitter as its stm, so the original rep is the one on the parent booking.
-        owner = booking.stm
-        if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
-            owner = booking.revision_of.stm
-        if owner and owner.id != sub_id and owner.id not in {u.id for u in recipients}:
-            recipients = recipients + [owner]
+        # The rep(s) who sold the unit get their own "submitted" notice from
+        # _notify_booking_event, so they are not asked to approve it here.
+        owner_ids = {u.id for u in _booking_owners(booking)} - {u.id for u in recipients}
+        recipients = [u for u in recipients if u.id not in owner_ids]
         title = 'Booking approval needed%s' % rev
         msg = '%s · %s Unit %s · ₹%s — by %s' % (
             booking.client_name or '—', booking.project.name if booking.project_id else '',
@@ -5648,21 +5641,6 @@ def _notify_booking_approvers(company, booking, submitter):
                 notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
     except Exception:
         pass
-
-
-def _notify_accounts_booking(company, booking, ntype, title, suffix):
-    """Tell the Accounts & Finance managers about a booking event."""
-    unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
-    rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
-    _notify_accounts_managers(
-        company, ntype, '%s%s' % (title, rev),
-        '%s · %s Unit %s · Rs %s — %s' % (
-            booking.client_name or 'Booking',
-            booking.project.name if booking.project_id else '',
-            unit, int(booking.final_amount or 0), suffix,
-        ),
-        {'booking_id': booking.id},
-    )
 
 
 def _notify_accounts_managers(company, ntype, title, body, data=None):
@@ -5684,70 +5662,128 @@ def _notify_accounts_managers(company, ntype, title, body, data=None):
         logging.getLogger(__name__).exception('_notify_accounts_managers failed')
 
 
-def _notify_accounts_approvers(company, booking):
-    """Tell whoever is actually configured to approve `booking` at the Accounts
-    stage (accounts_booking_approvers / accounts_cp_booking_approvers, picked
-    the same way _notify_booking_approvers picks the Sales/CP ones) that it is
-    waiting on them. A project naming nobody gets no targeted notification here
-    — only a real admin can act on it, and _notify_accounts_managers's broadcast
-    still reaches every Accounts manager regardless. Best-effort — never raises."""
-    try:
-        from notifications import notify
-        if not booking.project_id:
-            return
+# Who hears about each booking event, by audience. Three audiences, each told once:
+#   owner    — the rep who made the booking (and the original rep on a revision)
+#   sales    — the project's Sales approvers (plus its CP approvers on a CP deal)
+#   accounts — the project's Accounts approvers (CP list on a CP deal); if the
+#              project names none, every Accounts & Finance manager
+# Each entry is (notification type, title) — the type decides where a tap lands on
+# web and in the app. None means that audience is not told about that event.
+BOOKING_EVENTS = {
+    'submitted': {
+        'owner':    ('booking_submitted', 'Booking submitted — pending approval'),
+        # Sales approvers get the "approval needed" request from _notify_booking_approvers.
+        'sales':    None,
+        'accounts': ('accounts_booking_update', 'New booking — pending Sales approval'),
+    },
+    'sales_approved': {
+        'owner':    ('booking_approved', 'Booking approved — pending Accounts'),
+        'sales':    ('booking_update', 'Booking approved'),
+        'accounts': ('accounts_booking_approval', 'Accounts approval needed'),
+    },
+    'sales_rejected': {
+        'owner':    ('booking_rejected', 'Booking rejected'),
+        'sales':    ('booking_update', 'Booking rejected'),
+        'accounts': ('accounts_booking_update', 'Booking rejected by Sales'),
+    },
+    'accounts_approved': {
+        'owner':    ('accounts_booking_approved', 'Approved by Accounts — booking confirmed'),
+        'sales':    ('booking_update', 'Approved by Accounts'),
+        'accounts': ('accounts_booking_update', 'Approved by Accounts'),
+    },
+    'accounts_rejected': {
+        'owner':    ('accounts_booking_rejected', 'Rejected by Accounts'),
+        'sales':    ('booking_update', 'Rejected by Accounts'),
+        'accounts': ('accounts_booking_update', 'Rejected by Accounts'),
+    },
+    'cancelled': {
+        'owner':    ('booking_cancelled', 'Booking cancelled'),
+        'sales':    ('booking_cancelled', 'Booking cancelled'),
+        'accounts': ('accounts_booking_cancelled', 'Booking cancelled'),
+    },
+}
+
+
+def _booking_owners(booking):
+    owners = [booking.stm] if booking.stm_id else []
+    if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
+        owners.append(booking.revision_of.stm)
+    return owners
+
+
+def _booking_sales_side(company, booking):
+    """Sales/CP approvers of the booking's project. A CP deal is decided by the CP
+    approvers but the project's Sales approvers hear about it too — both teams sell
+    the same units. Falls back to the rep's reporting chain."""
+    from notifications import reporting_chain
+    is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
+    fields = ('cp_booking_approvers', 'booking_approvers') if is_cp else ('booking_approvers',)
+    ids = []
+    if booking.project_id:
+        for f in fields:
+            ids += list(getattr(booking.project, f, None) or [])
+    users = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
+    if not users and booking.stm_id:
+        users = reporting_chain(booking.stm)
+    return users
+
+
+def _booking_accounts_side(company, booking):
+    """Accounts approvers of the booking's project; every Accounts & Finance manager
+    when the project names nobody, so Accounts never misses a deal."""
+    ids = []
+    if booking.project_id:
         is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
-        approver_field = 'accounts_cp_booking_approvers' if is_cp else 'accounts_booking_approvers'
-        ids = getattr(booking.project, approver_field, None) or []
-        if not ids:
-            return
-        recipients = User.objects.filter(id__in=ids, company=company, is_active=True)
-        unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
-        rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
-        title = 'Accounts approval needed%s' % rev
-        msg = '%s · %s Unit %s · ₹%s — awaiting your approval' % (
-            booking.client_name or '—', booking.project.name if booking.project_id else '',
-            unit, int(booking.final_amount or 0),
-        )
-        seen = set()
-        for u in recipients:
-            if u.id not in seen:
-                seen.add(u.id)
-                notify(u, 'accounts_booking_approval', title, msg, {'booking_id': booking.id})
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception('_notify_accounts_approvers failed')
+        field = 'accounts_cp_booking_approvers' if is_cp else 'accounts_booking_approvers'
+        ids = list(getattr(booking.project, field, None) or [])
+    if ids:
+        return list(User.objects.filter(id__in=ids, company=company, is_active=True))
+    return [u for u in User.objects.filter(company=company, is_active=True)
+            if 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])]
 
 
-def _notify_accounts_rejection_to_sales(company, booking, rejecting_user, reason):
-    """On an ACCOUNTS-stage rejection, tell whoever holds Sales/CP approval
-    authority for this booking's project — deliberately NOT the Accounts
-    broadcast (_notify_accounts_managers), which is the wrong direction here;
-    this is Accounts telling Sales/CP, not the other way round. Falls back to
-    the STM's reporting chain if the project names no Sales/CP approver, same
-    fallback _notify_closure_cancellation/_notify_booking_approvers use.
+def _notify_booking_event(company, booking, event, actor=None, detail=''):
+    """Tell the owner, the Sales/CP side and the Accounts side about a booking event
+    (see BOOKING_EVENTS). Everyone is told once — the first audience they belong to
+    wins — and the person who acted is not told about their own action, except the
+    rep's own "submitted" receipt. In-app + push via notifications.notify.
     Best-effort — never raises."""
     try:
-        from notifications import notify_many, reporting_chain
-        is_cp = _is_cp_sourced_booking(booking.lead_id, booking.source)
-        approver_field = 'cp_booking_approvers' if is_cp else 'booking_approvers'
-        ids = (getattr(booking.project, approver_field, None) if booking.project_id else None) or []
-        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
-        if not recipients and booking.stm_id:
-            recipients = reporting_chain(booking.stm)
-        if not recipients:
-            return
+        from notifications import notify
+        spec = BOOKING_EVENTS[event]
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
-        notify_many(
-            recipients, 'accounts_booking_rejected', 'Rejected by Accounts',
-            '%s · %s Unit %s was rejected by Accounts (%s): %s' % (
-                booking.client_name or 'Booking', booking.project.name if booking.project_id else '',
-                unit, getattr(rejecting_user, 'name', '') or 'Accounts', reason,
-            ),
-            {'booking_id': booking.id},
+        rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
+        actor_id = getattr(actor, 'id', None)
+        by = getattr(actor, 'name', '') or ''
+        body = '%s · %s Unit %s · ₹%s' % (
+            booking.client_name or 'Booking', booking.project.name if booking.project_id else '',
+            unit, int(booking.final_amount or 0))
+        tail = detail or (('by %s' % by) if by else '')
+        if tail:
+            body += ' — ' + tail
+        data = {'booking_id': booking.id}
+        if booking.closure_id:
+            data['closure_id'] = booking.closure_id
+        seen = set()
+        groups = (
+            ('owner', lambda: _booking_owners(booking)),
+            ('sales', lambda: _booking_sales_side(company, booking)),
+            ('accounts', lambda: _booking_accounts_side(company, booking)),
         )
+        for audience, users in groups:
+            if not spec.get(audience):
+                continue
+            ntype, title = spec[audience]
+            for u in users():
+                if not u or u.id in seen:
+                    continue
+                if u.id == actor_id and not (audience == 'owner' and event == 'submitted'):
+                    continue
+                seen.add(u.id)
+                notify(u, ntype, title + rev, body, data)
     except Exception:
         import logging
-        logging.getLogger(__name__).exception('_notify_accounts_rejection_to_sales failed')
+        logging.getLogger(__name__).exception('_notify_booking_event(%s) failed', event)
 
 
 def _ensure_lead_and_site_visit_for_booking(b):
@@ -5966,26 +6002,17 @@ class BookingActionView(APIView):
                         # Never let this block an approval — the booking is what matters.
                         logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
                 # Notify the STM (approved) and — on a fresh closure — their manager chain.
-                from notifications import notify, notify_many, reporting_chain
+                from notifications import notify_many, reporting_chain
                 _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                _rev = (' (R%d)' % b.revision_no) if is_rev else ''
+                # Rep, the project's Sales/CP approvers, and its Accounts approvers
+                # (who now have to act on it).
+                _notify_booking_event(company, b, 'sales_approved', request.user,
+                                      'approved by %s, awaiting Accounts' % (request.user.name or 'Sales'))
                 if b.stm:
-                    notify(b.stm, 'booking_approved', 'Booking Approved%s' % _rev,
-                           f'{b.client_name or "Your booking"} · Unit {_unit} was approved.', {'booking_id': b.id})
                     if not is_rev:
                         notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
                                     f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
                                     {'booking_id': b.id})
-                # Notify Accounts & Finance managers of every approved booking.
-                _notify_accounts_managers(
-                    company, 'booking_approved', 'Booking Approved%s' % _rev,
-                    f'{b.client_name or "Booking"} · {b.project.name if b.project_id else ""} Unit {_unit} · ₹{int(b.final_amount or 0)} — approved',
-                    {'booking_id': b.id},
-                )
-                # And separately, tell whoever is actually configured to approve it at
-                # the Accounts stage — the broadcast above reaches every Accounts
-                # manager, but only these people can act on it.
-                _notify_accounts_approvers(company, b)
             elif action == 'reject':
                 b.status = 'rejected'
                 b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
@@ -6002,13 +6029,8 @@ class BookingActionView(APIView):
                     _release_plots(_pids, booking=b)
                     if b.closure_id:
                         Closure.objects.filter(id=b.closure_id).delete()
-                from notifications import notify
-                _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                _rev = (' (R%d)' % b.revision_no) if is_rev else ''
-                if b.stm:
-                    _notify_accounts_booking(company, b, 'booking_rejected', 'Booking Rejected', 'rejected')
-                    notify(b.stm, 'booking_rejected', 'Booking Rejected%s' % _rev,
-                           f'{b.client_name or "Your booking"} · Unit {_unit} was rejected.', {'booking_id': b.id})
+                _notify_booking_event(company, b, 'sales_rejected', request.user,
+                                      'rejected by %s' % (request.user.name or 'Sales'))
             else:
                 return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -6055,11 +6077,8 @@ class AccountsBookingActionView(APIView):
                 b.accounts_approved_by = request.user
                 b.accounts_approved_at = timezone.now()
                 b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
-                from notifications import notify
-                if b.stm:
-                    unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                    notify(b.stm, 'accounts_booking_approved', 'Approved by Accounts',
-                           f'{b.client_name or "Your booking"} · Unit {unit} was approved by Accounts.', {'booking_id': b.id})
+                _notify_booking_event(company, b, 'accounts_approved', request.user,
+                                      'approved by %s (Accounts)' % (request.user.name or 'Accounts'))
             elif action == 'reject':
                 reason = (request.data.get('reason') or '').strip()
                 if not reason:
@@ -6080,12 +6099,8 @@ class AccountsBookingActionView(APIView):
                 _release_plots(_pids, booking=b)
                 if b.closure_id:
                     Closure.objects.filter(id=b.closure_id).delete()
-                from notifications import notify
-                if b.stm:
-                    unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
-                    notify(b.stm, 'accounts_booking_rejected', 'Rejected by Accounts',
-                           f'{b.client_name or "Your booking"} · Unit {unit} was rejected by Accounts: {reason}', {'booking_id': b.id})
-                _notify_accounts_rejection_to_sales(company, b, request.user, reason)
+                _notify_booking_event(company, b, 'accounts_rejected', request.user,
+                                      'rejected by %s (Accounts): %s' % (request.user.name or 'Accounts', reason))
             else:
                 return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -6230,17 +6245,25 @@ class ClosureCancelView(APIView):
         closure.status = 'cancelled'
         closure.save(update_fields=['status'])
 
-        _notify_closure_cancellation(
-            notif_stm, notif_project, company,
-            notif_unit, notif_client, notif_amount,
-            request.user, extra_data=notif_extra,
-        )
-        # Notify Accounts & Finance managers of every cancelled booking.
-        _notify_accounts_managers(
-            company, 'booking_cancelled', 'Booking Cancelled',
-            f'{notif_client} · {getattr(notif_project, "name", "") or ""} Unit {notif_unit} · ₹{notif_amount} — cancelled by {getattr(request.user, "name", "")}',
-            notif_extra,
-        )
+        # The rep, the project's Sales/CP approvers and its Accounts approvers all
+        # hear about it, whichever side cancelled.
+        notif_booking = (Booking.objects.filter(closure_id=notif_extra['closure_id'])
+                         .select_related('stm', 'project', 'plot', 'revision_of__stm')
+                         .order_by('-revision_no', '-id').first())
+        if notif_booking:
+            _notify_booking_event(company, notif_booking, 'cancelled', request.user,
+                                  'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'))
+        else:
+            _notify_closure_cancellation(
+                notif_stm, notif_project, company,
+                notif_unit, notif_client, notif_amount,
+                request.user, extra_data=notif_extra,
+            )
+            _notify_accounts_managers(
+                company, 'accounts_booking_cancelled', 'Booking cancelled',
+                f'{notif_client} · {getattr(notif_project, "name", "") or ""} Unit {notif_unit} · ₹{notif_amount} — cancelled by {getattr(request.user, "name", "")}',
+                notif_extra,
+            )
         return Response({'detail': 'Closure cancelled.'})
 
 
