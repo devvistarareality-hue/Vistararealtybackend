@@ -5,6 +5,10 @@
   3. Every morning              -> each AR user gets the day's collections digest:
                                    overdue accounts, what falls due this week, and
                                    their own follow-ups for today.
+  4. Every morning              -> an installment falling due in DUE_SOON_DAYS days
+                                   is flagged, once, to whoever follows that account
+                                   up (else the AR team), so the call happens before
+                                   the date, not after.
 All idempotent: markers on the follow-up, and one digest per user per day.
 """
 from datetime import datetime, time, timedelta
@@ -18,6 +22,7 @@ from .permissions import AR_MODULE, has_ar_access
 
 DIGEST_FROM = time(9, 30)
 DIGEST_UNTIL = time(13, 0)
+DUE_SOON_DAYS = 3
 
 
 def _inr(n):
@@ -121,10 +126,65 @@ def daily_digest(now, dry=False):
     return n
 
 
+def ar_team(company_id):
+    """People who work AR by assignment (module, manager or admin level) — not every
+    company admin, who reach AR implicitly."""
+    return [u for u in User.objects.filter(company_id=company_id, is_active=True)
+            if AR_MODULE in (u.modules or []) or AR_MODULE in (u.manager_modules or [])
+            or AR_MODULE in (u.admin_modules or [])]
+
+
+def due_soon_reminders(now, dry=False):
+    """Installments due in DUE_SOON_DAYS days: one notice per installment."""
+    from sales.models import Booking
+    from .services import current_approved_booking_ids, sync_accounts, compute_account
+    local = timezone.localtime(now)
+    if not (DIGEST_FROM <= local.time() < DIGEST_UNTIL):
+        return 0
+    target = local.date() + timedelta(days=DUE_SOON_DAYS)
+    n = 0
+    for cid in ARAccount.objects.filter(status='active').values_list('company_id', flat=True).distinct():
+        try:
+            team = ar_team(cid)
+            bookings = Booking.objects.filter(company_id=cid)
+            sync_accounts(bookings.filter(status='sold'))
+            accts = (ARAccount.objects.filter(company_id=cid, status='active',
+                                              booking_id__in=current_approved_booking_ids(bookings))
+                     .select_related('booking', 'booking__project', 'booking__plot').prefetch_related('receipts'))
+            for acct in accts:
+                receipts = [r for r in acct.receipts.all() if not r.is_deleted]
+                _, r, _ = compute_account(acct, local.date(), receipts)
+                due = [st for st in r.lines if st.line.due == target and st.remaining > 0]
+                if not due:
+                    continue
+                key = {'account_id': acct.id, 'due': target.isoformat()}
+                if Notification.objects.filter(type='ar_due_soon', data__account_id=acct.id,
+                                               data__due=target.isoformat()).exists():
+                    continue
+                owner = (ARFollowUp.objects.filter(account=acct, status='pending', assigned_to__is_active=True)
+                         .select_related('assigned_to').order_by('scheduled_at').first())
+                recipients = [owner.assigned_to] if owner else team
+                if not recipients:
+                    continue
+                b = acct.booking
+                amount = sum(st.remaining for st in due)
+                body = '%s · %s Plot %s — %s due on %s (%s)' % (
+                    b.client_name or 'Customer', b.project.name if b.project_id else '',
+                    b.plot_numbers or (b.plot.number if b.plot_id else ''), _inr(amount),
+                    target.strftime('%d %b'), ', '.join(st.line.label for st in due))
+                if not dry:
+                    notify_many(recipients, 'ar_due_soon', 'Payment due in %d days' % DUE_SOON_DAYS, body, key)
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
 def run(now, escalate_hours=24, dry=False):
     cutoff = now - timedelta(hours=escalate_hours)
     return {
         'ar_fu_reminder': followup_reminders(now, dry),
         'ar_fu_escalate': followup_escalations(now, cutoff, dry),
         'ar_digest': daily_digest(now, dry),
+        'ar_due_soon': due_soon_reminders(now, dry),
     }

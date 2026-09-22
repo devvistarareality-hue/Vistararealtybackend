@@ -144,6 +144,21 @@ class CollectionsTests(TestCase):
         night = timezone.make_aware(datetime.combine(timezone.localdate(), time(22, 0)))
         self.assertEqual(reminders.daily_digest(night), 0)
 
+    def test_due_soon_reminder_once_per_installment(self):
+        today = timezone.localdate()
+        self.booking.installments = self.booking.installments + [
+            {'no': 5, 'date': (today + timedelta(days=reminders.DUE_SOON_DAYS)).isoformat(), 'amt': 70000}]
+        self.booking.final_amount = 1070000
+        self.booking.save()
+        morning = timezone.make_aware(datetime.combine(today, time(10, 0)))
+        from notifications import notify_many as real_notify_many
+        with mock.patch('receivables.reminders.notify_many', side_effect=lambda *a, **k: real_notify_many(*a, **{**k, 'push': False})) as nm:
+            self.assertEqual(reminders.due_soon_reminders(morning), 1)
+            self.assertEqual(reminders.due_soon_reminders(morning), 0, 'never twice for the same installment')
+        # No follow-up owner, so the AR team hears — the AR user and the AR manager.
+        self.assertEqual({u.id for u in nm.call_args_list[0][0][0]}, {self.user.id, self.mgr.id})
+        self.assertIn('₹70,000', nm.call_args_list[0][0][3])
+
     def test_receipts_and_followups_are_in_the_activity_log(self):
         self.api.post(f'/api/ar/accounts/{self.aid}/receipts/',
                       {'paid_on': timezone.localdate().isoformat(), 'amount': 5000, 'mode': 'bank'}, format='json')

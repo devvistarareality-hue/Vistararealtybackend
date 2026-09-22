@@ -127,4 +127,8 @@ class ChangeCaptureTests(TestCase):
                                    target_type='lead', target_id=str(self.lead.id), summary=f'Updated lead #{self.lead.id}')
         d = self.api.get('/api/activity/').json()
         self.assertEqual(d['results'][0]['label'], 'Rahul Shah (9825012345)')
-        self.assertEqual([a['name'] for a in d['actors']], ['Boss'])
+        self.assertEqual(d['results'][0]['lead_id'], self.lead.id)
+        # Everyone in the company can be picked, not only people already in the log.
+        User.objects.create_user('cc2@x.com', company=self.co, user_code='CC2', password='x', name='Quiet Rep', role='Employee')
+        d = self.api.get('/api/activity/').json()
+        self.assertEqual([a['name'] for a in d['actors']], ['Boss', 'Quiet Rep'])
