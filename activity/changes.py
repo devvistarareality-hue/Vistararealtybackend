@@ -28,6 +28,8 @@ TYPE_OF = {
     'closure': 'closure', 'plot': 'plot', 'project': 'project', 'leadsource': 'source',
     'channelpartner': 'channel-partner', 'user': 'user', 'leadtransfer': 'lead-transfer',
     'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account',
+    'investor': 'investor', 'payout': 'payout', 'referralreward': 'referral-reward', 'scheme': 'scheme',
+    'leaveapplication': 'leave-action',
 }
 
 MAX_VALUE = 80
@@ -61,6 +63,15 @@ def record_label(obj):
     try:
         if name == 'lead':
             return '%s (%s)' % (obj.name or '—', obj.phone or '—')
+        if name == 'investor':
+            return '%s%s' % (obj.name or '—', (' · LOI %s' % obj.loi_no) if getattr(obj, 'loi_no', '') else '')
+        if name in ('payout', 'referralreward') and getattr(obj, 'investor_id', None):
+            return record_label(obj.investor)
+        if name == 'leaveapplication':
+            span = obj.from_date.strftime('%d %b') if obj.from_date else ''
+            if obj.to_date and obj.to_date != obj.from_date:
+                span += ' – ' + obj.to_date.strftime('%d %b')
+            return '%s · %s %s' % (obj.user.name if obj.user_id else '—', obj.get_leave_type_display(), span)
         if name in ('followup', 'sitevisit', 'leadtransfer') and getattr(obj, 'lead_id', None):
             return record_label(obj.lead)
         if name == 'booking':
@@ -111,7 +122,7 @@ def on_pre_save(sender, instance, raw=False, **kwargs):
     if raw or not active() or not _tracked(sender):
         return
     try:
-        key = (sender._meta.model_name, instance.pk)
+        key = (sender._meta.app_label, sender._meta.model_name, instance.pk)
         if instance.pk is None:
             instance._activity_new = True
             return
@@ -157,7 +168,7 @@ def on_post_save(sender, instance, created=False, raw=False, **kwargs):
         return
     if created or getattr(instance, '_activity_new', False):
         try:
-            key = (sender._meta.model_name, instance.pk)
+            key = (sender._meta.app_label, sender._meta.model_name, instance.pk)
             _ctx.changes.setdefault(key, {'model': sender._meta.model_name,
                                           'type': TYPE_OF.get(sender._meta.model_name, sender._meta.model_name),
                                           'id': instance.pk, 'label': record_label(instance), 'created': True, 'changes': []})
@@ -169,7 +180,7 @@ def on_post_delete(sender, instance, **kwargs):
     if not active() or not _tracked(sender):
         return
     try:
-        key = (sender._meta.model_name, instance.pk)
+        key = (sender._meta.app_label, sender._meta.model_name, instance.pk)
         _ctx.changes[key] = {'model': sender._meta.model_name, 'type': TYPE_OF.get(sender._meta.model_name, sender._meta.model_name),
                              'id': instance.pk, 'label': record_label(instance), 'created': False, 'deleted': True, 'changes': []}
     except Exception:

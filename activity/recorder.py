@@ -83,6 +83,8 @@ def describe(method, path, body, response_id=None):
     body_action = str((body or {}).get('action') or '').lower() if isinstance(body, dict) else ''
     if sub in ('action', 'accounts-action') and body_action:
         sub = body_action
+    elif not sub and body_action in VERBS and method == 'POST':
+        sub = body_action    # e.g. attendance/leave-action/<id>/ {"action": "approve"}
     target_type = _singular(resource)
     label = _human(target_type)
     ref = (' #%s' % target_id) if target_id else ''

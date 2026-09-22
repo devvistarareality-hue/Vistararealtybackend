@@ -18,47 +18,64 @@ def is_log_admin(user):
     return bool(is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin')
 
 
-def _models_by_type():
-    from sales.models import Lead, FollowUp, SiteVisit, Booking, Closure, Plot, Project
+def _models_by_type(module=''):
+    """target_type → (model, select_related). Club 1000 has its own leads and
+    follow-ups, so the module decides which model a "lead" line points at."""
+    from sales.models import Lead, FollowUp, SiteVisit, Booking, Closure, Plot, Project, LeadTransfer
     from receivables.models import ARAccount
+    from club1000 import models as c1k
+    from attendance.models import LeaveApplication
+    common = {
+        'investor': (c1k.Investor, ()), 'payout': (c1k.Payout, ('investor',)),
+        'referral-reward': (c1k.ReferralReward, ('investor',)), 'scheme': (c1k.Scheme, ()),
+        'leave-action': (LeaveApplication, ('user',)),
+        'ar_account': (ARAccount, ('booking', 'booking__project', 'booking__plot')),
+    }
+    if module == 'Club 1000':
+        return {**common, 'lead': (c1k.Lead, ()), 'follow-up': (c1k.FollowUp, ('lead',))}
     return {
+        **common,
         'lead': (Lead, ()), 'follow-up': (FollowUp, ('lead',)), 'site-visit': (SiteVisit, ('lead',)),
         'booking': (Booking, ('project', 'plot')), 'closure': (Closure, ('project',)),
         'plot': (Plot, ('project',)), 'project': (Project, ()),
-        'ar_account': (ARAccount, ('booking', 'booking__project', 'booking__plot')),
+        'lead-transfer': (LeadTransfer, ('lead',)),
     }
 
 
 def _labels(rows):
     """Name each log line's record (older lines were written before names were
-    stored with them) and, for anything on a lead, give the lead's id so the
-    screen can open it. One query per record type on the page."""
+    stored with them) and, for anything on a Sales lead, give the lead's id so the
+    screen can open it. One query per record type and module on the page."""
     from .changes import record_label
     want = {}
     for r in rows:
         if r['target_id'].isdigit() and (not r.get('label') or r['target_type'] in LEAD_TYPES):
-            want.setdefault(r['target_type'], set()).add(int(r['target_id']))
+            scope = 'Club 1000' if r['module'] == 'Club 1000' else ''
+            want.setdefault((scope, r['target_type']), set()).add(int(r['target_id']))
     found = {}
-    for ttype, ids in want.items():
-        spec = _models_by_type().get(ttype)
+    for (scope, ttype), ids in want.items():
+        spec = _models_by_type(scope).get(ttype)
         if not spec:
             continue
         model, rel = spec
         try:
             for obj in model._base_manager.filter(pk__in=ids).select_related(*rel):
-                lead_id = obj.pk if ttype == 'lead' else getattr(obj, 'lead_id', None)
-                found[(ttype, str(obj.pk))] = (record_label(obj), lead_id)
+                lead_id = None
+                if not scope and ttype in LEAD_TYPES:
+                    lead_id = obj.pk if ttype == 'lead' else getattr(obj, 'lead_id', None)
+                found[(scope, ttype, str(obj.pk))] = (record_label(obj), lead_id)
         except Exception:
             continue
     for r in rows:
-        label, lead_id = found.get((r['target_type'], r['target_id']), ('', None))
+        scope = 'Club 1000' if r['module'] == 'Club 1000' else ''
+        label, lead_id = found.get((scope, r['target_type'], r['target_id']), ('', None))
         if not r.get('label'):
             r['label'] = label
         r['lead_id'] = lead_id
     return rows
 
 
-LEAD_TYPES = ('lead', 'follow-up', 'site-visit')
+LEAD_TYPES = ('lead', 'follow-up', 'site-visit', 'lead-transfer')
 
 
 def serialize(row):
