@@ -332,10 +332,11 @@ class CpDesignationDashboardTests(TestCase):
 
     def setUp(self):
         self.co = Company.objects.create(code='CPDS', name='CP Dash Co')
-        self.desig = _designation(self.co, 'CP CLUSTER HEAD', 'Sales')
+        self.desig = _designation(self.co, 'CP CLUSTER HEAD', 'Channel Partner')
         self.head = User.objects.create_user('cph@x.com', company=self.co, user_code='P1',
                                              password='x', name='CP Head', role='Manager',
-                                             modules=['Sales'], designation='CP CLUSTER HEAD')
+                                             modules=['Channel Partner'],
+                                             designation='CP CLUSTER HEAD')
 
     def test_the_pin_is_reported_to_both_clients(self):
         self.desig.dashboard = 'manager'
@@ -346,33 +347,14 @@ class CpDesignationDashboardTests(TestCase):
         api.force_authenticate(User.objects.get(pk=self.head.pk))
         self.assertEqual(api.get('/api/auth/me/').json()['dashboard'], 'manager')
 
-    def test_saving_the_cp_module_keeps_its_tabs(self):
-        """An older screen ticked "Channel Partner" without its tabs, which left
-        a CP person with an empty sidebar. Saving that list now brings the
-        module's own tabs with it."""
-        api = APIClient()
-        admin = User.objects.create_user('ad@cpds.com', company=self.co, user_code='P9',
-                                         password='x', name='Admin', role='Admin')
-        api.force_authenticate(admin)
-        r = api.patch(f'/api/auth/designations/{self.desig.id}/', {'screens': [
-            'sales.screen.dashboard', 'sales.screen.cp', 'sales.screen.leads',
-            'sales.screen.myteam']}, format='json')
-        self.assertEqual(r.status_code, 200, r.content)
-        from accounts.capabilities import can_see_screen
-        fresh = User.objects.get(pk=self.head.pk)
-        for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.booking'):
-            self.assertTrue(can_see_screen(fresh, key), key)
-        # Unticking Channel Partner itself still hides the module outright.
-        api.patch(f'/api/auth/designations/{self.desig.id}/',
-                  {'screens': ['sales.screen.dashboard']}, format='json')
-        fresh = User.objects.get(pk=self.head.pk)
-        self.assertFalse(can_see_screen(fresh, 'cp.screen.dashboard'))
-
-    def test_the_cp_menu_is_pre_ticked_with_cp_screens(self):
-        """The editor must offer the Channel Partner tabs for a CP title —
-        without them a save would wipe that person's whole menu."""
-        from accounts.capabilities import preset_screens
-        menu = preset_screens('CP CLUSTER HEAD', 'Sales')
+    def test_a_cp_designation_decides_channel_partner_only(self):
+        """Channel Partner is a module of its own: its designation opens on the
+        module's own actions and menu, and says nothing about Sales."""
+        from accounts.capabilities import legacy_capabilities, preset_screens
+        caps = legacy_capabilities('CP CLUSTER HEAD', 'Channel Partner')
+        self.assertIn('sales.pipeline.cp_manager', caps)
+        menu = preset_screens('CP CLUSTER HEAD', 'Channel Partner')
+        self.assertTrue(all(k.startswith('cp.screen.') for k in menu), menu)
         for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.booking',
                     'cp.screen.approvals', 'cp.screen.myteam'):
             self.assertIn(key, menu)

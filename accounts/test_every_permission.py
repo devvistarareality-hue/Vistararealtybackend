@@ -288,3 +288,61 @@ class EveryModuleScopeTests(TestCase):
         self._set(self.desig, 'own')
         after = self._api().get('/api/ar/accounts/').json()['results']
         self.assertEqual(len(before), len(after))
+
+
+class ChannelPartnerIsItsOwnModuleTests(TestCase):
+    """Channel Partner used to be a corner of Sales. It is a module now, like AR
+    and Club 1000: granted in User Management, with its own designations, menu
+    and dashboards."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='CPM', name='CP Module Co')
+        cls.admin = User.objects.create_user('a@cpm.com', company=cls.co, user_code='CPM-A',
+                                             password='x', name='Admin', role='Admin')
+        cls.desig = Designation.objects.create(company=cls.co, name='CP Executive',
+                                               module='Channel Partner')
+        cls.person = User.objects.create_user('p@cpm.com', company=cls.co, user_code='CPM-P',
+                                              password='x', name='Partner Exec', role='Employee',
+                                              designation='CP Executive',
+                                              modules=['Channel Partner'])
+
+    def test_the_module_is_what_lets_them_in(self):
+        from sales.views import can_access_cp_module, has_cp_access, has_sales_access
+        self.assertTrue(has_cp_access(self.person))
+        self.assertTrue(can_access_cp_module(self.person))
+        # Channel Partner works the same lead tables, so it reaches those endpoints…
+        self.assertTrue(has_sales_access(self.person))
+        # …and someone with neither module is still out.
+        outsider = User.objects.create_user('o@cpm.com', company=self.co, user_code='CPM-O',
+                                            password='x', name='Outsider', role='Employee',
+                                            designation='Nothing', modules=[])
+        self.assertFalse(has_cp_access(outsider))
+
+    def test_its_designation_decides_channel_partner_only(self):
+        from accounts.capabilities import legacy_capabilities, preset_screens
+        caps = legacy_capabilities('CP Executive', 'Channel Partner')
+        self.assertIn('sales.pipeline.cp', caps)
+        menu = preset_screens('CP Executive', 'Channel Partner')
+        self.assertTrue(menu and all(k.startswith('cp.screen.') for k in menu), menu)
+
+    def test_the_editor_lists_it_as_a_module_of_its_own(self):
+        api = APIClient()
+        api.force_authenticate(self.admin)
+        cat = api.get('/api/auth/designations/capabilities/').json()
+        caps = {c['module'] for c in cat['capabilities']}
+        screens = {c['module'] for c in cat['screens']}
+        dashboards = {d['module'] for d in cat['dashboards'] if d['module']}
+        self.assertIn('Channel Partner', caps)
+        self.assertIn('Channel Partner', screens)
+        self.assertIn('Channel Partner', dashboards)
+        # The Sales menu no longer carries a Channel Partner item.
+        self.assertNotIn('sales.screen.cp', [c['key'] for c in cat['screens']])
+
+    def test_a_sales_designation_says_nothing_about_it(self):
+        from accounts.capabilities import legacy_capabilities, preset_screens
+        caps = legacy_capabilities('CMO', 'Sales')
+        self.assertTrue(all(c.startswith('sales.') for c in caps), caps)
+        self.assertNotIn('sales.pipeline.cp', caps)
+        menu = preset_screens('CMO', 'Sales')
+        self.assertTrue(all(k.startswith('sales.') for k in menu), menu)

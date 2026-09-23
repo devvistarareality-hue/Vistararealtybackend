@@ -21,10 +21,10 @@ CAPABILITIES = [
      'Sees the telecaller pipeline: new leads to call, callbacks, warm transfers.'),
     ('sales.pipeline.stm', 'Works site visits and bookings', 'Sales',
      'Sees the STM pipeline: assigned leads, site visits, closures and bookings.'),
-    ('sales.pipeline.cp', 'Works channel-partner leads', 'Sales',
-     'A CP Executive: their own partner-sourced leads, inside the Channel Partner module.'),
-    ('sales.pipeline.cp_manager', 'Runs the channel-partner desk', 'Sales',
-     'Boxed into the Channel Partner module, scoped by assigned projects.'),
+    ('sales.pipeline.cp', 'Works channel-partner leads', 'Channel Partner',
+     'A CP Executive: their own partner-sourced leads.'),
+    ('sales.pipeline.cp_manager', 'Runs the channel-partner desk', 'Channel Partner',
+     'The whole partner desk, scoped by assigned projects.'),
     ('sales.lead.assign', 'Assign leads to others', 'Sales',
      'Hand a lead to another telecaller or STM.'),
     # Actions inside a module the person already has. Everyone with the module could
@@ -62,7 +62,6 @@ SCREENS = [
     ('sales.screen.projects', 'Projects', 'Sales'),
     ('sales.screen.leadsetup', 'Lead Setup', 'Sales'),
     ('sales.screen.teamusers', 'Team Users', 'Sales'),
-    ('sales.screen.cp', 'Channel Partner', 'Sales'),
     ('sales.screen.distribution', 'Distribution', 'Sales'),
     ('sales.screen.datareset', 'Data Reset', 'Sales'),
     # The Channel Partner module has its own menu, so it gets its own keys — a
@@ -113,18 +112,10 @@ PRESET_SCREENS = {
                    'sales.screen.conversions', 'sales.screen.import', 'sales.screen.reports'],
     'stm': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
             'sales.screen.sitevisits', 'sales.screen.booking', 'sales.screen.import', 'sales.screen.reports'],
-    'cp_executive': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
-                     'sales.screen.sitevisits', 'sales.screen.booking', 'sales.screen.cp',
-                     'sales.screen.import', 'sales.screen.reports',
-                     'cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
+    'cp_executive': ['cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
                      'cp.screen.followups', 'cp.screen.closures', 'cp.screen.booking',
                      'cp.screen.approvals'],
-    'cp_manager': ['sales.screen.dashboard', 'sales.screen.cp', 'sales.screen.leads',
-                   'sales.screen.followups', 'sales.screen.sitevisits', 'sales.screen.booking',
-                   'sales.screen.approvals', 'sales.screen.myteam', 'sales.screen.reports',
-                   'cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
-                   'cp.screen.followups', 'cp.screen.closures', 'cp.screen.booking',
-                   'cp.screen.myteam', 'cp.screen.approvals'],
+    'cp_manager': [k for k, _, m in SCREENS if m == 'Channel Partner'],
     'sales_desk': [k for k, _, _ in SCREENS],
 }
 
@@ -222,8 +213,8 @@ LEGACY_RULES = [
 # Which modules a designation of this module is allowed to decide. A Sales
 # designation covers the Channel Partner module too — CP lives inside Sales.
 MODULE_FAMILY = {
-    'Sales': ('Sales', 'Channel Partner'),
-    'Channel Partner': ('Sales', 'Channel Partner'),
+    'Sales': ('Sales',),
+    'Channel Partner': ('Channel Partner',),
     'Accounts & Finance': ('Accounts & Finance',),
     'AR': ('AR',),
     'Accounts Receivable': ('AR',),
@@ -391,13 +382,13 @@ CP_MENU_KEYS = [k for k, _, m in SCREENS if m == 'Channel Partner']
 def with_module_defaults(screens):
     """Tidy a menu before it is saved.
 
-    Ticking "Channel Partner" in the Sales menu means the person works in that
-    module, so its own tabs come with it. Without this, a menu ticked on a screen
-    that predates those tabs (an older browser, a stale tab) saves with none of
-    them and leaves a CP person staring at an empty sidebar.
+    Channel Partner is its own module, so a menu saved for it that names none of
+    its tabs (an older browser, a stale tab) would leave that person with no
+    sidebar at all. Their own module's tabs come back.
     """
     keys = set(screens or [])
-    if 'sales.screen.cp' in keys and not any(k.startswith('cp.screen.') for k in keys):
+    if 'sales.screen.cp' in keys:
+        keys.discard('sales.screen.cp')          # the Sales menu no longer has it
         keys |= set(CP_MENU_KEYS)
     return sorted(keys)
 

@@ -111,11 +111,31 @@ def _is_sales_admin(user):
     )
 
 
+CP_MODULE = 'Channel Partner'
+
+
+def has_cp_access(user):
+    """Channel Partner is its own module now, granted in User Management the way
+    AR and Club 1000 are. Admins always have it."""
+    if not (user and getattr(user, 'is_authenticated', True)):
+        return False
+    return bool(
+        is_admin_or_manager(user)
+        or CP_MODULE in (getattr(user, 'modules', None) or [])
+        or CP_MODULE in (getattr(user, 'manager_modules', None) or [])
+        or CP_MODULE in (getattr(user, 'admin_modules', None) or [])
+    )
+
+
 def has_sales_access(user):
     """Admin/Manager, or a plain employee who's been granted the Sales module —
     used for actions (like bulk lead import) that used to be manager-only but
-    shouldn't be gated tighter than "can this person use Sales at all"."""
-    return is_admin_or_manager(user) or 'Sales' in (getattr(user, 'modules', None) or [])
+    shouldn't be gated tighter than "can this person use Sales at all".
+
+    Channel Partner counts too: it is a separate module that works the same lead
+    tables, scoped to partner-sourced records."""
+    mods = getattr(user, 'modules', None) or []
+    return is_admin_or_manager(user) or 'Sales' in mods or CP_MODULE in mods
 
 
 def _designation(user):
@@ -164,11 +184,11 @@ def is_cp_designated(user):
 
 
 def can_access_cp_module(user):
-    """Who can reach the Channel Partner module: true/hard admins always can
-    (see _is_hard_admin); a CP-designation Manager or CP Executive gets in via
-    their designation. Mirrors web's canAccessChannelPartner(user) — keep in
-    sync."""
-    return bool(_is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
+    """Who can reach the Channel Partner module. It is a module of its own now,
+    so the answer is the same as for AR or Club 1000: whoever has been granted
+    it in User Management. A CP designation still gets in on its own, so nobody
+    loses access on the day this ships."""
+    return bool(has_cp_access(user) or _is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
 
 
 def cp_lead_q(prefix=''):
