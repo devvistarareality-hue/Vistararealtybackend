@@ -58,11 +58,18 @@ class UserSerializer(serializers.ModelSerializer):
 class DesignationSerializer(serializers.ModelSerializer):
     company_code = serializers.CharField(source='company.code', read_only=True)
     company_name = serializers.CharField(source='company.name', read_only=True)
+    # What this designation grants right now: its ticks, or — when a company has
+    # never opened the screen — what the title already implied.
+    effective_capabilities = serializers.SerializerMethodField()
+
+    def get_effective_capabilities(self, obj):
+        from .capabilities import legacy_capabilities
+        return sorted(obj.capabilities or []) if obj.capabilities_set else sorted(legacy_capabilities(obj.name))
 
     class Meta:
         model  = Designation
         fields = ['id', 'name', 'module', 'company_code', 'company_name',
-                  'capabilities', 'capabilities_set', 'data_scope']
+                  'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope']
 
 
 class UserListSerializer(serializers.ModelSerializer):
