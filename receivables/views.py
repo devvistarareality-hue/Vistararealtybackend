@@ -21,6 +21,7 @@ from .services import (compute_account, current_approved_booking_ids, expected_c
 
 ZERO = Decimal('0')
 MODES = dict(ARReceipt.MODES)
+MIN_DUE_YEAR, MAX_DUE_YEAR = 2015, 2100
 
 
 def _log(request, acct, summary, action, target_type='ar_account', target_id=None):
@@ -107,6 +108,10 @@ def _summary(acct, plan, r, mismatch):
         # entered): AR can't track dues until Sales enters one, so say that plainly
         # instead of showing a huge "plan mismatch".
         'no_schedule': no_schedule,
+        # A due date whose year can't be real ("0026" for 2026, typed on the booking)
+        # makes the unit read as two thousand years overdue. Flag it rather than let
+        # the figure stand.
+        'bad_dates': sum(1 for l in plan if l.due and not (MIN_DUE_YEAR <= l.due.year <= MAX_DUE_YEAR)),
     }
 
 
@@ -357,7 +362,7 @@ class ARDashboardView(APIView):
         totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
         forecast, order, rows = {}, [], []
-        issues = {'no_schedule': 0, 'plan_mismatch': 0}
+        issues = {'no_schedule': 0, 'plan_mismatch': 0, 'bad_dates': 0}
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
@@ -371,6 +376,7 @@ class ARDashboardView(APIView):
             sm = _summary(acct, plan, r, m)
             issues['no_schedule'] += sm['no_schedule']
             issues['plan_mismatch'] += bool(sm['plan_mismatch'])
+            issues['bad_dates'] += bool(sm['bad_dates'])
             rows.append((sm, r.ageing.get('>180', ZERO)))
 
         def brief(sm, amount):

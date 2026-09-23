@@ -74,3 +74,20 @@ class ScheduleCheckOnSubmitTests(TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertIn('498 short', r.json()['detail'])
         self.assertEqual(Booking.objects.count(), 0)
+
+
+class InstallmentYearTests(TestCase):
+    """A year like 0026 makes AR read the unit as two thousand years overdue."""
+
+    def test_impossible_year_is_rejected(self):
+        from sales.views import _schedule_error
+        data = {'final_amount': 1000000, 'total_extra': 0,
+                'installments': [{'no': 1, 'date': '0026-01-26', 'amt': 1000000}]}
+        self.assertIn('installment date', _schedule_error(data))
+        self.assertIn('#1 is 0026-01-26', _schedule_error(data))
+
+    def test_real_years_pass(self):
+        from sales.views import _schedule_error
+        data = {'final_amount': 1000000, 'total_extra': 0,
+                'installments': [{'no': 1, 'date': '2026-01-26', 'amt': 1000000}]}
+        self.assertIsNone(_schedule_error(data))
