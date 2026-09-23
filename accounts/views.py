@@ -387,7 +387,8 @@ class DesignationDetailView(APIView):
     def patch(self, request, pk):
         """Set what this designation may do, and whose records it sees. Company
         admins only — this decides everyone else's access."""
-        from .capabilities import CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES, SCREEN_KEYS
+        from .capabilities import (CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES, SCREEN_KEYS,
+                                   with_module_defaults)
         if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
             return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
         desig = self._get(request, pk)
@@ -409,7 +410,7 @@ class DesignationDetailView(APIView):
             unknown = [c for c in screens if c not in SCREEN_KEYS]
             if unknown:
                 return Response({'screens': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
-            desig.screens = sorted(set(screens))
+            desig.screens = with_module_defaults(screens)
             desig.screens_set = True
         if 'dashboard' in request.data:
             dash = request.data.get('dashboard') or ''

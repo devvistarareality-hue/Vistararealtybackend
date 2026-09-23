@@ -385,6 +385,23 @@ def dashboard_for(user):
     return (row.dashboard if row is not None else '') or DASHBOARD_AUTO
 
 
+CP_MENU_KEYS = [k for k, _, m in SCREENS if m == 'Channel Partner']
+
+
+def with_module_defaults(screens):
+    """Tidy a menu before it is saved.
+
+    Ticking "Channel Partner" in the Sales menu means the person works in that
+    module, so its own tabs come with it. Without this, a menu ticked on a screen
+    that predates those tabs (an older browser, a stale tab) saves with none of
+    them and leaves a CP person staring at an empty sidebar.
+    """
+    keys = set(screens or [])
+    if 'sales.screen.cp' in keys and not any(k.startswith('cp.screen.') for k in keys):
+        keys |= set(CP_MENU_KEYS)
+    return sorted(keys)
+
+
 def preset_screens(title, module=None):
     """The menu a title implies, used to pre-tick the editor. `module` limits it
     to that designation's own module, as legacy_capabilities does."""

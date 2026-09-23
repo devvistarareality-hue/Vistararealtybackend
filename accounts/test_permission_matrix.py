@@ -345,6 +345,28 @@ class CpDesignationDashboardTests(TestCase):
         api.force_authenticate(User.objects.get(pk=self.head.pk))
         self.assertEqual(api.get('/api/auth/me/').json()['dashboard'], 'manager')
 
+    def test_saving_the_cp_module_keeps_its_tabs(self):
+        """An older screen ticked "Channel Partner" without its tabs, which left
+        a CP person with an empty sidebar. Saving that list now brings the
+        module's own tabs with it."""
+        api = APIClient()
+        admin = User.objects.create_user('ad@cpds.com', company=self.co, user_code='P9',
+                                         password='x', name='Admin', role='Admin')
+        api.force_authenticate(admin)
+        r = api.patch(f'/api/auth/designations/{self.desig.id}/', {'screens': [
+            'sales.screen.dashboard', 'sales.screen.cp', 'sales.screen.leads',
+            'sales.screen.myteam']}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        from accounts.capabilities import can_see_screen
+        fresh = User.objects.get(pk=self.head.pk)
+        for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.booking'):
+            self.assertTrue(can_see_screen(fresh, key), key)
+        # Unticking Channel Partner itself still hides the module outright.
+        api.patch(f'/api/auth/designations/{self.desig.id}/',
+                  {'screens': ['sales.screen.dashboard']}, format='json')
+        fresh = User.objects.get(pk=self.head.pk)
+        self.assertFalse(can_see_screen(fresh, 'cp.screen.dashboard'))
+
     def test_the_cp_menu_is_pre_ticked_with_cp_screens(self):
         """The editor must offer the Channel Partner tabs for a CP title —
         without them a save would wipe that person's whole menu."""
