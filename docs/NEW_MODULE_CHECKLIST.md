@@ -69,14 +69,35 @@ configured it yet, and an unset designation sees everything.
 
 ### 1.4 Declare the dashboards
 
-`accounts/capabilities.py` → `DASHBOARDS`, one row per dashboard you built:
+`accounts/capabilities.py` → `DASHBOARDS`, one row per dashboard you built, with
+the role it is written for:
 
 ```python
-('purchase_buyer',   'Buyer — their own orders', 'Purchase'),
-('purchase_manager', 'Manager — the whole desk', 'Purchase'),
+('purchase_employee', 'Buyer — their own orders',  'Purchase', 'Employee'),
+('purchase_manager',  'Manager — the whole desk',  'Purchase', 'Manager'),
+('purchase_director', 'Director — company figures','Purchase', 'Director'),
 ```
 
-Leave `''` (decide from their permissions) as the default.
+The editor's Dashboard tab groups these by module and filters them by role
+(`DASHBOARD_ROLES`), so an admin picks "the Manager view of Purchase" and pins it
+to a designation. Leave `''` (decide from their permissions) as the default.
+
+Then point the module's dashboard at the pinned value. Keep a map of the views
+you have actually built and fall back to today's view for anything else:
+
+```jsx
+import { pinnedDashboard } from '../../lib/dashboards';      // app: ../../lib/dashboards
+
+const VIEWS = { purchase_manager: ManagerDashboard, purchase_employee: BuyerDashboard };
+const Pinned = pinnedDashboard(user, VIEWS);
+if (Pinned) return <Pinned user={user} />;
+// …the module's current dashboard
+```
+
+`app/club1000/page.js` is the worked example. Finally add each key you have built
+to `DASHBOARDS_BUILT`, which is what stops the editor labelling it "not built yet
+— opens the current dashboard". A key an admin pins before you write the view is
+harmless: the module just opens what it opens today.
 
 ### 1.5 Gate the actions
 
