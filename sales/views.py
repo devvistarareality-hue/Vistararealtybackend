@@ -636,8 +636,20 @@ class StatsView(APIView):
             unassigned_leads=Count('id', filter=Q(
                 status='new', telecaller__isnull=True, stm__isnull=True)),
             leads_today=Count('id', filter=Q(created_at__date=today)),
-            called_count=Count('id', filter=~Q(telecaller_status='') & Q(telecaller_status__isnull=False)),
         )
+
+        # "Called/MQL" and "Total Called" must mean "worked within this range", not
+        # "created within this range and currently has a status" — same fix already
+        # applied to the "Called" tab's own date filter (see _leads_worked_in_range),
+        # which this used to disagree with: a lead created outside the window but
+        # actually called inside it was missed here and counted there, and vice
+        # versa. Without a date range there's no "worked in range" to compute, so it
+        # falls back to the plain "currently called" snapshot, same as before.
+        if date_from or date_to:
+            status_field = 'stm_status' if (is_stm(request.user) or is_cp(request.user)) else 'telecaller_status'
+            called_count = len(_leads_worked_in_range(leads_scope, status_field, '', date_from, date_to))
+        else:
+            called_count = leads_qs.exclude(telecaller_status='').count()
 
         # Status-bucket counts (hot/warm/callback/not_reachable/cold, and the STM
         # equivalents) are counted by the date the lead's status actually CHANGED
@@ -805,13 +817,13 @@ class StatsView(APIView):
             'new_leads':          agg['new_leads'],
             'unassigned_leads':   agg['unassigned_leads'],
             'leads_today':        agg['leads_today'],
-            'called_count':       agg['called_count'],
+            'called_count':       called_count,
             'to_call_count':      to_call_count,
             'followup_call_count': followup_call_count,
             'followup_pending_count': followup_pending_count,
             'followup_overdue_count': followup_overdue_count,
             # Every call made in the window: new leads worked plus follow-up calls.
-            'total_called_count': agg['called_count'] + followup_call_count,
+            'total_called_count': called_count + followup_call_count,
             'hot_count':          hot_count,
             'warm_count':         warm_count,
             'callback_count':     callback_count,
@@ -859,26 +871,30 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             leads_qs = leads_qs.filter(company_id=company_id)
 
-        # MQL: of the leads that ARRIVED on each day, how many have had their
-        # telecaller status set — "called" means a new lead came in and its status
-        # was changed. Grouped by created_at so the chart counts exactly the leads
-        # the Called/MQL tile counts over the same date filter.
+        # MQL: leads actually WORKED (their status/stm_status first left blank) on
+        # each day, same as the Called/MQL tile's own date filter (StatsView —
+        # _leads_worked_in_range) — not leads that merely arrived that day.
         #
-        # This was grouped by updated_at, which is neither: that column moves on any
-        # edit, so a lead touched for an unrelated reason counted as a call and a
-        # lead edited on several days counted on each one. On a live telecaller it
-        # read 50 against a tile of 25.
+        # This used to group by created_at, i.e. "of the leads that ARRIVED on each
+        # day, how many currently have a status" — a lead received one day but
+        # called days later (or vice versa) landed on the wrong day, or wasn't
+        # worked at all yet, and disagreed with the tile above it (17 on the chart
+        # against 29 on the tile, on the exact same filter). Grouping instead by
+        # when the status-history row shows it first left blank is what actually
+        # answers "worked on this day" — same event _leads_worked_in_range counts.
+        mql_status_field = 'stm_status' if (is_stm(request.user) or is_cp(request.user)) else 'telecaller_status'
         mql_rows = (
-            leads_qs
+            LeadStatusHistory.objects
             .filter(
+                lead__in=leads_qs,
+                field_changed=mql_status_field,
+                old_value='',
                 created_at__date__gte=date_from,
                 created_at__date__lte=date_to,
-                telecaller_status__isnull=False,
             )
-            .exclude(telecaller_status='')
             .annotate(day=TruncDate('created_at'))
             .values('day')
-            .annotate(count=Count('id'))
+            .annotate(count=Count('lead_id', distinct=True))
             .order_by('day')
         )
 
@@ -4727,10 +4743,25 @@ class BookingListCreateView(APIView):
             sname = (data.get('source') or '').strip()
             if sname:
                 src = LeadSource.objects.filter(company=company, name__iexact=sname).first()
+            # cp_name means different things depending on source (CP name, a plain
+            # Reference person, or "Other") — only resolve it against the Channel
+            # Partner directory when the source actually is Channel Partner, or a
+            # reference person's typed name would wrongly link to a same-named CP.
+            # name is encrypted (no blind index), so this has to compare in Python —
+            # fine at this scale, same as other encrypted-field lookups in this file.
+            channel_partner = None
+            cp_name = (data.get('cp_name') or '').strip()
+            if cp_name and sname.lower() == 'channel partner':
+                channel_partner = next(
+                    (cp for cp in ChannelPartner.objects.filter(company=company)
+                     if cp.name.strip().lower() == cp_name.lower()),
+                    None,
+                )
             lead = Lead.objects.create(
                 company=company, name=data.get('client_name', '').strip(),
                 phone=(data.get('phone') or '').strip(), status='new',
                 project_id=data.get('project') or None, source=src,
+                channel_partner=channel_partner,
                 # STM self-sourced this client straight into a booking — no
                 # telecaller ever touched it. stm must be set (same value the
                 # Booking itself gets below), or _distribute's telecaller pool
