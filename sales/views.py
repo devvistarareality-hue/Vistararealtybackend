@@ -4694,6 +4694,17 @@ class BookingListCreateView(APIView):
                 # tagged Source = "Channel Partner" routes to the CP approvers, so it
                 # has to be visible to them or it is authorized but unreachable.
                 qs = qs.filter(is_cp_booking_q)
+        # Which book this list is: the Sales module asks for source=sales so its
+        # bookings and approvals hold no partner-sourced deals — those belong to
+        # Channel Partner, which has its own module, its own approvers and its own
+        # list. A booking counts as partner-sourced by its own Source, falling back
+        # to its lead — the same rule the CP module's scoping uses, so the two
+        # always agree and no booking lands in both.
+        source = (request.query_params.get('source') or '').lower()
+        if source == 'cp':
+            qs = qs.filter(is_cp_booking_q)
+        elif source == 'sales':
+            qs = qs.exclude(is_cp_booking_q)
         # Chains are resolved against the whole company, not this viewer's slice —
         # otherwise whether a replaced booking still shows depends on who is looking.
         qs = _drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))

@@ -411,3 +411,42 @@ class TheEditorShowsOneModuleTests(TestCase):
         self.assertTrue(all(c.startswith('sales.pipeline.cp') for c in caps), caps)
         menu = preset_screens('CP EXECUTIVE', 'Channel Partner')
         self.assertTrue(all(k.startswith('cp.') for k in menu), menu)
+
+
+class BookingSourceFilterTests(TestCase):
+    """Each module answers for its own book. The Sales module asks for
+    source=sales, so partner-sourced bookings stay in Channel Partner and a
+    booking is never counted in both."""
+
+    def setUp(self):
+        from datetime import date
+        from sales.models import Booking, Lead, LeadSource, Project
+        cache.clear()
+        self.co = Company.objects.create(code='SRCF', name='Source Co')
+        proj = Project.objects.create(company=self.co, name='Tundav')
+        meta = LeadSource.objects.create(company=self.co, name='Meta')
+        cp = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        self.admin = User.objects.create_user('a@srcf.com', company=self.co, user_code='SF-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales'])
+        for src, client in ((meta, 'Sales client'), (cp, 'Partner client')):
+            lead = Lead.objects.create(company=self.co, project=proj, source=src,
+                                       name=client, phone='9000000010', stm=self.admin)
+            Booking.objects.create(company=self.co, project=proj, lead=lead, stm=self.admin,
+                                   client_name=client, status='sold', booking_date=date.today())
+
+    def _names(self, query):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.admin.pk))
+        rows = api.get(f'/api/sales/bookings/?mine=1&status=sold{query}').json()
+        rows = rows if isinstance(rows, list) else rows.get('results', [])
+        return sorted(r['client_name'] for r in rows)
+
+    def test_both_sides_unless_asked(self):
+        self.assertEqual(self._names(''), ['Partner client', 'Sales client'])
+
+    def test_sales_only(self):
+        self.assertEqual(self._names('&source=sales'), ['Sales client'])
+
+    def test_channel_partner_only(self):
+        self.assertEqual(self._names('&source=cp'), ['Partner client'])
