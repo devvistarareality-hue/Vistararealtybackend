@@ -23,7 +23,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from companies.models import Company
-from sales.models import Booking, Closure, Lead, LeadSource, Project, SiteVisit
+from sales.models import Booking, Closure, Lead, LeadSource, Plot, Project, SiteVisit
 
 
 class ClosureCountsAgree(TestCase):
@@ -323,3 +323,80 @@ class AccountsHasTheLastWord(TestCase):
         self.assertEqual(acc['approved'], sales['closures'] + cp['closures'])
         self.assertEqual(acc['pending'], sales['accounts_pending'] + cp['accounts_pending'])
         self.assertEqual(acc['total'], 5, 'every deal Sales or CP has approved')
+
+
+class WhenAccountsRejects(TestCase):
+    """Accounts refusing a deal undoes it, rather than leaving it half-sold.
+
+    The unit goes back on the market, the closure is torn up, the booking reads
+    as rejected everywhere, and the figures it was in drop with it. A reason is
+    required — the rep has to be told what to fix.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='REJ', name='Reject Co')
+        self.p = Project.objects.create(company=self.co, name='Tundav')
+        self.plot = Plot.objects.create(project=self.p, number='H-1', status='hold')
+        self.admin = User.objects.create_user('a@rej.com', company=self.co, user_code='RJ-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales', 'Accounts & Finance'])
+        self.stm = User.objects.create_user('s@rej.com', company=self.co, user_code='RJ-S',
+                                            password='x', name='Seller', role='Employee',
+                                            modules=['Sales'])
+        self.lead = Lead.objects.create(company=self.co, project=self.p, name='Buyer',
+                                        phone='95555000001', stm=self.stm)
+        self.closure = Closure.objects.create(company=self.co, project=self.p, lead=self.lead,
+                                              stm=self.stm, closure_date=date(2026, 8, 1))
+        self.booking = Booking.objects.create(
+            company=self.co, project=self.p, plot=self.plot, lead=self.lead, stm=self.stm,
+            client_name='Buyer', phone=self.lead.phone, closure=self.closure, status='sold',
+            approval_status='APPROVED', accounts_status='pending', booking_date=date(2026, 8, 1))
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.admin.pk))
+        return api
+
+    def test_a_reason_is_required(self):
+        r = self._api().post(f'/api/sales/bookings/{self.booking.id}/accounts-action/',
+                             {'action': 'reject'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.accounts_status, 'pending', 'nothing moved')
+
+    def test_rejecting_undoes_the_sale(self):
+        cache.clear()
+        api = self._api()
+        before = api.get('/api/sales/stats/').json()
+        self.assertEqual(before['accounts_pending'], 1)
+        self.assertEqual(before['closures'], 0, 'not a closure while Accounts holds it')
+
+        r = api.post(f'/api/sales/bookings/{self.booking.id}/accounts-action/',
+                     {'action': 'reject', 'reason': 'Payment plan does not add up'}, format='json')
+        self.assertEqual(r.status_code, 200)
+
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.accounts_status, 'rejected')
+        self.assertEqual(self.booking.status, 'rejected', 'the booking itself, not just the stage')
+        self.assertEqual(self.booking.accounts_rejected_reason, 'Payment plan does not add up')
+        self.assertEqual(self.booking.accounts_rejected_by_id, self.admin.id)
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'available', 'the unit goes back on the market')
+        self.assertFalse(Closure.objects.filter(id=self.closure.id).exists(),
+                         'the closure is torn up')
+
+        cache.clear()
+        after = api.get('/api/sales/stats/').json()
+        self.assertEqual(after['accounts_pending'], 0, 'it leaves the waiting tile')
+        self.assertEqual(after['closures'], 0, 'and never reaches Closures')
+
+    def test_it_lands_on_rejected_and_nowhere_else(self):
+        api = self._api()
+        api.post(f'/api/sales/bookings/{self.booking.id}/accounts-action/',
+                 {'action': 'reject', 'reason': 'Wrong rate'}, format='json')
+        for tab, expected in (('sold', 0), ('pending', 0), ('rejected', 1)):
+            rows = api.get(f'/api/sales/bookings/?status={tab}&source=sales').json()
+            self.assertEqual(len(rows), expected, f'the {tab} tab')
+        waiting = api.get('/api/sales/bookings/?status=sold&accounts_status=pending&source=sales').json()
+        self.assertEqual(len(waiting), 0, 'no longer waiting on Accounts')
