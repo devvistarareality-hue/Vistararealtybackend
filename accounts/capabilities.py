@@ -157,6 +157,23 @@ DASHBOARDS = [
     ('club_exec', 'Executive — their own investors', 'Club 1000', 'Employee'),
     ('club_manager', 'Manager — the investment desk', 'Club 1000', 'Manager'),
 ]
+
+# The modules whose dashboard is one view for everyone: the same dashboard is
+# offered to every role, so a company can pin it to any designation. (AR's
+# receivables dashboard, Accounts & Finance's, and the plain one the rest open.)
+_SHARED_DASHBOARDS = [
+    ('ar', 'AR', 'the receivables book'),
+    ('accounts', 'Accounts & Finance', 'the approvals desk'),
+    ('hr', 'HR', 'the department'),
+    ('execution', 'Execution', 'the site desk'),
+    ('purchase', 'Purchase', 'the buying desk'),
+    ('land', 'Land', 'the land desk'),
+]
+for _pfx, _module, _what in _SHARED_DASHBOARDS:
+    for _role in DASHBOARD_ROLES:
+        DASHBOARDS.append((f'{_pfx}_{_role.lower().replace(" ", "_")}',
+                           f'{_role} — {_what}', _module, _role))
+
 DASHBOARD_KEYS = [d[0] for d in DASHBOARDS]
 
 # Granted to everyone by default, because before capabilities anyone with the
@@ -202,6 +219,29 @@ LEGACY_RULES = [
 ]
 
 
+# Which modules a designation of this module is allowed to decide. A Sales
+# designation covers the Channel Partner module too — CP lives inside Sales.
+MODULE_FAMILY = {
+    'Sales': ('Sales', 'Channel Partner'),
+    'Channel Partner': ('Sales', 'Channel Partner'),
+    'Accounts & Finance': ('Accounts & Finance',),
+    'AR': ('AR',),
+    'Accounts Receivable': ('AR',),
+    'Club 1000': ('Club 1000',),
+}
+
+
+def modules_of(module):
+    """The modules a designation in `module` decides. Unknown module → just itself."""
+    return MODULE_FAMILY.get(module or '', (module,) if module else ())
+
+
+def keys_in_modules(rows, modules):
+    """The keys from CAPABILITIES/SCREENS that belong to these modules."""
+    wanted = set(modules or ())
+    return {r[0] for r in rows if r[2] in wanted}
+
+
 def preset_for_title(title):
     """The preset a designation title implies under the old text rules."""
     t = (title or '').strip().lower()
@@ -218,8 +258,14 @@ def preset_for_title(title):
     return 'sales_desk'
 
 
-def legacy_capabilities(title):
-    """What the old code would have granted this designation title."""
+def legacy_capabilities(title, module=None):
+    """What the old code would have granted this designation title.
+
+    `module` limits the answer to that designation's own module: a Sales
+    designation says nothing about AR, so the editor never shows AR ticked for
+    it. Left out (the whole vocabulary) for the runtime check, where module
+    access is the gate anyway.
+    """
     caps = set(PRESETS.get(preset_for_title(title)) or []) | set(DEFAULT_ON)
     t = (title or '').strip().lower()
     # Telecallers, STMs and CP Executives could never (re)assign leads; everyone
@@ -230,6 +276,8 @@ def legacy_capabilities(title):
     # (the role check lives in is_cp_manager), so "CP Executive" carried both.
     if t.startswith('cp'):
         caps.add('sales.pipeline.cp_manager')
+    if module:
+        caps &= keys_in_modules(CAPABILITIES, modules_of(module))
     return caps
 
 
@@ -255,6 +303,10 @@ def capabilities_for(user):
     row = _designation_row(user)
     if row is not None and row.capabilities_set:
         caps = set(row.capabilities or [])
+        # A Sales designation decides Sales, not AR or Club 1000: outside its own
+        # module the person keeps what everyone with that module always had.
+        own = keys_in_modules(CAPABILITIES, modules_of(row.module))
+        caps |= (set(DEFAULT_ON) - own)
     else:
         caps = legacy_capabilities(getattr(user, 'designation', ''))
     caps |= set(getattr(user, 'extra_capabilities', None) or [])
@@ -295,12 +347,33 @@ def can_see_screen(user, key):
     return True if allowed is None else key in allowed
 
 
+def role_dashboards(user):
+    """What this person's role opens in each module, as set by the Copy button on
+    a module's Dashboard: {'Sales': 'manager', 'AR': 'ar_manager', …}. Their
+    designation's own pin still wins over this."""
+    company_id = getattr(user, 'company_id', None)
+    role = getattr(user, 'role', '') or ''
+    if not (company_id and role):
+        return {}
+    from .models import RoleDashboard
+    return {r.module: r.view for r in
+            RoleDashboard.objects.filter(company_id=company_id, role=role)}
+
+
 def dashboard_for(user):
     """Which dashboard to open: '' means decide from their permissions."""
     row = _designation_row(user)
     return (row.dashboard if row is not None else '') or DASHBOARD_AUTO
 
 
-def preset_screens(title):
-    """The menu a title implies, used to pre-tick the editor."""
-    return sorted(PRESET_SCREENS.get(preset_for_title(title)) or PRESET_SCREENS['sales_desk'])
+def preset_screens(title, module=None):
+    """The menu a title implies, used to pre-tick the editor. `module` limits it
+    to that designation's own module, as legacy_capabilities does."""
+    keys = set(PRESET_SCREENS.get(preset_for_title(title)) or PRESET_SCREENS['sales_desk'])
+    if module:
+        family = modules_of(module)
+        # A module with no preset of its own starts with all of its screens —
+        # that is what its people see today.
+        keys = (keys | keys_in_modules(SCREENS, family)) & keys_in_modules(SCREENS, family) \
+            if module not in ('Sales', 'Channel Partner') else keys & keys_in_modules(SCREENS, family)
+    return sorted(keys)

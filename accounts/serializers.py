@@ -44,6 +44,14 @@ class UserSerializer(serializers.ModelSerializer):
         from .capabilities import dashboard_for
         return dashboard_for(obj)
 
+    # What their ROLE opens in each module (Copy to role, on a module's
+    # Dashboard). The designation's own pin, above, still wins.
+    role_dashboards = serializers.SerializerMethodField()
+
+    def get_role_dashboards(self, obj):
+        from .capabilities import role_dashboards
+        return role_dashboards(obj)
+
     def get_company_code(self, obj):
         return obj.company.code if obj.company else ''
 
@@ -65,7 +73,7 @@ class UserSerializer(serializers.ModelSerializer):
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver', 'can_export_bookings',
-            'capabilities', 'screens', 'dashboard',
+            'capabilities', 'screens', 'dashboard', 'role_dashboards',
         ]
 
 
@@ -78,14 +86,14 @@ class DesignationSerializer(serializers.ModelSerializer):
 
     def get_effective_capabilities(self, obj):
         from .capabilities import legacy_capabilities
-        return sorted(obj.capabilities or []) if obj.capabilities_set else sorted(legacy_capabilities(obj.name))
+        return sorted(obj.capabilities or []) if obj.capabilities_set else sorted(legacy_capabilities(obj.name, obj.module))
 
     # Which menu the editor should show ticked before anyone configures it.
     effective_screens = serializers.SerializerMethodField()
 
     def get_effective_screens(self, obj):
         from .capabilities import preset_screens
-        return sorted(obj.screens or []) if obj.screens_set else preset_screens(obj.name)
+        return sorted(obj.screens or []) if obj.screens_set else preset_screens(obj.name, obj.module)
 
     class Meta:
         model  = Designation

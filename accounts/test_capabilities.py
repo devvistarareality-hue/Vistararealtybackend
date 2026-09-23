@@ -143,7 +143,25 @@ class CapabilityApiTests(TestCase):
     def test_me_reports_what_the_person_may_do(self):
         self.api.force_authenticate(self.emp)
         d = self.api.get('/api/auth/me/').json()
-        self.assertEqual(d['capabilities'], ['sales.pipeline.telecalling'])
+        # Their Sales designation decides Sales…
+        sales = [c for c in d['capabilities'] if c.startswith('sales.')]
+        self.assertEqual(sales, ['sales.pipeline.telecalling'])
+        # …and says nothing about AR or Club 1000, where they keep what anyone
+        # with that module always had (module access is still the gate).
+        self.assertIn('ar.receipt.record', d['capabilities'])
+        self.assertIn('club.investor.manage', d['capabilities'])
+
+    def test_a_sales_designation_is_not_pre_ticked_with_ar(self):
+        """The editor opens a Sales designation on Sales, not on every module's
+        actions — ticking AR on a Sales title was never what the old code did."""
+        from accounts.capabilities import legacy_capabilities, preset_screens
+        caps = legacy_capabilities('CMO', 'Sales')
+        self.assertTrue(all(c.startswith('sales.') for c in caps), caps)
+        screens = preset_screens('CMO', 'Sales')
+        self.assertTrue(all(s.startswith(('sales.', 'cp.')) for s in screens), screens)
+        # An AR designation is pre-ticked with AR, and only AR.
+        ar = legacy_capabilities('AR Officer', 'AR')
+        self.assertTrue(all(c.startswith('ar.') for c in ar), ar)
 
 
 class ModuleActionTests(TestCase):

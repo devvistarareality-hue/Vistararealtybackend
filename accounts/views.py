@@ -12,7 +12,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from companies.models import Company
-from .models import User, Designation, Notification, OtpCode
+from .models import User, Designation, Notification, OtpCode, RoleDashboard
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -301,6 +301,52 @@ class CapabilityCatalogueView(APIView):
             'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
                          'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
         })
+
+
+class RoleDashboardView(APIView):
+    """Which dashboard each role opens in a module, for this company.
+
+    GET  ?module=Sales           → [{role, view}, …]
+    POST {module, role, view}    → the Copy button on a module's Dashboard
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _company_id(self, request):
+        if is_platform_admin(request.user):
+            return request.query_params.get('company_id') or request.data.get('company_id') \
+                or getattr(request.user, 'company_id', None)
+        return getattr(request.user, 'company_id', None)
+
+    def get(self, request):
+        rows = RoleDashboard.objects.filter(company_id=self._company_id(request))
+        module = request.query_params.get('module')
+        if module:
+            rows = rows.filter(module=module)
+        return Response([{'module': r.module, 'role': r.role, 'view': r.view} for r in rows])
+
+    def post(self, request):
+        from .capabilities import DASHBOARD_KEYS, DASHBOARD_ROLES
+        if not (is_platform_admin(request.user) or request.user.is_staff
+                or getattr(request.user, 'role', '') == 'Admin'):
+            return Response({'detail': 'Only an administrator can set a role\'s dashboard.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        module = (request.data.get('module') or '').strip()
+        roles = request.data.get('roles') or ([request.data.get('role')] if request.data.get('role') else [])
+        view = (request.data.get('view') or '').strip()
+        if not module:
+            return Response({'module': 'Which module?'}, status=status.HTTP_400_BAD_REQUEST)
+        if view not in DASHBOARD_KEYS or not view:
+            return Response({'view': 'Unknown dashboard.'}, status=status.HTTP_400_BAD_REQUEST)
+        bad = [r for r in roles if r not in DASHBOARD_ROLES]
+        if bad or not roles:
+            return Response({'roles': f'Pick from: {", ".join(DASHBOARD_ROLES)}.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        company_id = self._company_id(request)
+        for role in roles:
+            RoleDashboard.objects.update_or_create(
+                company_id=company_id, module=module, role=role, defaults={'view': view})
+        return Response([{'module': module, 'role': r, 'view': view} for r in roles],
+                        status=status.HTTP_200_OK)
 
 
 class DesignationListCreateView(APIView):

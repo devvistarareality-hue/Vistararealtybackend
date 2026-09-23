@@ -212,3 +212,60 @@ class DashboardFollowsTheTreeTests(TestCase):
 
     def test_a_manager_sees_the_tree_below_them(self):
         self.assertEqual(self._my_total(self.boss), 3)
+
+
+class RoleDashboardTests(TestCase):
+    """The Copy button on a module's Dashboard: give this dashboard to another
+    role. It decides which view opens, never what the figures count."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='RDSH', name='Dash Co')
+        self.admin = User.objects.create_user('a@x.com', company=self.co, user_code='D1', password='x',
+                                              name='Admin', role='Admin')
+        self.emp = User.objects.create_user('e@x.com', company=self.co, user_code='D2', password='x',
+                                            name='Emp', role='Employee', modules=['Sales'])
+        self.api = APIClient()
+
+    def test_an_admin_copies_a_dashboard_to_other_roles(self):
+        self.api.force_authenticate(self.admin)
+        r = self.api.post('/api/auth/role-dashboards/',
+                          {'module': 'Sales', 'view': 'manager',
+                           'roles': ['Manager', 'General Manager']}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        rows = self.api.get('/api/auth/role-dashboards/?module=Sales').json()
+        self.assertEqual({x['role']: x['view'] for x in rows},
+                         {'Manager': 'manager', 'General Manager': 'manager'})
+
+    def test_copying_again_replaces_it(self):
+        self.api.force_authenticate(self.admin)
+        for view in ('manager', 'director'):
+            self.api.post('/api/auth/role-dashboards/',
+                          {'module': 'Sales', 'view': view, 'roles': ['Manager']}, format='json')
+        rows = self.api.get('/api/auth/role-dashboards/?module=Sales').json()
+        self.assertEqual(rows, [{'module': 'Sales', 'role': 'Manager', 'view': 'director'}])
+
+    def test_only_an_admin_may_set_it(self):
+        self.api.force_authenticate(self.emp)
+        r = self.api.post('/api/auth/role-dashboards/',
+                          {'module': 'Sales', 'view': 'manager', 'roles': ['Manager']}, format='json')
+        self.assertEqual(r.status_code, 403)
+
+    def test_unknown_dashboard_or_role_is_refused(self):
+        self.api.force_authenticate(self.admin)
+        self.assertEqual(self.api.post('/api/auth/role-dashboards/',
+                                       {'module': 'Sales', 'view': 'nope', 'roles': ['Manager']},
+                                       format='json').status_code, 400)
+        self.assertEqual(self.api.post('/api/auth/role-dashboards/',
+                                       {'module': 'Sales', 'view': 'manager', 'roles': ['Wizard']},
+                                       format='json').status_code, 400)
+
+    def test_another_company_never_sees_it(self):
+        self.api.force_authenticate(self.admin)
+        self.api.post('/api/auth/role-dashboards/',
+                      {'module': 'Sales', 'view': 'manager', 'roles': ['Manager']}, format='json')
+        other = Company.objects.create(code='OTH2', name='Other')
+        outsider = User.objects.create_user('o@x.com', company=other, user_code='O9', password='x',
+                                            name='Other Admin', role='Admin')
+        api2 = APIClient()
+        api2.force_authenticate(outsider)
+        self.assertEqual(api2.get('/api/auth/role-dashboards/?module=Sales').json(), [])

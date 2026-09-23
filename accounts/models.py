@@ -117,6 +117,26 @@ class OtpCode(models.Model):
         ordering = ['-created_at']
 
 
+class RoleDashboard(models.Model):
+    """Which dashboard a role opens in a module, per company.
+
+    Written by the Copy button on a module's Dashboard — "give this dashboard to
+    the General Manager too". It decides which view opens; the figures on it are
+    still the signed-in person's own, scoped by role and the reporting tree.
+    """
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='role_dashboards')
+    module  = models.CharField(max_length=100)
+    role    = models.CharField(max_length=40)
+    view    = models.CharField(max_length=40)
+
+    class Meta:
+        unique_together = ('company', 'module', 'role')
+        ordering = ['module', 'role']
+
+    def __str__(self):
+        return f'{self.module} · {self.role} → {self.view}'
+
+
 class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)
