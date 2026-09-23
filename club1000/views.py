@@ -39,6 +39,27 @@ def _no_access():
     return Response({'detail': 'You do not have access to Club 1000.'}, status=status.HTTP_403_FORBIDDEN)
 
 
+def scope_investors(qs, user, prefix=''):
+    """Whose investors this person sees, honouring the designation's record scope.
+
+    Club 1000 has always split on manager-or-not: a manager sees the desk, an
+    executive sees what they added. A company that sets the scope on the
+    designation gets that instead — own, their team's, or the whole company —
+    and leaving it unset keeps the old split exactly.
+    """
+    from accounts.capabilities import (SCOPE_COMPANY, SCOPE_OWN, SCOPE_TEAM, data_scope)
+    field = f'{prefix}added_by'
+    scope = data_scope(user)
+    if scope == SCOPE_COMPANY:
+        return qs
+    if scope == SCOPE_OWN:
+        return qs.filter(**{field: user})
+    if scope == SCOPE_TEAM:
+        from sales.views import _visible_user_ids
+        return qs.filter(**{f'{field}__in': _visible_user_ids(user)})
+    return None            # nothing configured: the caller keeps its old rule
+
+
 def club_can(user, key):
     """Inside Club 1000, what this person may do — their company's designation
     settings decide (accounts/capabilities.py). The manager gate still applies:
@@ -60,7 +81,10 @@ class StatsView(APIView):
 
         investors = _company_filtered(Investor.objects.select_related('scheme'), request)
         manager = is_club1000_manager(request.user)
-        if not manager:
+        _scoped = scope_investors(investors, request.user)
+        if _scoped is not None:
+            investors = _scoped
+        elif not manager:
             investors = investors.filter(added_by=request.user)
 
         date_from = request.query_params.get('date_from')
@@ -298,7 +322,10 @@ class InvestorListCreateView(APIView):
         if not has_club1000_access(request.user):
             return _no_access()
         qs = _company_filtered(Investor.objects.select_related('scheme', 'added_by'), request)
-        if not is_club1000_manager(request.user):
+        scoped = scope_investors(qs, request.user)
+        if scoped is not None:
+            qs = scoped
+        elif not is_club1000_manager(request.user):
             approver_scheme_ids = _scheme_approver_ids(request.user, request.user.company)
             if approver_scheme_ids:
                 qs = qs.filter(Q(added_by=request.user) | Q(scheme_id__in=approver_scheme_ids))
@@ -593,7 +620,10 @@ class PayoutListView(APIView):
         if not has_club1000_access(request.user):
             return _no_access()
         qs = _company_filtered(Payout.objects.select_related('investor', 'investor__scheme'), request, field='investor__company')
-        if not is_club1000_manager(request.user):
+        _scoped = scope_investors(qs, request.user, 'investor__')
+        if _scoped is not None:
+            qs = _scoped
+        elif not is_club1000_manager(request.user):
             qs = qs.filter(investor__added_by=request.user)
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])

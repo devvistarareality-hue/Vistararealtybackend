@@ -203,3 +203,88 @@ class EveryScopeTests(TestCase):
             # Active projects is the company's list either way — never a count of
             # the person's own records.
             self.assertEqual(projects, 2, f'scope {scope!r} changed the project count')
+
+
+class EveryModuleScopeTests(TestCase):
+    """The record scope, module by module. Each module's own list has to answer
+    to the same setting — or, where the module's records are the company's book
+    by design, to say so plainly here."""
+
+    def setUp(self):
+        from datetime import date
+        from club1000.models import Investor, Scheme
+        from sales.models import Booking, Closure, Lead, LeadSource, Plot, Project, SiteVisit
+        cache.clear()
+        self.co = Company.objects.create(code='MOD', name='Module Co')
+        self.proj = Project.objects.create(company=self.co, name='Tundav')
+        src = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        self.head = User.objects.create_user('h@mod.com', company=self.co, user_code='M-H',
+                                             password='x', name='Head', role='Manager',
+                                             modules=['Sales', 'AR', 'Club 1000'],
+                                             manager_modules=['Club 1000'],
+                                             designation='Desk Head')
+        self.mate = User.objects.create_user('m@mod.com', company=self.co, user_code='M-M',
+                                             password='x', name='Mate', role='Employee',
+                                             modules=['Sales', 'AR', 'Club 1000'],
+                                             designation='Desk Head', reporting_manager=self.head)
+        self.desig = Designation.objects.create(company=self.co, name='Desk Head', module='Sales')
+        self.club_desig = Designation.objects.create(company=self.co, name='Club Head',
+                                                     module='Club 1000')
+        # Sales / Channel Partner: a lead, a visit and a closure each.
+        for owner in (self.head, self.mate):
+            lead = Lead.objects.create(company=self.co, project=self.proj, source=src,
+                                       name=f'{owner.name} lead', phone='9000000005', stm=owner)
+            SiteVisit.objects.create(lead=lead, stm=owner, status='completed',
+                                     visited_at=timezone.now())
+            Closure.objects.create(company=self.co, lead=lead, project=self.proj, stm=owner,
+                                   closure_date=date.today(), status='approved')
+        # Club 1000: an investor each.
+        scheme = Scheme.objects.create(company=self.co, name='Plan A', tenure_months=12,
+                                       min_ticket_size=100000)
+        for owner in (self.head, self.mate):
+            Investor.objects.create(company=self.co, scheme=scheme, added_by=owner,
+                                    name=f'{owner.name} investor', phone='9000000006',
+                                    amount_invested=100000, investment_date=date.today(),
+                                    maturity_date=date.today(), status='active')
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.head.pk))
+        return api
+
+    def _set(self, desig, scope):
+        desig.data_scope = scope
+        desig.save(update_fields=['data_scope'])
+        bump_permissions_version(self.co.id)
+
+    def test_sales_and_cp_narrow_with_the_scope(self):
+        api = self._api()
+        d = api.get('/api/sales/stats/').json()
+        self.assertEqual((d['total_leads'], d['sv_done'], d['closures']), (2, 2, 2))
+        self._set(self.desig, 'own')
+        d = self._api().get('/api/sales/stats/').json()
+        self.assertEqual((d['total_leads'], d['sv_done'], d['closures']), (1, 1, 1))
+        # The Channel Partner cut of the same dashboard narrows too.
+        d = self._api().get('/api/sales/stats/?cp_only=true').json()
+        self.assertEqual((d['total_leads'], d['sv_done'], d['closures']), (1, 1, 1))
+
+    def test_club_1000_narrows_with_the_scope(self):
+        # The old rule: a Club manager sees the desk.
+        self.assertEqual(len(self._api().get('/api/club1000/investors/').json()), 2)
+        self.club_desig.data_scope = 'own'
+        self.club_desig.save(update_fields=['data_scope'])
+        # …the scope is read from the person's OWN designation, which is Sales here,
+        # so setting it on the Club designation changes nothing for them.
+        self.assertEqual(len(self._api().get('/api/club1000/investors/').json()), 2)
+        self._set(self.desig, 'own')
+        self.assertEqual(len(self._api().get('/api/club1000/investors/').json()), 1)
+        self._set(self.desig, 'team')
+        self.assertEqual(len(self._api().get('/api/club1000/investors/').json()), 2)
+
+    def test_ar_is_the_company_book_whatever_the_scope(self):
+        """AR accounts are not owned by anyone — the receivables book is the
+        company's. The scope leaves it alone, by design."""
+        before = self._api().get('/api/ar/accounts/').json()['results']
+        self._set(self.desig, 'own')
+        after = self._api().get('/api/ar/accounts/').json()['results']
+        self.assertEqual(len(before), len(after))
