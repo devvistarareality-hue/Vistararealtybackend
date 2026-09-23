@@ -264,6 +264,38 @@ class ScreenAndDashboardTests(TestCase):
         self.assertEqual(me['screens'], ['sales.screen.dashboard', 'sales.screen.followups', 'sales.screen.leads'])
         self.assertEqual(me['dashboard'], 'telecaller')
 
+    def test_unticking_every_screen_hides_the_lot(self):
+        """An admin who clears the menu means it: an empty list is a configured
+        empty menu, not "nothing configured" (which would show everything)."""
+        self.api.force_authenticate(self.admin)
+        r = self.api.patch(f'/api/auth/designations/{self.desig.id}/',
+                           {'screens': []}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertTrue(r.json()['screens_set'])
+        from accounts.capabilities import can_see_screen, screens_for
+        fresh = User.objects.get(pk=self.tc.pk)
+        self.assertEqual(screens_for(fresh), set())
+        self.assertFalse(can_see_screen(fresh, 'sales.screen.leads'))
+        self.assertFalse(can_see_screen(fresh, 'cp.screen.dashboard'))
+        self.api.force_authenticate(fresh)
+        self.assertEqual(self.api.get('/api/auth/me/').json()['screens'], [])
+
+    def test_the_channel_partner_menu_has_its_own_keys(self):
+        """A CP Cluster Head's whole sidebar is the Channel Partner module, so
+        each of its items is switchable on its own."""
+        from accounts.capabilities import SCREEN_KEYS, preset_screens
+        for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
+                    'cp.screen.followups', 'cp.screen.closures', 'cp.screen.booking',
+                    'cp.screen.myteam', 'cp.screen.approvals'):
+            self.assertIn(key, SCREEN_KEYS)
+        # A CP title's preset ticks them, so setting one up changes nothing at first.
+        head = preset_screens('CP Cluster Head')
+        self.assertIn('cp.screen.leads', head)
+        self.assertIn('cp.screen.myteam', head)
+        exec_ = preset_screens('CP Executive')
+        self.assertIn('cp.screen.booking', exec_)
+        self.assertNotIn('cp.screen.myteam', exec_)   # no reports to show
+
     def test_bad_values_are_refused(self):
         self.api.force_authenticate(self.admin)
         self.assertEqual(self.api.patch(f'/api/auth/designations/{self.desig.id}/',
