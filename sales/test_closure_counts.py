@@ -6,6 +6,8 @@ Conversions read 512, and Approvals listed 418 approved bookings. Each counted a
 different population — the list kept cancelled closures and partner-sourced ones,
 and every closure figure counted a revised deal twice, because revising a booking
 issues the revision its own closure and leaves the replaced one on the books.
+A closure counts once its booking is approved — the same deals Approvals lists,
+which is what makes the three figures one figure.
 
 Site visits had the narrower half of the same fault: the Sales list kept the
 partner-sourced visits the dashboard left out, so it read 1,623 completed
@@ -174,3 +176,42 @@ class ARevisedDealFollowsItsCurrentSource(TestCase):
         api = self._api()
         self.assertEqual(api.get('/api/sales/stats/').json()['closures'], 1)
         self.assertEqual(api.get('/api/sales/stats/?cp_only=true').json()['closures'], 0)
+
+
+class AClosureCountsOnceItsBookingIsApproved(TestCase):
+    """A deal the sales team has recorded but nobody has signed off is not a sale
+    anyone can count yet, so the closure figures wait for the booking."""
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='PND', name='Pending Co')
+        self.p = Project.objects.create(company=self.co, name='Tundav')
+        self.admin = User.objects.create_user('a@pnd.com', company=self.co, user_code='PN-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales'])
+        self.stm = User.objects.create_user('s@pnd.com', company=self.co, user_code='PN-S',
+                                            password='x', name='Seller', role='Employee',
+                                            modules=['Sales'])
+        for i, status in enumerate(('sold', 'pending')):
+            lead = Lead.objects.create(company=self.co, project=self.p, name=f'B{i}',
+                                       phone=f'933330000{i}', stm=self.stm)
+            closure = Closure.objects.create(company=self.co, project=self.p, lead=lead,
+                                             stm=self.stm, closure_date=date(2026, 8, 1))
+            Booking.objects.create(company=self.co, project=self.p, lead=lead, stm=self.stm,
+                                   client_name=f'B{i}', phone=lead.phone, plot_numbers=f'F-{i}',
+                                   closure=closure, status=status, booking_date=date(2026, 8, 1),
+                                   approval_status='APPROVED' if status == 'sold' else 'PENDING')
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.admin.pk))
+        return api
+
+    def test_only_the_approved_deal_counts(self):
+        cache.clear()
+        api = self._api()
+        approved = api.get('/api/sales/bookings/?status=sold&source=sales').json()
+        self.assertEqual(len(approved), 1, 'Approvals')
+        self.assertEqual(api.get('/api/sales/stats/').json()['closures'], 1, 'the tile')
+        self.assertEqual(api.get('/api/sales/closures/?counts_only=true').json()['total'], 1,
+                         'My Conversions')
