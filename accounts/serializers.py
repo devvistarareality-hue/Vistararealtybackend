@@ -30,6 +30,20 @@ class UserSerializer(serializers.ModelSerializer):
         from .capabilities import capabilities_for
         return sorted(capabilities_for(obj))
 
+    # The menu this person sees (null keeps the old role-based menu) and which
+    # dashboard opens for them.
+    screens = serializers.SerializerMethodField()
+    dashboard = serializers.SerializerMethodField()
+
+    def get_screens(self, obj):
+        from .capabilities import screens_for
+        allowed = screens_for(obj)
+        return None if allowed is None else sorted(allowed)
+
+    def get_dashboard(self, obj):
+        from .capabilities import dashboard_for
+        return dashboard_for(obj)
+
     def get_company_code(self, obj):
         return obj.company.code if obj.company else ''
 
@@ -51,7 +65,7 @@ class UserSerializer(serializers.ModelSerializer):
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver', 'can_export_bookings',
-            'capabilities',
+            'capabilities', 'screens', 'dashboard',
         ]
 
 
@@ -66,10 +80,18 @@ class DesignationSerializer(serializers.ModelSerializer):
         from .capabilities import legacy_capabilities
         return sorted(obj.capabilities or []) if obj.capabilities_set else sorted(legacy_capabilities(obj.name))
 
+    # Which menu the editor should show ticked before anyone configures it.
+    effective_screens = serializers.SerializerMethodField()
+
+    def get_effective_screens(self, obj):
+        from .capabilities import preset_screens
+        return sorted(obj.screens or []) if obj.screens_set else preset_screens(obj.name)
+
     class Meta:
         model  = Designation
         fields = ['id', 'name', 'module', 'company_code', 'company_name',
-                  'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope']
+                  'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope',
+                  'screens', 'screens_set', 'effective_screens', 'dashboard']
 
 
 class UserListSerializer(serializers.ModelSerializer):

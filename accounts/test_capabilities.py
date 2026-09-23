@@ -223,3 +223,60 @@ class DataScopeTests(TestCase):
         self.desig.data_scope = 'company'
         self.desig.save(update_fields=['data_scope'])
         self.assertEqual(self._names(self.boss), ['Mine', 'Other', 'Theirs'])
+
+
+class ScreenAndDashboardTests(TestCase):
+    """The menu and the dashboard are settings, and default to today's behaviour."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.co = Company.objects.create(code='SCR', name='Scr Co')
+        self.admin = User.objects.create_user('sadm@x.com', company=self.co, user_code='S1', password='x',
+                                              name='Admin', role='Admin')
+        self.tc = User.objects.create_user('stc@x.com', company=self.co, user_code='S2', password='x',
+                                           name='Tele', role='Employee', designation='Telecaller')
+        self.desig = Designation.objects.create(company=self.co, name='Telecaller', module='Sales')
+        self.api = APIClient()
+
+    def test_unset_keeps_the_old_menu_and_dashboard(self):
+        from accounts.capabilities import can_see_screen, dashboard_for, screens_for
+        self.assertIsNone(screens_for(self.tc))
+        self.assertTrue(can_see_screen(self.tc, 'sales.screen.approvals'))   # role rules still decide
+        self.assertEqual(dashboard_for(self.tc), '')
+        self.api.force_authenticate(self.tc)
+        me = self.api.get('/api/auth/me/').json()
+        self.assertIsNone(me['screens'])
+        self.assertEqual(me['dashboard'], '')
+
+    def test_an_admin_sets_the_menu_and_the_dashboard(self):
+        self.api.force_authenticate(self.admin)
+        r = self.api.patch(f'/api/auth/designations/{self.desig.id}/', {
+            'screens': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups'],
+            'dashboard': 'telecaller'}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        from accounts.capabilities import can_see_screen, dashboard_for
+        fresh = User.objects.get(pk=self.tc.pk)
+        self.assertTrue(can_see_screen(fresh, 'sales.screen.leads'))
+        self.assertFalse(can_see_screen(fresh, 'sales.screen.approvals'))
+        self.assertEqual(dashboard_for(fresh), 'telecaller')
+        self.api.force_authenticate(fresh)
+        me = self.api.get('/api/auth/me/').json()
+        self.assertEqual(me['screens'], ['sales.screen.dashboard', 'sales.screen.followups', 'sales.screen.leads'])
+        self.assertEqual(me['dashboard'], 'telecaller')
+
+    def test_bad_values_are_refused(self):
+        self.api.force_authenticate(self.admin)
+        self.assertEqual(self.api.patch(f'/api/auth/designations/{self.desig.id}/',
+                                        {'screens': ['sales.screen.nope']}, format='json').status_code, 400)
+        self.assertEqual(self.api.patch(f'/api/auth/designations/{self.desig.id}/',
+                                        {'dashboard': 'wizard'}, format='json').status_code, 400)
+
+    def test_the_editor_is_pre_ticked_with_the_usual_menu(self):
+        self.api.force_authenticate(self.admin)
+        rows = self.api.get('/api/auth/designations/').json()
+        row = [d for d in rows if d['name'] == 'Telecaller'][0]
+        self.assertIn('sales.screen.leads', row['effective_screens'])
+        self.assertNotIn('sales.screen.approvals', row['effective_screens'])
+        cat = self.api.get('/api/auth/designations/capabilities/').json()
+        self.assertTrue(any(s['key'] == 'ar.screen.collections' for s in cat['screens']))
+        self.assertTrue(any(d['value'] == 'director' for d in cat['dashboards']))

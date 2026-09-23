@@ -289,11 +289,15 @@ class CapabilityCatalogueView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from .capabilities import CAPABILITIES, DATA_SCOPES, PRESETS, PRESET_LABELS
+        from .capabilities import (CAPABILITIES, DASHBOARDS, DATA_SCOPES, PRESETS, PRESET_LABELS,
+                                   PRESET_SCREENS, SCREENS)
         return Response({
             'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
+            'screens': [{'key': k, 'label': l, 'module': m} for k, l, m in SCREENS],
             'scopes': [{'value': v, 'label': l} for v, l in DATA_SCOPES],
-            'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v} for k, v in PRESETS.items()],
+            'dashboards': [{'value': v, 'label': l} for v, l in DASHBOARDS],
+            'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
+                         'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
         })
 
 
@@ -333,7 +337,7 @@ class DesignationDetailView(APIView):
     def patch(self, request, pk):
         """Set what this designation may do, and whose records it sees. Company
         admins only — this decides everyone else's access."""
-        from .capabilities import CAPABILITY_KEYS, DATA_SCOPES
+        from .capabilities import CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES, SCREEN_KEYS
         if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
             return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
         desig = self._get(request, pk)
@@ -348,12 +352,27 @@ class DesignationDetailView(APIView):
                 return Response({'capabilities': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
             desig.capabilities = sorted(set(caps))
             desig.capabilities_set = True
+        if 'screens' in request.data:
+            screens = request.data.get('screens') or []
+            if not isinstance(screens, list):
+                return Response({'screens': 'Send a list of screen keys.'}, status=status.HTTP_400_BAD_REQUEST)
+            unknown = [c for c in screens if c not in SCREEN_KEYS]
+            if unknown:
+                return Response({'screens': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.screens = sorted(set(screens))
+            desig.screens_set = True
+        if 'dashboard' in request.data:
+            dash = request.data.get('dashboard') or ''
+            if dash not in DASHBOARD_KEYS:
+                return Response({'dashboard': 'Unknown dashboard.'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.dashboard = dash
         if 'data_scope' in request.data:
             scope = request.data.get('data_scope') or ''
             if scope not in [s for s, _ in DATA_SCOPES]:
                 return Response({'data_scope': 'Unknown scope.'}, status=status.HTTP_400_BAD_REQUEST)
             desig.data_scope = scope
-        desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope'])
+        desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope',
+                                  'screens', 'screens_set', 'dashboard'])
         return Response(DesignationSerializer(desig).data)
 
     def delete(self, request, pk):

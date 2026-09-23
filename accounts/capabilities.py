@@ -45,6 +45,68 @@ CAPABILITIES = [
      'Close out a payout or a referral reward.'),
 ]
 
+# ── Screens: which menu items a designation sees ─────────────────────────────
+# Leaving a designation's screens unset keeps today's behaviour (the menu follows
+# role and pipeline). Ticking any makes the list explicit for that designation.
+SCREENS = [
+    ('sales.screen.dashboard', 'Dashboard', 'Sales'),
+    ('sales.screen.leads', 'All Leads', 'Sales'),
+    ('sales.screen.followups', 'Follow-Ups', 'Sales'),
+    ('sales.screen.sitevisits', 'Site Visits', 'Sales'),
+    ('sales.screen.booking', 'Booking', 'Sales'),
+    ('sales.screen.conversions', 'My Conversions', 'Sales'),
+    ('sales.screen.myteam', 'My Team', 'Sales'),
+    ('sales.screen.approvals', 'Approvals', 'Sales'),
+    ('sales.screen.import', 'Import Leads', 'Sales'),
+    ('sales.screen.reports', 'Reports', 'Sales'),
+    ('sales.screen.projects', 'Projects', 'Sales'),
+    ('sales.screen.leadsetup', 'Lead Setup', 'Sales'),
+    ('sales.screen.teamusers', 'Team Users', 'Sales'),
+    ('sales.screen.cp', 'Channel Partner', 'Sales'),
+    ('sales.screen.distribution', 'Distribution', 'Sales'),
+    ('sales.screen.datareset', 'Data Reset', 'Sales'),
+    ('accounts.screen.approvals', 'Approvals', 'Accounts & Finance'),
+    ('accounts.screen.bookings', 'Bookings', 'Accounts & Finance'),
+    ('ar.screen.dashboard', 'Dashboard', 'AR'),
+    ('ar.screen.collections', 'Collections', 'AR'),
+    ('ar.screen.register', 'Register', 'AR'),
+    ('ar.screen.import', 'Import receipts', 'AR'),
+    ('club.screen.dashboard', 'Dashboard', 'Club 1000'),
+    ('club.screen.leads', 'Leads', 'Club 1000'),
+    ('club.screen.investors', 'Investors', 'Club 1000'),
+    ('club.screen.schemes', 'Schemes', 'Club 1000'),
+    ('club.screen.payouts', 'Payouts', 'Club 1000'),
+    ('club.screen.approvals', 'Approvals', 'Club 1000'),
+]
+SCREEN_KEYS = [s[0] for s in SCREENS]
+
+# Which screens each preset ticks when a company first sets one up — the menu
+# those people see today.
+PRESET_SCREENS = {
+    'telecaller': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
+                   'sales.screen.conversions', 'sales.screen.import', 'sales.screen.reports'],
+    'stm': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
+            'sales.screen.sitevisits', 'sales.screen.booking', 'sales.screen.import', 'sales.screen.reports'],
+    'cp_executive': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
+                     'sales.screen.sitevisits', 'sales.screen.booking', 'sales.screen.cp',
+                     'sales.screen.import', 'sales.screen.reports'],
+    'cp_manager': ['sales.screen.dashboard', 'sales.screen.cp', 'sales.screen.leads',
+                   'sales.screen.followups', 'sales.screen.sitevisits', 'sales.screen.booking',
+                   'sales.screen.approvals', 'sales.screen.myteam', 'sales.screen.reports'],
+    'sales_desk': [k for k, _, _ in SCREENS],
+}
+
+# ── Which dashboard opens ────────────────────────────────────────────────────
+DASHBOARD_AUTO = ''
+DASHBOARDS = [
+    (DASHBOARD_AUTO, 'Decide from their permissions (default)'),
+    ('telecaller', 'Telecaller — the call queue'),
+    ('stm', 'Sales Executive — their own pipeline'),
+    ('manager', 'Manager — the whole desk'),
+    ('director', 'Director — company-wide figures'),
+]
+DASHBOARD_KEYS = [d for d, _ in DASHBOARDS]
+
 # Granted to everyone by default, because before capabilities anyone with the
 # module could already do them. Ticking stays with the company to remove.
 DEFAULT_ON = [
@@ -162,3 +224,31 @@ def data_scope(user):
     role/reporting-tree behaviour."""
     row = _designation_row(user)
     return (row.data_scope if row is not None else '') or SCOPE_LEGACY
+
+
+def _row_for(user):
+    return _designation_row(user)
+
+
+def screens_for(user):
+    """The menu this person sees, or None to keep today's role-based menu."""
+    row = _designation_row(user)
+    if row is None or not row.screens_set:
+        return None
+    return set(row.screens or [])
+
+
+def can_see_screen(user, key):
+    allowed = screens_for(user)
+    return True if allowed is None else key in allowed
+
+
+def dashboard_for(user):
+    """Which dashboard to open: '' means decide from their permissions."""
+    row = _designation_row(user)
+    return (row.dashboard if row is not None else '') or DASHBOARD_AUTO
+
+
+def preset_screens(title):
+    """The menu a title implies, used to pre-tick the editor."""
+    return sorted(PRESET_SCREENS.get(preset_for_title(title)) or PRESET_SCREENS['sales_desk'])

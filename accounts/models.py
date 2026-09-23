@@ -127,6 +127,12 @@ class Designation(models.Model):
     capabilities     = models.JSONField(default=list, blank=True)
     capabilities_set = models.BooleanField(default=False)
     data_scope       = models.CharField(max_length=20, blank=True, default='')
+    # Which menu items this designation sees. screens_set False keeps the old
+    # role-based menu, so a company that never opens the screen sees no change.
+    screens          = models.JSONField(default=list, blank=True)
+    screens_set      = models.BooleanField(default=False)
+    # Which dashboard opens; '' decides from their permissions, as before.
+    dashboard        = models.CharField(max_length=20, blank=True, default='')
 
     class Meta:
         unique_together = ('company', 'name', 'module')
