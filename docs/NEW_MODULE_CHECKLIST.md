@@ -25,6 +25,13 @@ Build the screens first. Wire the permissions once the module works.
 `vistaraweb/src/lib/moduleAccess.js` → `ALL_MODULES`, and the same list in the app, so
 "Purchase" appears in User Management and the sidebar.
 
+Nothing in the Permissions editor itself needs changing. The three tabs build
+themselves from the lists below, which the editor reads through
+`GET /api/auth/designations/capabilities/`: the Actions tab groups `CAPABILITIES`
+by module, the Menu tab groups `SCREENS` by module, and the Dashboard tab lists
+`DASHBOARDS`. Add your rows and your module appears as its own card in each tab,
+on the website and in the app.
+
 ### 1.2 Declare the actions
 
 `accounts/capabilities.py` → `CAPABILITIES`. One row per thing a person can *do*, with a
@@ -51,6 +58,14 @@ usually all of it) also goes in `DEFAULT_ON`, so existing designations keep it.
 ```
 
 Add the usual menu for each job to `PRESET_SCREENS` so the presets stay useful.
+
+**Adding screens to a module that already exists?** A designation someone has
+already configured has none of your new keys ticked, so its menu would empty out
+the day you deploy. Write a data migration that adds them to the rows that
+already imply them — `accounts/migrations/0016_seed_cp_screens.py` is the worked
+example (it gave every designation holding `sales.screen.cp` the eight new
+Channel Partner keys). A brand-new module needs no migration: nobody can have
+configured it yet, and an unset designation sees everything.
 
 ### 1.4 Declare the dashboards
 
@@ -118,7 +133,13 @@ Required for every module (see the rule in the project memory).
 ## 2. Web
 
 - **Menu:** give every nav item a `screen:` key and filter with
-  `canSee(user, item.screen)` — see `app/m/[module]/layout.js`.
+  `canSee(user, item.screen)` — see `app/m/[module]/layout.js`. Every item needs
+  its own key: one key covering a whole sub-menu means an admin who unticks it
+  changes nothing (that was the Channel Partner bug).
+- **The address, too:** hiding an item has to hide the page, or anyone who
+  remembers the URL walks back in. Match the path against the nav list and send a
+  blocked person to the first screen they can see — or show a note when there is
+  none. `app/m/[module]/layout.js` and `app/sales/layout.js` both do this.
 - **Dashboard:** pick the view from `dashboardFor(user)`, falling back to your own
   default — see `app/sales/page.js`.
 - **Buttons:** hide what the person cannot do with `can(user, 'purchase.po.approve')`
@@ -131,8 +152,14 @@ Required for every module (see the rule in the project memory).
 Mirror the web, every time (project rule):
 
 - `lib/roles.js` provides the same `can`, `canSee` and `dashboardFor`.
-- Menu tiles carry `screen:` keys and filter the same way — see `SalesCRMScreen`.
+- Menu tiles carry `screen:` keys and filter the same way — see `SalesCRMScreen`,
+  `ChannelPartnerHubScreen`, `Club1000HubScreen`, `ARDashboardScreen`.
+- Gate the same buttons with `can(user, …)` — `ARLedgerScreen` and
+  `Club1000PayoutsScreen` are the patterns.
 - Admin-only Log screen: `ActivityLog` with `modules` and `title` params.
+- The app reloads the profile from `/api/auth/me/` on launch and the web on every
+  session check, so a permissions change reaches people without signing out. Read
+  permissions from the Redux user, never from a copy you cached yourself.
 
 ---
 
@@ -156,3 +183,14 @@ Mirror the web, every time (project rule):
 - **Adding a capability that everybody already had?** Put it in `DEFAULT_ON`, or
   existing designations will lose it the moment someone saves the editor.
 - **Log text is encrypted at rest.** Never put a password, OTP or token in a summary.
+- **An empty tick list is an answer.** `screens_set` / `capabilities_set` say the
+  company has configured the designation; `screens = []` means "no menu at all",
+  not "not set up yet". Never treat an empty list as unset.
+- **Put the guard's hook above every early return.** A `useEffect` added after a
+  layout's `if (!user) return …` crashes the page with a hook-order error.
+- **The app's hub screen is its dashboard.** A `*.screen.dashboard` key can hide
+  the item on the website, but in the app that screen is where the module opens —
+  don't filter the hub out from under the person.
+- **Module access is checked first, everywhere.** `purchase_can` = has the module
+  AND holds the capability. `accounts/test_permission_matrix.py` is the test to
+  copy for a new module: every capability ticked but no module must still be refused.
