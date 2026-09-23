@@ -799,7 +799,7 @@ class StatsView(APIView):
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
-        _not_sold, _cp_cl = _closure_books(_stats_company_id(request, company_id))
+        _not_sold, _awaiting_accounts, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
             cl_qs = cl_qs.filter(_cp_cl).distinct()
@@ -813,16 +813,22 @@ class StatsView(APIView):
         owners = ('stm', 'referred_by_telecaller')
         sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'lead__project', request)
         cl_qs = scope_owned_to_role(cl_qs, request.user, owners, 'project', request)
-        # One deal, one closure, and only once its booking is approved — so the
-        # tile counts what Approvals lists rather than a superseded revision or a
-        # deal still waiting for sign-off.
+        # The deals this book has closed but Accounts has not signed off yet. Taken
+        # before the line below removes them, because that is exactly what it
+        # removes: they become closures the moment Accounts approves.
+        cl_waiting = cl_qs.filter(id__in=_awaiting_accounts)
+        # One deal, one closure, and only once its booking is approved by Sales or
+        # CP and then by Accounts — so the tile counts what Approvals lists rather
+        # than a superseded revision or a deal still waiting for sign-off.
         cl_qs = cl_qs.exclude(id__in=_not_sold)
         if date_from:
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
+            cl_waiting = cl_waiting.filter(closure_date__gte=date_from)
         if date_to:
             sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
+            cl_waiting = cl_waiting.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
         # same way it does to everything else. Scoped by assignee exactly as the
@@ -877,6 +883,7 @@ class StatsView(APIView):
             cl_scoped.count(),
             active_projects_qs.count(),
         )
+        accounts_pending = cl_waiting.filter(**cl_filter).count()
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
         sv_warm_count = sv_scoped.filter(outcome='warm').count()
@@ -926,6 +933,9 @@ class StatsView(APIView):
             'sv_cold_count': sv_cold_count,
             'sv_not_interested_count': sv_not_interested_count,
             'closures':           closures,
+            # Closed, approved by Sales or CP, waiting at the Accounts gate. These
+            # are not in `closures` yet — they join it when Accounts signs off.
+            'accounts_pending':   accounts_pending,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
             'active_projects':    active_projects,
@@ -1028,7 +1038,7 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             cl_qs = cl_qs.filter(company_id=company_id)
         # The same two books the tile above splits into, or the chart contradicts it.
-        _not_sold, _cp_cl = _closure_books(_stats_company_id(request, company_id))
+        _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
             cl_qs = cl_qs.filter(_cp_cl).distinct()
         else:
@@ -2679,7 +2689,7 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
-        _not_sold, _cp_cl = _closure_books(_stats_company_id(request, cid))
+        _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, cid))
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # The Channel Partner book — see _closure_books for what counts as one.
             qs = qs.filter(_cp_cl).distinct()
@@ -5359,21 +5369,24 @@ def _stats_company_id(request, company_id):
 
 
 def _closure_books(company_id):
-    """How a company's closures divide up, as (not_a_live_sale, is_channel_partner).
+    """How a company's closures divide up, as
+    (not_a_live_sale, awaiting_accounts, is_channel_partner).
 
-    Both answers come from one walk of the revision chains, because both are
-    really the same question — which booking of a deal is the one that stands.
+    All three come from one walk of the revision chains, because they are the
+    same question asked three ways — which booking stands for this deal, and how
+    far has it got.
 
     `not_a_live_sale` are the closures a closure figure must leave out. A deal is
-    counted once, on the booking that stands and only once that booking has been
-    approved, so this covers two things at once:
+    counted once, on the booking that stands, and only once that booking has been
+    signed off by Sales/CP *and* by Accounts:
 
       * the closure a revision stranded — revising a booking issues the revision
         its own closure and leaves the old one on the books, which is why the
         Sales dashboard read 479 where Approvals listed 418, and My Conversions
-        read 512; and
-      * the deal whose booking has not been signed off yet, which is a closure
-        the sales team has recorded but not a sale anyone can count.
+        read 512;
+      * the deal still waiting on its Sales or CP approver; and
+      * the deal approved there but not yet at the Accounts gate, which is what
+        `awaiting_accounts` counts separately so a dashboard can show it.
 
     A closure with no booking at all is nobody's revision and has no approval to
     wait for, so it is left alone — it is only cancelled ones that drop out, and
@@ -5396,11 +5409,16 @@ def _closure_books(company_id):
     is_cp = (Q(bookings__id__in=cp.values('id'))
              | (Q(bookings__isnull=True) & cp_lead_q(prefix='lead__')))
     if not company_id:
-        return set(), is_cp
+        return set(), set(), is_cp
     booked = {c for c in scope.values_list('closure_id', flat=True) if c}
-    sold = {c for c in scope.exclude(id__in=dead).filter(status='sold')
+    stands = scope.exclude(id__in=dead).filter(status='sold')
+    # accounts_status defaults to 'approved' and everything booked before the
+    # Accounts gate existed carries that, so a blank reads as approved too.
+    done = {c for c in stands.filter(Q(accounts_status='approved') | Q(accounts_status=''))
             .values_list('closure_id', flat=True) if c}
-    return booked - sold, is_cp
+    waiting = {c for c in stands.filter(accounts_status='pending')
+               .values_list('closure_id', flat=True) if c}
+    return booked - done, waiting - done, is_cp
 
 
 def _revision_groups(scope):
@@ -5514,6 +5532,20 @@ class BookingAllView(APIView):
         qs = qs.annotate(cp_sourced_ann=Case(
             When(cp_booking_q(), then=Value(True)),
             default=Value(False), output_field=BooleanField()))
+        # The module dashboard's four tiles, without shipping a thousand bookings to
+        # count them — and without the cap below quietly capping the figures too.
+        # Only a deal Sales or CP has approved reaches the Accounts gate, so these
+        # count those and nothing else: a draft carries accounts_status 'approved'
+        # by default and would otherwise read as signed off. Approved here is
+        # therefore the Sales and CP dashboards' closures added together.
+        if request.query_params.get('counts_only') == 'true':
+            sold = qs.filter(status='sold')
+            return Response({
+                'pending':  sold.filter(accounts_status='pending').count(),
+                'approved': sold.filter(Q(accounts_status='approved') | Q(accounts_status='')).count(),
+                'rejected': sold.filter(accounts_status='rejected').count(),
+                'total':    sold.count(),
+            })
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
 

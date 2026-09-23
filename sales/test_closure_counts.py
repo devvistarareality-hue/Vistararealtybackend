@@ -215,3 +215,71 @@ class AClosureCountsOnceItsBookingIsApproved(TestCase):
         self.assertEqual(api.get('/api/sales/stats/').json()['closures'], 1, 'the tile')
         self.assertEqual(api.get('/api/sales/closures/?counts_only=true').json()['total'], 1,
                          'My Conversions')
+
+
+class AccountsHasTheLastWord(TestCase):
+    """A sale is a sale when Accounts has signed it off, so that is when the
+    closure figures count it — and until then it sits on its own tile.
+
+    The three modules have to reconcile: Accounts' Approved is the Sales and
+    Channel Partner dashboards' closures added together, and its queue is their
+    "Pending from Accounts" added together.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='ACC', name='Accounts Co')
+        self.p = Project.objects.create(company=self.co, name='Tundav')
+        self.cp_src = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        self.admin = User.objects.create_user('a@acc.com', company=self.co, user_code='AC-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales', 'Channel Partner',
+                                                       'Accounts & Finance'])
+        self.stm = User.objects.create_user('s@acc.com', company=self.co, user_code='AC-S',
+                                            password='x', name='Seller', role='Employee',
+                                            modules=['Sales'])
+        self.n = 0
+        # Sales: two signed off, one still at the Accounts gate.
+        self._deal(None, 'approved'); self._deal(None, 'approved'); self._deal(None, 'pending')
+        # Channel Partner: one signed off, one waiting.
+        self._deal(self.cp_src, 'approved'); self._deal(self.cp_src, 'pending')
+
+    def _deal(self, source, accounts_status):
+        self.n += 1
+        lead = Lead.objects.create(company=self.co, project=self.p, source=source,
+                                   name=f'D{self.n}', phone=f'94444000{self.n:02d}', stm=self.stm)
+        closure = Closure.objects.create(company=self.co, project=self.p, lead=lead,
+                                         stm=self.stm, closure_date=date(2026, 8, 1))
+        Booking.objects.create(company=self.co, project=self.p, lead=lead, stm=self.stm,
+                               client_name=f'D{self.n}', phone=lead.phone,
+                               plot_numbers=f'G-{self.n}', closure=closure, status='sold',
+                               approval_status='APPROVED', accounts_status=accounts_status,
+                               booking_date=date(2026, 8, 1))
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.admin.pk))
+        return api
+
+    def test_a_deal_waiting_on_accounts_is_not_a_closure_yet(self):
+        cache.clear()
+        api = self._api()
+        sales = api.get('/api/sales/stats/').json()
+        self.assertEqual(sales['closures'], 2)
+        self.assertEqual(sales['accounts_pending'], 1)
+        self.assertEqual(api.get('/api/sales/closures/?counts_only=true').json()['total'], 2,
+                         'My Conversions counts the same deals')
+
+        cp = api.get('/api/sales/stats/?cp_only=true').json()
+        self.assertEqual(cp['closures'], 1)
+        self.assertEqual(cp['accounts_pending'], 1)
+
+    def test_accounts_reconciles_with_sales_and_channel_partner(self):
+        cache.clear()
+        api = self._api()
+        sales = api.get('/api/sales/stats/').json()
+        cp = api.get('/api/sales/stats/?cp_only=true').json()
+        acc = api.get('/api/sales/bookings/all/?counts_only=true').json()
+        self.assertEqual(acc['approved'], sales['closures'] + cp['closures'])
+        self.assertEqual(acc['pending'], sales['accounts_pending'] + cp['accounts_pending'])
+        self.assertEqual(acc['total'], 5, 'every deal Sales or CP has approved')
