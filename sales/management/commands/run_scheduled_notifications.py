@@ -65,11 +65,18 @@ class Command(BaseCommand):
             'sv_escalate': self._sv_escalations(now, cutoff, dry),
             'availability': self._availability_reminders(now, dry),
         }
+        try:
+            from receivables import reminders as ar_reminders
+            c.update(ar_reminders.run(now, opts['escalate_hours'], dry))
+        except Exception:
+            c.update({'ar_fu_reminder': 0, 'ar_fu_escalate': 0, 'ar_digest': 0, 'ar_due_soon': 0})
         tag = '[dry-run] ' if dry else ''
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
             f'site-visit: {c["sv_reminder"]} nudged / {c["sv_escalate"]} escalated · '
             f'availability: {c["availability"]} reminded'
+            f' · AR follow-ups: {c["ar_fu_reminder"]} nudged / {c["ar_fu_escalate"]} escalated'
+            f' · AR digest: {c["ar_digest"]} sent · AR due soon: {c["ar_due_soon"]}'
         ))
 
     # ── One-time backfill (suppress the existing backlog) ─────────────────
