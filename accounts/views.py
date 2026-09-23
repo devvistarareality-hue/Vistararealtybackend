@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 
 from companies.models import Company
 from .models import User, Designation, Notification, OtpCode, RoleDashboard
+from .capabilities import bump_permissions_version
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
@@ -345,6 +346,7 @@ class RoleDashboardView(APIView):
         for role in roles:
             RoleDashboard.objects.update_or_create(
                 company_id=company_id, module=module, role=role, defaults={'view': view})
+        bump_permissions_version(company_id)
         return Response([{'module': module, 'role': r, 'view': view} for r in roles],
                         status=status.HTTP_200_OK)
 
@@ -421,6 +423,8 @@ class DesignationDetailView(APIView):
             desig.data_scope = scope
         desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope',
                                   'screens', 'screens_set', 'dashboard'])
+        # Anything this company has cached was worked out under the old rules.
+        bump_permissions_version(desig.company_id)
         return Response(DesignationSerializer(desig).data)
 
     def delete(self, request, pk):

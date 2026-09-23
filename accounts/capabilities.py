@@ -347,6 +347,25 @@ def can_see_screen(user, key):
     return True if allowed is None else key in allowed
 
 
+def permissions_version(company_id):
+    """A number that changes whenever this company's permissions change.
+
+    Cached figures (the Sales dashboard) put it in their key, so an admin who
+    changes a designation sees the effect at once instead of waiting for the
+    cache to expire."""
+    from django.core.cache import cache
+    return cache.get(f'perm_ver:{company_id}', 0)
+
+
+def bump_permissions_version(company_id):
+    from django.core.cache import cache
+    key = f'perm_ver:{company_id}'
+    try:
+        cache.incr(key)
+    except ValueError:            # not set yet
+        cache.set(key, 1, timeout=None)
+
+
 def role_dashboards(user):
     """What this person's role opens in each module, as set by the Copy button on
     a module's Dashboard: {'Sales': 'manager', 'AR': 'ar_manager', …}. Their

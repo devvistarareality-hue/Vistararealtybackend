@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from accounts.capabilities import (SCOPE_COMPANY, SCOPE_OWN, SCOPE_PROJECTS, SCOPE_TEAM,
+                                   permissions_version,
                                    data_scope, user_can)
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
@@ -596,7 +597,10 @@ class StatsView(APIView):
         # the frontend's cp_only param is the normal path but not the only one
         # that can reach this view.
         cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
+        # The permissions version is in the key so a designation change takes
+        # effect at once, instead of at the end of the cache's 20 seconds.
+        _pv = permissions_version(getattr(request.user, 'company_id', None))
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}:{_pv}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
