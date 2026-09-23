@@ -27,6 +27,29 @@ CAPABILITIES = [
      'Boxed into the Channel Partner module, scoped by assigned projects.'),
     ('sales.lead.assign', 'Assign leads to others', 'Sales',
      'Hand a lead to another telecaller or STM.'),
+    # Actions inside a module the person already has. Everyone with the module could
+    # do these before, so they start ticked and a company can untick them.
+    ('ar.receipt.record', 'Record receipts', 'AR',
+     'Enter a payment against an account.'),
+    ('ar.receipt.edit', 'Edit or delete receipts', 'AR',
+     'Correct or remove a payment already entered.'),
+    ('ar.import.run', 'Import receipts from Excel', 'AR',
+     'Upload the receipts template.'),
+    ('ar.followup.manage', 'Schedule and close collection follow-ups', 'AR',
+     'Book a follow-up, assign it, and record what the customer said.'),
+    ('ar.legal_date.set', 'Set the Legal & Other due date', 'AR',
+     'Decides when interest starts on that line.'),
+    ('club.investor.manage', 'Add and edit investors', 'Club 1000',
+     'Create an investor, revise, renew or redeem.'),
+    ('club.payout.mark_paid', 'Mark payouts and rewards paid', 'Club 1000',
+     'Close out a payout or a referral reward.'),
+]
+
+# Granted to everyone by default, because before capabilities anyone with the
+# module could already do them. Ticking stays with the company to remove.
+DEFAULT_ON = [
+    'ar.receipt.record', 'ar.receipt.edit', 'ar.import.run', 'ar.followup.manage',
+    'ar.legal_date.set', 'club.investor.manage', 'club.payout.mark_paid',
 ]
 CAPABILITY_KEYS = [c[0] for c in CAPABILITIES]
 
@@ -83,7 +106,7 @@ def preset_for_title(title):
 
 def legacy_capabilities(title):
     """What the old code would have granted this designation title."""
-    caps = set(PRESETS.get(preset_for_title(title)) or [])
+    caps = set(PRESETS.get(preset_for_title(title)) or []) | set(DEFAULT_ON)
     t = (title or '').strip().lower()
     # Telecallers, STMs and CP Executives could never (re)assign leads; everyone
     # else could — including a CP-title manager.

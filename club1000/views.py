@@ -39,6 +39,14 @@ def _no_access():
     return Response({'detail': 'You do not have access to Club 1000.'}, status=status.HTTP_403_FORBIDDEN)
 
 
+def club_can(user, key):
+    """Inside Club 1000, what this person may do — their company's designation
+    settings decide (accounts/capabilities.py). The manager gate still applies:
+    capabilities refine it, they don't replace it."""
+    from accounts.capabilities import user_can
+    return is_club1000_manager(user) and user_can(user, key)
+
+
 def _no_permission():
     return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -519,7 +527,7 @@ class InvestorRedeemView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if not is_club1000_manager(request.user):
+        if not club_can(request.user, 'club.investor.manage'):
             return _no_permission()
         investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
         if not investor:
@@ -596,7 +604,7 @@ class PayoutMarkPaidView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if not is_club1000_manager(request.user):
+        if not club_can(request.user, 'club.payout.mark_paid'):
             return _no_permission()
         payout = _company_filtered(
             Payout.objects.select_related('investor'), request, field='investor__company'
@@ -648,7 +656,7 @@ class ReferralRewardMarkPaidView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
-        if not is_club1000_manager(request.user):
+        if not club_can(request.user, 'club.payout.mark_paid'):
             return _no_permission()
         reward = _company_filtered(
             ReferralReward.objects.select_related('investor'), request, field='investor__company'

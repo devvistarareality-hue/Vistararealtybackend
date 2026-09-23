@@ -144,3 +144,82 @@ class CapabilityApiTests(TestCase):
         self.api.force_authenticate(self.emp)
         d = self.api.get('/api/auth/me/').json()
         self.assertEqual(d['capabilities'], ['sales.pipeline.telecalling'])
+
+
+class ModuleActionTests(TestCase):
+    """AR and Club 1000 actions can be taken away from a designation."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        from datetime import date
+        from sales.models import Project
+        from receivables.models import ARAccount
+        from receivables.test_api import make_booking
+        self.co = Company.objects.create(code='MOD', name='Mod Co')
+        self.proj = Project.objects.create(company=self.co, name='Kalrav 2')
+        self.user = User.objects.create_user('ar@x.com', company=self.co, user_code='M1', password='x',
+                                             name='AR Person', role='Employee', modules=['AR'],
+                                             designation='AR Officer')
+        Designation.objects.create(company=self.co, name='AR Officer', module='AR',
+                                   capabilities=sorted(legacy_capabilities('AR Officer')), capabilities_set=True)
+        make_booking(self.co, self.proj)
+        self.api = APIClient()
+        self.api.force_authenticate(self.user)
+        self.acct_id = self.api.get('/api/ar/accounts/').json()['results'][0]['id']
+        self.today = date.today().isoformat()
+
+    def _record(self):
+        return self.api.post(f'/api/ar/accounts/{self.acct_id}/receipts/',
+                             {'paid_on': self.today, 'amount': 1000, 'mode': 'bank'}, format='json')
+
+    def test_recording_receipts_works_by_default(self):
+        self.assertEqual(self._record().status_code, 201)
+
+    def test_a_company_can_take_receipt_entry_away(self):
+        d = Designation.objects.get(company=self.co, name='AR Officer')
+        d.capabilities = [c for c in d.capabilities if c != 'ar.receipt.record']
+        d.save(update_fields=['capabilities'])
+        r = self._record()
+        self.assertEqual(r.status_code, 403)
+        # They can still read the register — only the action was removed.
+        self.assertEqual(self.api.get('/api/ar/accounts/').status_code, 200)
+
+
+class DataScopeTests(TestCase):
+    """The scope on a designation decides whose leads a person sees."""
+
+    def setUp(self):
+        from sales.models import Lead
+        from sales.views import scope_leads_to_role
+        self.scope_leads_to_role = scope_leads_to_role
+        self.co = Company.objects.create(code='SCO', name='Scope Co')
+        self.boss = User.objects.create_user('b@x.com', company=self.co, user_code='S0', password='x',
+                                             name='Boss', role='Employee', designation='Team Lead')
+        self.rep = User.objects.create_user('r@x.com', company=self.co, user_code='S1', password='x',
+                                            name='Rep', role='Employee', designation='Team Lead',
+                                            reporting_manager=self.boss)
+        self.mine = Lead.objects.create(company=self.co, name='Mine', phone='9000000401', stm=self.boss)
+        self.theirs = Lead.objects.create(company=self.co, name='Theirs', phone='9000000402', stm=self.rep)
+        self.other = Lead.objects.create(company=self.co, name='Other', phone='9000000403')
+        self.desig = Designation.objects.create(company=self.co, name='Team Lead', module='Sales',
+                                                capabilities=sorted(legacy_capabilities('Team Lead')),
+                                                capabilities_set=True)
+
+    def _names(self, user):
+        from sales.models import Lead
+        return sorted(self.scope_leads_to_role(Lead.objects.filter(company=self.co), user).values_list('name', flat=True))
+
+    def test_own_only(self):
+        self.desig.data_scope = 'own'
+        self.desig.save(update_fields=['data_scope'])
+        self.assertEqual(self._names(self.boss), ['Mine'])
+
+    def test_team(self):
+        self.desig.data_scope = 'team'
+        self.desig.save(update_fields=['data_scope'])
+        self.assertEqual(self._names(self.boss), ['Mine', 'Theirs'])
+
+    def test_company(self):
+        self.desig.data_scope = 'company'
+        self.desig.save(update_fields=['data_scope'])
+        self.assertEqual(self._names(self.boss), ['Mine', 'Other', 'Theirs'])

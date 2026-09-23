@@ -15,3 +15,11 @@ def has_ar_access(user):
         or AR_MODULE in (user.manager_modules or [])
         or AR_MODULE in (user.admin_modules or [])
     )
+
+
+def ar_can(user, key):
+    """Inside AR, what this person may do — their company's designation settings
+    decide (accounts/capabilities.py). Module access is still the gate: without the
+    AR module, nothing here applies."""
+    from accounts.capabilities import user_can
+    return has_ar_access(user) and user_can(user, key)
