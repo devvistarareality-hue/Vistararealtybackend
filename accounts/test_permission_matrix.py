@@ -178,7 +178,11 @@ class DashboardFollowsTheTreeTests(TestCase):
     count: the figures stay scoped by role and the reporting tree."""
 
     def setUp(self):
+        from django.core.cache import cache
         from sales.models import Lead, LeadSource, Project
+        # Each test rolls back, so user ids repeat while the local cache does not
+        # reset — clear it or one test's figures answer another's request.
+        cache.clear()
         self.co = Company.objects.create(code='TREE', name='Tree Co')
         self.proj = Project.objects.create(company=self.co, name='Tundav')
         self.src = LeadSource.objects.create(company=self.co, name='Meta')
@@ -269,3 +273,53 @@ class RoleDashboardTests(TestCase):
         api2 = APIClient()
         api2.force_authenticate(outsider)
         self.assertEqual(api2.get('/api/auth/role-dashboards/?module=Sales').json(), [])
+
+
+class CachedFiguresFollowPermissionsTests(TestCase):
+    """Changing a designation has to change the numbers at once — not when a
+    cache happens to expire."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        from sales.models import Lead, LeadSource, Project
+        cache.clear()
+        self.co = Company.objects.create(code='CACH', name='Cache Co')
+        proj = Project.objects.create(company=self.co, name='Tundav')
+        src = LeadSource.objects.create(company=self.co, name='Meta')
+        self.desig = _designation(self.co, 'Telecaller', 'Sales')
+        self.boss = User.objects.create_user('b@x.com', company=self.co, user_code='C0', password='x',
+                                             name='Boss', role='Manager', modules=['Sales'],
+                                             designation='Sales Head')
+        self.tc = User.objects.create_user('t@x.com', company=self.co, user_code='C1', password='x',
+                                           name='Tele', role='Employee', modules=['Sales'],
+                                           designation='Telecaller', reporting_manager=self.boss)
+        other = User.objects.create_user('o@x.com', company=self.co, user_code='C2', password='x',
+                                         name='Other', role='Employee', modules=['Sales'],
+                                         designation='Telecaller', reporting_manager=self.boss)
+        for owner in (self.tc, other):
+            Lead.objects.create(company=self.co, project=proj, source=src,
+                                name=owner.name, phone='9000000002', telecaller=owner)
+
+    def _total(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.tc.pk))
+        return api.get('/api/sales/stats/').json()['total_leads']
+
+    def test_widening_the_scope_shows_at_once(self):
+        self.assertEqual(self._total(), 1)          # warms the cache
+        self.desig.data_scope = 'company'
+        self.desig.save(update_fields=['data_scope'])
+        from accounts.capabilities import bump_permissions_version
+        bump_permissions_version(self.co.id)        # what the API does on save
+        self.assertEqual(self._total(), 2)
+
+    def test_the_api_bumps_it_for_us(self):
+        api = APIClient()
+        admin = User.objects.create_user('ad@x.com', company=self.co, user_code='C3', password='x',
+                                         name='Admin', role='Admin')
+        api.force_authenticate(admin)
+        self.assertEqual(self._total(), 1)
+        r = api.patch(f'/api/auth/designations/{self.desig.id}/',
+                      {'data_scope': 'company'}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(self._total(), 2)
