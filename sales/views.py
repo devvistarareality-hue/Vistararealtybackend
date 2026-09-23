@@ -20,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 logger = logging.getLogger(__name__)
 
 from accounts.models import User
+from accounts.capabilities import user_can
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 
@@ -119,21 +120,25 @@ def _designation(user):
     return (getattr(user, 'designation', '') or '').lower()
 
 
+# Who does what is configured per company on the Designation master now (see
+# accounts/capabilities.py). A designation nobody has configured still falls back to
+# the old rules — matching text in the title — so behaviour is unchanged until a
+# company edits its own designations.
+
 def is_telecaller(user):
-    d = _designation(user)
-    return 'telecaller' in d or 'tele caller' in d
+    """Works the calling queue."""
+    return user_can(user, 'sales.pipeline.telecalling')
 
 
 def is_stm(user):
-    d = _designation(user)
-    return 'stm' in d or 'sales team' in d or 'sales executive' in d
+    """Works site visits, closures and bookings."""
+    return user_can(user, 'sales.pipeline.stm')
 
 
 def is_cp(user):
     """CP Executive — an employee-level Channel Partner who sources & works their
     own leads (no Meta distribution). Scoped like an STM (by the lead's stm field)."""
-    d = _designation(user)
-    return 'cp executive' in d or 'channel partner' in d
+    return user_can(user, 'sales.pipeline.cp')
 
 
 def is_cp_manager(user):
@@ -142,7 +147,7 @@ def is_cp_manager(user):
     visibility within it still comes from the existing Manager project-assignment
     mechanism (manager_project_ids/scope_leads_to_project) — no CP-specific
     scoping needed, it already applies to any Manager regardless of designation."""
-    return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
+    return getattr(user, 'role', '') == 'Manager' and user_can(user, 'sales.pipeline.cp_manager')
 
 
 def is_cp_designated(user):
@@ -401,9 +406,10 @@ def _can_approve_accounts_booking(user, project_id, project, lead_id, company, b
 
 
 def can_assign_leads(user):
-    """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
-    else (admins/managers/Sales CRM)."""
-    return not (is_telecaller(user) or is_stm(user) or is_cp(user))
+    """Who may hand a lead to someone else. By default telecallers, STMs and CP
+    Executives cannot and everyone else can — a company can change that on the
+    designation."""
+    return user_can(user, 'sales.lead.assign')
 
 
 # A project's floor plans, site-map zones and unit-type plans are large JSON blobs —

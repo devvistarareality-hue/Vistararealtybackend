@@ -42,6 +42,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     department   = models.CharField(max_length=100, blank=True)
     designation  = models.CharField(max_length=100, blank=True)
     avatar_url      = models.URLField(blank=True)
+    # Exceptions for one person, on top of their designation's capabilities.
+    extra_capabilities  = models.JSONField(default=list, blank=True)
+    denied_capabilities = models.JSONField(default=list, blank=True)
     modules            = models.JSONField(default=list, blank=True)
     manager_modules    = models.JSONField(default=list, blank=True)
     admin_modules      = models.JSONField(default=list, blank=True)
@@ -118,6 +121,12 @@ class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)
     module  = models.CharField(max_length=100)
+    # What this designation may do, per company (see accounts/capabilities.py).
+    # capabilities_set says the company has configured it — an empty tick list is a
+    # real answer ("this designation may do nothing"), not "not set up yet".
+    capabilities     = models.JSONField(default=list, blank=True)
+    capabilities_set = models.BooleanField(default=False)
+    data_scope       = models.CharField(max_length=20, blank=True, default='')
 
     class Meta:
         unique_together = ('company', 'name', 'module')

@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     LoginView, MeView, ChangePasswordView,
     UserListCreateView, UserDetailView,
-    DesignationListCreateView, DesignationDetailView,
+    CapabilityCatalogueView, DesignationListCreateView, DesignationDetailView,
     NotificationTestView, NotificationListView, NotificationReadView,
     SessionTokenRefreshView,
     VerifyOtpView, ResendOtpView,
@@ -18,6 +18,7 @@ urlpatterns = [
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),
     path('users/<int:pk>/',           UserDetailView.as_view(),            name='user-detail'),
     path('designations/',             DesignationListCreateView.as_view(), name='designation-list'),
+    path('designations/capabilities/', CapabilityCatalogueView.as_view(),  name='capability-catalogue'),
     path('designations/<int:pk>/',    DesignationDetailView.as_view(),     name='designation-detail'),
     path('notifications/test/',       NotificationTestView.as_view(),      name='notification-test'),
     path('notifications/',            NotificationListView.as_view(),      name='notification-list'),

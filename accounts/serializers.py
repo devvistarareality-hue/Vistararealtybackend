@@ -23,6 +23,12 @@ class UserSerializer(serializers.ModelSerializer):
     company_name      = serializers.SerializerMethodField()
     reporting_manager = ReportingManagerSerializer(read_only=True)
     is_approver       = serializers.SerializerMethodField()
+    # What this person may do, resolved from their company's designation settings.
+    capabilities      = serializers.SerializerMethodField()
+
+    def get_capabilities(self, obj):
+        from .capabilities import capabilities_for
+        return sorted(capabilities_for(obj))
 
     def get_company_code(self, obj):
         return obj.company.code if obj.company else ''
@@ -45,6 +51,7 @@ class UserSerializer(serializers.ModelSerializer):
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver', 'can_export_bookings',
+            'capabilities',
         ]
 
 
@@ -54,7 +61,8 @@ class DesignationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = Designation
-        fields = ['id', 'name', 'module', 'company_code', 'company_name']
+        fields = ['id', 'name', 'module', 'company_code', 'company_name',
+                  'capabilities', 'capabilities_set', 'data_scope']
 
 
 class UserListSerializer(serializers.ModelSerializer):

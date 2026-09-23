@@ -284,6 +284,19 @@ class SessionTokenRefreshView(APIView):
         return Response(tokens, status=status.HTTP_200_OK)
 
 
+class CapabilityCatalogueView(APIView):
+    """The fixed vocabulary the designation screen ticks from."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .capabilities import CAPABILITIES, DATA_SCOPES, PRESETS, PRESET_LABELS
+        return Response({
+            'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
+            'scopes': [{'value': v, 'label': l} for v, l in DATA_SCOPES],
+            'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v} for k, v in PRESETS.items()],
+        })
+
+
 class DesignationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -312,6 +325,36 @@ class DesignationListCreateView(APIView):
 
 class DesignationDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        qs = Designation.objects.all() if is_platform_admin(request.user) else Designation.objects.filter(company=request.user.company)
+        return qs.filter(pk=pk).first()
+
+    def patch(self, request, pk):
+        """Set what this designation may do, and whose records it sees. Company
+        admins only — this decides everyone else's access."""
+        from .capabilities import CAPABILITY_KEYS, DATA_SCOPES
+        if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
+            return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
+        desig = self._get(request, pk)
+        if desig is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if 'capabilities' in request.data:
+            caps = request.data.get('capabilities') or []
+            if not isinstance(caps, list):
+                return Response({'capabilities': 'Send a list of capability keys.'}, status=status.HTTP_400_BAD_REQUEST)
+            unknown = [c for c in caps if c not in CAPABILITY_KEYS]
+            if unknown:
+                return Response({'capabilities': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.capabilities = sorted(set(caps))
+            desig.capabilities_set = True
+        if 'data_scope' in request.data:
+            scope = request.data.get('data_scope') or ''
+            if scope not in [s for s, _ in DATA_SCOPES]:
+                return Response({'data_scope': 'Unknown scope.'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.data_scope = scope
+        desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope'])
+        return Response(DesignationSerializer(desig).data)
 
     def delete(self, request, pk):
         qs = Designation.objects.all() if is_platform_admin(request.user) else Designation.objects.filter(company=request.user.company)
