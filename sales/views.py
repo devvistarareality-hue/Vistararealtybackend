@@ -4498,7 +4498,28 @@ def _schedule_gap(data):
     return total - deal
 
 
+MIN_INST_YEAR, MAX_INST_YEAR = 2015, 2100
+
+
+def _bad_installment_dates(data):
+    """Installment dates whose year can't be real — "0026-01-26" for 2026, typed on
+    the booking form. AR then reads the unit as two thousand years overdue and it
+    tops the collections list with a meaningless figure."""
+    bad = []
+    for key in ('installments', 'extra_work_inst'):
+        for i in (data.get(key) or []):
+            d = str((i or {}).get('date') or '')
+            if len(d) >= 4 and d[:4].isdigit() and not (MIN_INST_YEAR <= int(d[:4]) <= MAX_INST_YEAR):
+                bad.append((str((i or {}).get('no') or '?'), d))
+    return bad
+
+
 def _schedule_error(data):
+    bad = _bad_installment_dates(data)
+    if bad:
+        return ('Check the installment date%s: %s. The year must be between %d and %d.'
+                % ('' if len(bad) == 1 else 's',
+                   ', '.join('#%s is %s' % (no, d) for no, d in bad[:5]), MIN_INST_YEAR, MAX_INST_YEAR))
     gap = _schedule_gap(data)
     if gap is None or abs(gap) <= SCHEDULE_TOLERANCE:
         return None
