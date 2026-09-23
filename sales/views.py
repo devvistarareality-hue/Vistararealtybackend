@@ -2581,6 +2581,15 @@ class SiteVisitListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            # The Sales module's book. A partner-sourced visit belongs to Channel
+            # Partner, with the same handed-off exception the dashboard makes: a CP
+            # lead passed to a Sales person is theirs to show once it is theirs to
+            # work. Written as the dashboard writes it so the two cannot drift —
+            # without it this list said 1,623 completed visits where the tile said
+            # 1,563, the 60 partner visits being the whole of the difference.
+            _own = _visible_user_ids(request.user)
+            qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         # Headline counts without shipping the rows: the app's stat tiles used to

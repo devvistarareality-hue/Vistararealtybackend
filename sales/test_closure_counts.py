@@ -1,4 +1,4 @@
-"""One deal, one closure, in one book.
+"""One deal, one closure, in one book — and the same for site visits.
 
 Three screens answer "how many closures?" and they used to give three different
 numbers for the same company: the Sales dashboard's Closures tile read 479, My
@@ -6,6 +6,10 @@ Conversions read 512, and Approvals listed 418 approved bookings. Each counted a
 different population — the list kept cancelled closures and partner-sourced ones,
 and every closure figure counted a revised deal twice, because revising a booking
 issues the revision its own closure and leaves the replaced one on the books.
+
+Site visits had the narrower half of the same fault: the Sales list kept the
+partner-sourced visits the dashboard left out, so it read 1,623 completed
+against the tile's 1,563.
 """
 from datetime import date
 
@@ -13,9 +17,11 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from django.utils import timezone
+
 from accounts.models import User
 from companies.models import Company
-from sales.models import Booking, Closure, Lead, LeadSource, Project
+from sales.models import Booking, Closure, Lead, LeadSource, Project, SiteVisit
 
 
 class ClosureCountsAgree(TestCase):
@@ -58,6 +64,8 @@ class ClosureCountsAgree(TestCase):
         phone = phone or f'90000000{self.n:02d}'
         lead = Lead.objects.create(company=self.co, project=self.p, source=source,
                                    name=name, phone=phone, stm=self.stm)
+        SiteVisit.objects.create(lead=lead, project=self.p, stm=self.stm,
+                                 status='completed', visited_at=timezone.now())
         closure = Closure.objects.create(company=self.co, project=self.p, lead=lead,
                                          stm=self.stm, closure_date=date(2026, 8, 1))
         Booking.objects.create(company=self.co, project=self.p, lead=lead, stm=self.stm,
@@ -99,3 +107,19 @@ class ClosureCountsAgree(TestCase):
         ids = {r['id'] for r in rows}
         self.assertIn(self.revised.id, ids, 'the revision stands')
         self.assertNotIn(self.superseded.id, ids, 'the closure it replaced does not')
+
+
+    def test_site_visits_split_into_the_same_two_books(self):
+        cache.clear()
+        api = self._api()
+        tile = api.get('/api/sales/stats/').json()['sv_done']
+        listed = api.get('/api/sales/site-visits/?counts_only=true').json()
+        # Seven visits were recorded, one of them the partner's. Unlike closures,
+        # a visit is not folded into a revision chain — each is its own visit.
+        self.assertEqual(tile, 6, 'the dashboard tile')
+        self.assertEqual(listed.get('completed'), 6, 'the Site Visits list')
+
+        cp_tile = api.get('/api/sales/stats/?cp_only=true').json()['sv_done']
+        cp_listed = api.get('/api/sales/site-visits/?counts_only=true&cp_only=true').json()
+        self.assertEqual(cp_tile, 1, "Channel Partner's tile")
+        self.assertEqual(cp_listed.get('completed'), 1, "Channel Partner's list")
