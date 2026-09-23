@@ -31,15 +31,28 @@ def forwards(apps, schema_editor):
             row.screens = sorted(keys or CP_SCREENS)
         row.save(update_fields=['module', 'screens'])
 
-    # 2. Whoever works in it gets the module, so nothing closes in their face.
+    # 2. Whoever works in it moves across: Channel Partner replaces Sales for
+    #    them, the way it does in User Management. They worked the partner desk,
+    #    not the Sales floor, so carrying both would hand them a module they were
+    #    never meant to have.
     for user in User.objects.all():
         if not is_cp_title(user.designation):
             continue
-        mods = list(user.modules or [])
-        if CP not in mods:
-            mods.append(CP)
-            user.modules = mods
-            user.save(update_fields=['modules'])
+        changed = []
+        for field in ('modules', 'manager_modules', 'admin_modules'):
+            mods = list(getattr(user, field, None) or [])
+            if 'Sales' not in mods and CP not in mods:
+                continue
+            mods = [m for m in mods if m != 'Sales']
+            if CP not in mods:
+                mods.append(CP)
+            setattr(user, field, mods)
+            changed.append(field)
+        # Someone with a CP title and no modules at all still gets the module.
+        if not changed:
+            user.modules = list(user.modules or []) + [CP]
+            changed = ['modules']
+        user.save(update_fields=changed)
 
     # 3. Nobody's Sales menu offers Channel Partner any more.
     for row in Designation.objects.filter(screens_set=True):

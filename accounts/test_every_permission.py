@@ -346,3 +346,29 @@ class ChannelPartnerIsItsOwnModuleTests(TestCase):
         self.assertNotIn('sales.pipeline.cp', caps)
         menu = preset_screens('CMO', 'Sales')
         self.assertTrue(all(k.startswith('sales.') for k in menu), menu)
+
+
+class CpPeopleMoveAcrossTests(TestCase):
+    """The CP people move from Sales to Channel Partner rather than holding both
+    — the transfer an admin would otherwise do by hand in User Management."""
+
+    def test_a_cp_person_ends_up_in_the_cp_module_only(self):
+        co = Company.objects.create(code='XFER', name='Transfer Co')
+        person = User.objects.create_user('x@xfer.com', company=co, user_code='X-1', password='x',
+                                          name='CP Person', role='Manager',
+                                          designation='CP Cluster Head',
+                                          modules=['Sales'], manager_modules=['Sales'])
+        # What the migration does, applied here the same way.
+        for field in ('modules', 'manager_modules'):
+            mods = [m for m in (getattr(person, field) or []) if m != 'Sales']
+            if 'Channel Partner' not in mods:
+                mods.append('Channel Partner')
+            setattr(person, field, mods)
+        person.save(update_fields=['modules', 'manager_modules'])
+        fresh = User.objects.get(pk=person.pk)
+        self.assertEqual(fresh.modules, ['Channel Partner'])
+        self.assertEqual(fresh.manager_modules, ['Channel Partner'])
+        from sales.views import has_cp_access, has_sales_access
+        self.assertTrue(has_cp_access(fresh))
+        # They still reach the shared lead endpoints, because CP works them.
+        self.assertTrue(has_sales_access(fresh))
