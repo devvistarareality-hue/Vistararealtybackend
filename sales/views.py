@@ -516,6 +516,43 @@ def scope_leads_to_project(qs, user, lead_prefix=''):
     return qs.filter(**{f'{lead_prefix}project__in': pids})
 
 
+def scope_owned_to_role(qs, user, owner_fields, project_field=None, request=None):
+    """The same restriction scope_leads_to_role applies to leads, for the records
+    that hang off them — site visits, closures, follow-ups.
+
+    They are counted from their own tables, not derived from the leads queryset,
+    so without this a designation set to "own records only" saw its lead count
+    shrink while Site Visits and Closures still showed the whole desk's — and the
+    conversion rate on the dashboard was one scope divided by another.
+
+    `owner_fields` are the columns that say whose record it is; `project_field`
+    is how the row reaches its project, for the project-scoped case.
+    """
+    def by_owner(ids):
+        f = Q()
+        for field in owner_fields:
+            f |= Q(**{f'{field}__in': ids})
+        return qs.filter(f)
+
+    def by_project():
+        pids = manager_project_ids(user)
+        if pids is None or project_field is None:
+            return qs
+        return qs.filter(**{f'{project_field}__in': pids})
+
+    scope = data_scope(user)
+    if scope == SCOPE_COMPANY:
+        return qs
+    if scope in (SCOPE_OWN, SCOPE_TEAM):
+        return by_owner({user.id} if scope == SCOPE_OWN else _visible_user_ids(user))
+    if scope == SCOPE_PROJECTS:
+        return by_project()
+    # Nothing configured: the rule these counts have always used.
+    if _sees_all_company(user, request):
+        return by_project()
+    return by_owner(_visible_user_ids(user))
+
+
 def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
     STM or telecaller) by themselves or by anyone reporting to them, transitively.
@@ -749,10 +786,12 @@ class StatsView(APIView):
             # Same ownership exception as leads_qs above.
             sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
             cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
-        if not _sees_all_company(request.user, request):
-            _ids = _visible_user_ids(request.user)
-            sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
-            cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+        # Whose visits and closures these are follows the designation's scope, the
+        # same one the leads above use — otherwise the tiles disagree with each
+        # other and the conversion rate compares two different populations.
+        owners = ('stm', 'referred_by_telecaller')
+        sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'lead__project', request)
+        cl_qs = scope_owned_to_role(cl_qs, request.user, owners, 'project', request)
         if date_from:
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
@@ -764,8 +803,7 @@ class StatsView(APIView):
         # same way it does to everything else. Scoped by assignee exactly as the
         # Follow-Ups screen is, so the tile and that list agree.
         fu_qs = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company')
-        if not _sees_all_company(request.user, request):
-            fu_qs = fu_qs.filter(assigned_to__in=_visible_user_ids(request.user))
+        fu_qs = scope_owned_to_role(fu_qs, request.user, ('assigned_to',), 'lead__project', request)
         if company_id and is_platform_admin(request.user):
             fu_qs = fu_qs.filter(lead__company_id=company_id)
         fu_done = fu_qs.filter(status='completed', completed_at__isnull=False)
@@ -802,6 +840,10 @@ class StatsView(APIView):
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
         active_projects_qs = scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter)
+        # "Active projects" means the ones their own records are on, once the
+        # scope narrows what those records are.
+        if data_scope(request.user) in (SCOPE_OWN, SCOPE_TEAM):
+            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
         if cp_only:
             # The CP dashboard's "Active Projects" means projects with actual CP
             # activity, not every active project company-wide — leads_scope is

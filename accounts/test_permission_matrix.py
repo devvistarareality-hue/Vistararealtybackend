@@ -11,6 +11,7 @@ capability does nothing without the module, and the module alone is not enough
 once a company has unticked the action.
 """
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.capabilities import (CAPABILITY_KEYS, SCREEN_KEYS, can_see_screen,
@@ -375,3 +376,54 @@ class CpDesignationDashboardTests(TestCase):
         for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.booking',
                     'cp.screen.approvals', 'cp.screen.myteam'):
             self.assertIn(key, menu)
+
+
+class EveryTileFollowsTheSameScopeTests(TestCase):
+    """The dashboard's tiles have to count the same population. With "own records
+    only" the leads shrank while Site Visits and Closures still showed the whole
+    desk — so the conversion rate divided one scope by another."""
+
+    def setUp(self):
+        from datetime import date
+        from django.core.cache import cache
+        from sales.models import Closure, Lead, LeadSource, Project, SiteVisit
+        cache.clear()
+        self.co = Company.objects.create(code='TILE', name='Tile Co')
+        proj = Project.objects.create(company=self.co, name='Tundav')
+        # A CP title sees the partner pool, so the fixtures have to be partner leads.
+        src = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        self.desig = _designation(self.co, 'CP CLUSTER HEAD', 'Sales')
+        self.head = User.objects.create_user('h@x.com', company=self.co, user_code='T1', password='x',
+                                             name='Head', role='Manager', modules=['Sales'],
+                                             designation='CP CLUSTER HEAD')
+        self.mate = User.objects.create_user('m@x.com', company=self.co, user_code='T2', password='x',
+                                             name='Mate', role='Employee', modules=['Sales'],
+                                             designation='CP CLUSTER HEAD', reporting_manager=self.head)
+        for owner in (self.head, self.mate):
+            lead = Lead.objects.create(company=self.co, project=proj, source=src,
+                                       name=f'{owner.name} lead', phone='9000000003', stm=owner)
+            SiteVisit.objects.create(lead=lead, stm=owner, status='completed',
+                                     visited_at=timezone.now())
+            Closure.objects.create(company=self.co, lead=lead, project=proj, stm=owner,
+                                   closure_date=date.today(), status='approved')
+
+    def _tiles(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.head.pk))
+        d = api.get('/api/sales/stats/').json()
+        return d['total_leads'], d['sv_done'], d['closures']
+
+    def test_own_records_only_narrows_every_tile(self):
+        self.assertEqual(self._tiles(), (2, 2, 2))      # the desk, as before
+        self.desig.data_scope = 'own'
+        self.desig.save(update_fields=['data_scope'])
+        from accounts.capabilities import bump_permissions_version
+        bump_permissions_version(self.co.id)
+        self.assertEqual(self._tiles(), (1, 1, 1))      # theirs alone, all three
+
+    def test_team_scope_is_the_whole_tree_below_them(self):
+        self.desig.data_scope = 'team'
+        self.desig.save(update_fields=['data_scope'])
+        from accounts.capabilities import bump_permissions_version
+        bump_permissions_version(self.co.id)
+        self.assertEqual(self._tiles(), (2, 2, 2))
