@@ -800,6 +800,15 @@ class StatsView(APIView):
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
         _not_sold, _awaiting_accounts, _cp_cl = _closure_books(_stats_company_id(request, company_id))
+        # The partner desk also closes deals that did not come from a partner. Those
+        # belong to the Sales book and are not in `closures`, but the people reading
+        # this dashboard did the work, so the Closures tile says how many there are
+        # rather than leaving the difference against their own My Bookings
+        # unexplained. Own and team only — this is their desk, not the company's.
+        _cl_desk = (cl_qs.exclude(_cp_cl)
+                    .filter(Q(stm__in=own_ids) | Q(referred_by_telecaller__in=own_ids))) if cp_only else None
+        cl_other = _cl_desk.exclude(id__in=_not_sold) if cp_only else None
+        cl_other_waiting = _cl_desk.filter(id__in=_awaiting_accounts) if cp_only else None
         if cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
             cl_qs = cl_qs.filter(_cp_cl).distinct()
@@ -825,10 +834,16 @@ class StatsView(APIView):
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
             cl_waiting = cl_waiting.filter(closure_date__gte=date_from)
+            if cl_other is not None:
+                cl_other = cl_other.filter(closure_date__gte=date_from)
+                cl_other_waiting = cl_other_waiting.filter(closure_date__gte=date_from)
         if date_to:
             sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
             cl_waiting = cl_waiting.filter(closure_date__lte=date_to)
+            if cl_other is not None:
+                cl_other = cl_other.filter(closure_date__lte=date_to)
+                cl_other_waiting = cl_other_waiting.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
         # same way it does to everything else. Scoped by assignee exactly as the
@@ -884,6 +899,9 @@ class StatsView(APIView):
             active_projects_qs.count(),
         )
         accounts_pending = cl_waiting.filter(**cl_filter).count()
+        closures_other_source = cl_other.filter(**cl_filter).count() if cl_other is not None else 0
+        accounts_pending_other_source = (cl_other_waiting.filter(**cl_filter).count()
+                                         if cl_other_waiting is not None else 0)
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
         sv_warm_count = sv_scoped.filter(outcome='warm').count()
@@ -936,6 +954,11 @@ class StatsView(APIView):
             # Closed, approved by Sales or CP, waiting at the Accounts gate. These
             # are not in `closures` yet — they join it when Accounts signs off.
             'accounts_pending':   accounts_pending,
+            # Channel Partner only: what this desk closed from other sources. Those
+            # belong to the Sales book, so they are NOT part of `closures` — the
+            # tile names them so the two figures are not mistaken for one.
+            'closures_other_source': closures_other_source,
+            'accounts_pending_other_source': accounts_pending_other_source,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
             'active_projects':    active_projects,

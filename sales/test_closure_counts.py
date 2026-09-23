@@ -287,6 +287,33 @@ class AccountsHasTheLastWord(TestCase):
             self.assertEqual(len(waiting), expected, query)
             self.assertEqual(len(waiting), tile, f'the tab and the tile disagree for {query}')
 
+    def test_the_partner_desk_sees_what_it_closed_from_other_sources(self):
+        """A CP desk also books deals that did not come from a partner. Those sit
+        in the Sales book, so the CP dashboard names them beside its own figures
+        rather than letting them go missing."""
+        cache.clear()
+        cp_head = User.objects.create_user('h@acc.com', company=self.co, user_code='AC-H',
+                                           password='x', name='Head', role='Manager',
+                                           designation='CP CLUSTER HEAD',
+                                           modules=['Channel Partner'])
+        self.stm.reporting_manager = cp_head
+        self.stm.save(update_fields=['reporting_manager'])
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=cp_head.pk))
+        d = api.get('/api/sales/stats/?cp_only=true').json()
+        # The partner book: one signed off, one waiting.
+        self.assertEqual(d['closures'], 1)
+        self.assertEqual(d['accounts_pending'], 1)
+        # His team's own work from other sources, which Sales counts, not CP.
+        self.assertEqual(d['closures_other_source'], 2)
+        self.assertEqual(d['accounts_pending_other_source'], 1)
+
+    def test_the_other_source_figures_are_channel_partner_only(self):
+        cache.clear()
+        d = self._api().get('/api/sales/stats/').json()
+        self.assertEqual(d['closures_other_source'], 0, 'Sales has no other book to name')
+        self.assertEqual(d['accounts_pending_other_source'], 0)
+
     def test_accounts_reconciles_with_sales_and_channel_partner(self):
         cache.clear()
         api = self._api()
