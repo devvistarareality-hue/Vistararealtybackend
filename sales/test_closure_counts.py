@@ -274,6 +274,19 @@ class AccountsHasTheLastWord(TestCase):
         self.assertEqual(cp['closures'], 1)
         self.assertEqual(cp['accounts_pending'], 1)
 
+    def test_approvals_can_list_the_ones_waiting(self):
+        """The Approvals tab and the dashboard tile ask the same question."""
+        cache.clear()
+        api = self._api()
+        for query, side, expected in (
+            ('&source=sales', '', 1),
+            ('&cp_only=true', '?cp_only=true', 1),
+        ):
+            waiting = api.get(f'/api/sales/bookings/?status=sold&accounts_status=pending{query}').json()
+            tile = api.get(f'/api/sales/stats/{side}').json()['accounts_pending']
+            self.assertEqual(len(waiting), expected, query)
+            self.assertEqual(len(waiting), tile, f'the tab and the tile disagree for {query}')
+
     def test_accounts_reconciles_with_sales_and_channel_partner(self):
         cache.clear()
         api = self._api()

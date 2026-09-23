@@ -4766,6 +4766,15 @@ class BookingListCreateView(APIView):
             qs = qs.filter(status='rejected').exclude(approval_status__icontains='CANCEL')
         elif st:
             qs = qs.filter(status=st)
+        # The second gate. A deal Sales or CP has approved still waits on Accounts,
+        # and until that sign-off it is not a closure and the unit is held, not sold
+        # — so the Approvals list can ask for exactly those. Blank reads as approved,
+        # the way everything booked before this gate existed carries it.
+        acc = (request.query_params.get('accounts_status') or '').lower()
+        if acc == 'approved':
+            qs = qs.filter(Q(accounts_status='approved') | Q(accounts_status=''))
+        elif acc in ('pending', 'rejected'):
+            qs = qs.filter(accounts_status=acc)
         # The visibility rules above are ORed conditions that reach through `lead`
         # into the CP directory and the source table. Those are forward foreign keys
         # today, so a booking matching two arms still comes back once — but that is a
