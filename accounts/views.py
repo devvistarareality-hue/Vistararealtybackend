@@ -291,7 +291,8 @@ class CapabilityCatalogueView(APIView):
 
     def get(self, request):
         from .capabilities import (CAPABILITIES, DASHBOARD_ROLES, DASHBOARDS, DATA_SCOPES,
-                                   PRESETS, PRESET_LABELS, PRESET_SCREENS, SCREENS)
+                                   PRESETS, PRESET_LABELS, PRESET_MODULES, PRESET_SCREENS,
+                                   SCREENS)
         return Response({
             'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
             'screens': [{'key': k, 'label': l, 'module': m} for k, l, m in SCREENS],
@@ -300,6 +301,7 @@ class CapabilityCatalogueView(APIView):
                            for v, l, m, r in DASHBOARDS],
             'dashboard_roles': DASHBOARD_ROLES,
             'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
+                         'module': PRESET_MODULES.get(k, ''),
                          'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
         })
 

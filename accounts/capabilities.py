@@ -200,6 +200,12 @@ PRESET_LABELS = {
     'telecaller': 'Telecaller', 'stm': 'Sales Executive (STM)', 'cp_executive': 'CP Executive',
     'cp_manager': 'CP Manager', 'sales_desk': 'Sales desk (assigns leads)',
 }
+# Which module each preset is for — Channel Partner is its own module, so a Sales
+# designation should never be offered the CP ones, or the other way round.
+PRESET_MODULES = {
+    'telecaller': 'Sales', 'stm': 'Sales', 'sales_desk': 'Sales',
+    'cp_executive': 'Channel Partner', 'cp_manager': 'Channel Partner',
+}
 
 # ── The old text rules, kept as the fallback and as the seed ─────────────────
 LEGACY_RULES = [

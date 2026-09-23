@@ -372,3 +372,42 @@ class CpPeopleMoveAcrossTests(TestCase):
         self.assertTrue(has_cp_access(fresh))
         # They still reach the shared lead endpoints, because CP works them.
         self.assertTrue(has_sales_access(fresh))
+
+
+class TheEditorShowsOneModuleTests(TestCase):
+    """A designation decides its own module and nothing else — the editor must
+    not offer a Sales title the Channel Partner switches, or the other way."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='ONEM', name='One Module Co')
+        cls.admin = User.objects.create_user('a@onem.com', company=cls.co, user_code='OM-A',
+                                             password='x', name='Admin', role='Admin')
+
+    def test_presets_carry_their_module(self):
+        api = APIClient()
+        api.force_authenticate(self.admin)
+        presets = {p['key']: p['module'] for p in
+                   api.get('/api/auth/designations/capabilities/').json()['presets']}
+        self.assertEqual(presets['telecaller'], 'Sales')
+        self.assertEqual(presets['stm'], 'Sales')
+        self.assertEqual(presets['sales_desk'], 'Sales')
+        self.assertEqual(presets['cp_executive'], 'Channel Partner')
+        self.assertEqual(presets['cp_manager'], 'Channel Partner')
+
+    def test_a_sales_title_is_pre_ticked_with_sales_alone(self):
+        from accounts.capabilities import legacy_capabilities, modules_of, preset_screens
+        self.assertEqual(tuple(modules_of('Sales')), ('Sales',))
+        self.assertEqual(tuple(modules_of('Channel Partner')), ('Channel Partner',))
+        caps = legacy_capabilities('Cluster Head', 'Sales')
+        self.assertNotIn('sales.pipeline.cp', caps)
+        self.assertNotIn('sales.pipeline.cp_manager', caps)
+        menu = preset_screens('Cluster Head', 'Sales')
+        self.assertTrue(all(k.startswith('sales.') for k in menu), menu)
+
+    def test_a_cp_title_is_pre_ticked_with_channel_partner_alone(self):
+        from accounts.capabilities import legacy_capabilities, preset_screens
+        caps = legacy_capabilities('CP EXECUTIVE', 'Channel Partner')
+        self.assertTrue(all(c.startswith('sales.pipeline.cp') for c in caps), caps)
+        menu = preset_screens('CP EXECUTIVE', 'Channel Partner')
+        self.assertTrue(all(k.startswith('cp.') for k in menu), menu)
