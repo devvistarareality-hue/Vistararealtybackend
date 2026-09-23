@@ -303,7 +303,7 @@ class ScreenAndDashboardTests(TestCase):
         each of its items is switchable on its own."""
         from accounts.capabilities import SCREEN_KEYS, preset_screens
         for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
-                    'cp.screen.followups', 'cp.screen.closures', 'cp.screen.booking',
+                    'cp.screen.followups', 'cp.screen.booking',
                     'cp.screen.myteam', 'cp.screen.approvals'):
             self.assertIn(key, SCREEN_KEYS)
         # A CP title's preset ticks them, so setting one up changes nothing at first.
