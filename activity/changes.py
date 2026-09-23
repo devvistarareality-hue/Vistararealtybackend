@@ -30,6 +30,7 @@ TYPE_OF = {
     'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account',
     'investor': 'investor', 'payout': 'payout', 'referralreward': 'referral-reward', 'scheme': 'scheme',
     'leaveapplication': 'leave',
+    'designation': 'designation', 'dashboarddefinition': 'dashboard',
 }
 
 MAX_VALUE = 80
@@ -61,6 +62,10 @@ def record_label(obj):
         return ''
     name = obj._meta.model_name
     try:
+        if name == 'dashboarddefinition':
+            return '%s · %s %s' % (obj.name or '—', obj.module or '', obj.role or '')
+        if name == 'designation':
+            return '%s · %s' % (obj.name or '—', obj.module or '')
         if name == 'lead':
             return '%s (%s)' % (obj.name or '—', obj.phone or '—')
         if name == 'investor':

@@ -296,32 +296,31 @@ class ScreenAndDashboardTests(TestCase):
         self.assertIn('cp.screen.booking', exec_)
         self.assertNotIn('cp.screen.myteam', exec_)   # no reports to show
 
-    def test_dashboards_are_listed_per_module_and_role(self):
-        """Each module offers one dashboard per role, so a company can build a
-        view for each and pin it to the designation."""
+    def test_every_module_offers_a_dashboard_per_role(self):
+        """Each module's Dashboard has a role filter; the editor lists the same
+        views so a designation can be pinned to one."""
         self.api.force_authenticate(self.admin)
         cat = self.api.get('/api/auth/designations/capabilities/').json()
-        self.assertEqual(cat['dashboard_roles'], ['Employee', 'Manager', 'Director'])
+        # The roles are the ones User Management creates people with.
+        self.assertEqual(cat['dashboard_roles'],
+                         ['Director', 'General Manager', 'Manager', 'Employee', 'Intern'])
         by_module = {}
         for d in cat['dashboards']:
             if d['module']:
                 by_module.setdefault(d['module'], set()).add(d['role'])
-        for module in ('Sales', 'Channel Partner', 'Accounts & Finance', 'AR', 'Club 1000'):
-            self.assertIn(module, by_module, module)
-            self.assertIn('Manager', by_module[module], module)
-            self.assertIn('Director', by_module[module], module)
+        self.assertEqual(by_module['Sales'], {'Employee', 'Manager', 'General Manager', 'Director'})
+        self.assertEqual(by_module['Channel Partner'], {'Employee', 'Manager', 'General Manager', 'Director'})
+        self.assertIn('Club 1000', by_module)
         # The default row has no role, so a role filter never hides it.
-        default = [d for d in cat['dashboards'] if d['value'] == ''][0]
-        self.assertEqual(default['role'], '')
-        self.assertTrue(default['built'])
+        self.assertEqual([d for d in cat['dashboards'] if d['value'] == ''][0]['role'], '')
 
-    def test_a_dashboard_can_be_pinned_for_any_module(self):
+    def test_a_dashboard_can_be_pinned_by_role(self):
         self.api.force_authenticate(self.admin)
         r = self.api.patch(f'/api/auth/designations/{self.desig.id}/',
-                           {'dashboard': 'club_manager'}, format='json')
+                           {'dashboard': 'cp_manager'}, format='json')
         self.assertEqual(r.status_code, 200, r.content)
         from accounts.capabilities import dashboard_for
-        self.assertEqual(dashboard_for(User.objects.get(pk=self.tc.pk)), 'club_manager')
+        self.assertEqual(dashboard_for(User.objects.get(pk=self.tc.pk)), 'cp_manager')
 
     def test_bad_values_are_refused(self):
         self.api.force_authenticate(self.admin)

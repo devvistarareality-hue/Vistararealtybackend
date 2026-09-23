@@ -69,35 +69,40 @@ configured it yet, and an unset designation sees everything.
 
 ### 1.4 Declare the dashboards
 
-`accounts/capabilities.py` → `DASHBOARDS`, one row per dashboard you built, with
-the role it is written for:
+Each module has a Dashboard with a **role filter** on top: one dashboard per role
+level, the roles being the ones User Management creates people with
+(`DASHBOARD_ROLES` — Director, General Manager, Manager, Employee, Intern).
+
+Write the views, then declare them in `accounts/capabilities.py` → `DASHBOARDS`:
 
 ```python
-('purchase_employee', 'Buyer — their own orders',  'Purchase', 'Employee'),
-('purchase_manager',  'Manager — the whole desk',  'Purchase', 'Manager'),
-('purchase_director', 'Director — company figures','Purchase', 'Director'),
+('purchase_buyer',   'Buyer — their own orders',   'Purchase', 'Employee'),
+('purchase_manager', 'Manager — the whole desk',   'Purchase', 'Manager'),
+('purchase_director','Director — company figures', 'Purchase', 'Director'),
 ```
 
-The editor's Dashboard tab groups these by module and filters them by role
-(`DASHBOARD_ROLES`), so an admin picks "the Manager view of Purchase" and pins it
-to a designation. Leave `''` (decide from their permissions) as the default.
-
-Then point the module's dashboard at the pinned value. Keep a map of the views
-you have actually built and fall back to today's view for anything else:
+In the module's dashboard page, list the same keys and render the matching view.
+`app/sales/page.js` is the worked example:
 
 ```jsx
-import { pinnedDashboard } from '../../lib/dashboards';      // app: ../../lib/dashboards
+export const PURCHASE_DASHBOARDS = [
+  { key: 'purchase_buyer',   role: 'Employee', label: 'Buyer' },
+  { key: 'purchase_manager', role: 'Manager',  label: 'Manager' },
+];
 
-const VIEWS = { purchase_manager: ManagerDashboard, purchase_employee: BuyerDashboard };
-const Pinned = pinnedDashboard(user, VIEWS);
-if (Pinned) return <Pinned user={user} />;
-// …the module's current dashboard
+const chosen = preview || dashboardFor(user);     // what an admin is looking at,
+const body = viewFor(chosen) || <YourDefault />;  // else what they are pinned to
+return isAdmin ? <><DashboardRoleFilter options={PURCHASE_DASHBOARDS}
+  value={chosen} onChange={setPreview} />{body}</> : body;
 ```
 
-`app/club1000/page.js` is the worked example. Finally add each key you have built
-to `DASHBOARDS_BUILT`, which is what stops the editor labelling it "not built yet
-— opens the current dashboard". A key an admin pins before you write the view is
-harmless: the module just opens what it opens today.
+The filter shows for admins only — it is how you see what each role gets before
+pinning it. Designation Master → Permissions → Dashboard lists the same rows,
+filtered by role, and that is what decides which one a designation opens.
+
+Whichever view opens, the figures stay scoped by role and the reporting tree:
+`accounts/test_permission_matrix.py::DashboardFollowsTheTreeTests` proves a
+telecaller pinned to the Manager dashboard still counts only their own leads.
 
 ### 1.5 Gate the actions
 

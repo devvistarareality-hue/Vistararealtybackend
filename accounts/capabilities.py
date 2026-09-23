@@ -115,45 +115,36 @@ PRESET_SCREENS = {
     'sales_desk': [k for k, _, _ in SCREENS],
 }
 
-# ── Which dashboard opens ────────────────────────────────────────────
+# ── Which dashboard opens ────────────────────────────────────────────────────
 DASHBOARD_AUTO = ''
-# The roles a dashboard can be written for. A company builds one view per role
-# per module and pins it to the designation here — the editor filters by these.
-DASHBOARD_ROLES = ['Employee', 'Manager', 'Director']
+# The roles a dashboard can be written for — the same list User Management uses
+# when it creates a person, minus Kiosk (which has its own locked screen). Each
+# module's Dashboard has a role filter over these; Designation → Permissions then
+# pins the one that opens for a designation.
+DASHBOARD_ROLES = ['Director', 'General Manager', 'Manager', 'Employee', 'Intern']
 
-# (value, label, module, role) — a new module adds its own rows and nothing else
-# needs changing: the editor groups them by module, filters them by role, and the
-# module's dashboard reads the chosen value.
+# The dashboards that exist, per module, per role. Sales and Channel Partner use
+# the views that were there before permissions: the telecaller queue, the STM's
+# own pipeline and the manager/director desk.
+# (value, label, module, role)
 DASHBOARDS = [
     (DASHBOARD_AUTO, 'Decide from their permissions (default)', '', ''),
     # Sales
     ('telecaller', 'Telecaller — the call queue', 'Sales', 'Employee'),
     ('stm', 'Sales Executive — their own pipeline', 'Sales', 'Employee'),
     ('manager', 'Manager — the whole desk', 'Sales', 'Manager'),
+    ('gm', 'General Manager — the whole desk', 'Sales', 'General Manager'),
     ('director', 'Director — company-wide figures', 'Sales', 'Director'),
-    # Channel Partner
-    ('cp_employee', 'CP Executive — their own partner leads', 'Channel Partner', 'Employee'),
-    ('cp_manager_desk', 'CP Manager — the partner desk', 'Channel Partner', 'Manager'),
+    # Channel Partner — the same views, scoped to partner-sourced records.
+    ('cp_exec', 'CP Executive — their own partner leads', 'Channel Partner', 'Employee'),
+    ('cp_manager', 'CP Manager — the partner desk', 'Channel Partner', 'Manager'),
+    ('cp_gm', 'General Manager — the partner desk', 'Channel Partner', 'General Manager'),
     ('cp_director', 'Director — every partner, every project', 'Channel Partner', 'Director'),
-    # Accounts & Finance
-    ('accounts_employee', 'Executive — the queue they work', 'Accounts & Finance', 'Employee'),
-    ('accounts_manager', 'Manager — approvals and the ledger', 'Accounts & Finance', 'Manager'),
-    ('accounts_director', 'Director — company-wide figures', 'Accounts & Finance', 'Director'),
-    # Accounts Receivable
-    ('ar_employee', 'Officer — the accounts they chase', 'AR', 'Employee'),
-    ('ar_manager', 'Manager — the whole receivables book', 'AR', 'Manager'),
-    ('ar_director', 'Director — collections across projects', 'AR', 'Director'),
-    # Club 1000
-    ('club_employee', 'Executive — their own investors', 'Club 1000', 'Employee'),
+    # Club 1000 — the Manager and Executive dashboards it already has.
+    ('club_exec', 'Executive — their own investors', 'Club 1000', 'Employee'),
     ('club_manager', 'Manager — the investment desk', 'Club 1000', 'Manager'),
-    ('club_director', 'Director — company-wide figures', 'Club 1000', 'Director'),
 ]
 DASHBOARD_KEYS = [d[0] for d in DASHBOARDS]
-
-# Which of those views actually exist yet. A key that is not in here is a real
-# choice an admin can make — the module simply opens its current dashboard until
-# someone builds that view and adds the key here (see docs/NEW_MODULE_CHECKLIST.md).
-DASHBOARDS_BUILT = {'telecaller', 'stm', 'manager', 'director', 'club_manager', 'club_employee'}
 
 # Granted to everyone by default, because before capabilities anyone with the
 # module could already do them. Ticking stays with the company to remove.

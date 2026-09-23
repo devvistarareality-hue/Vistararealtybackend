@@ -171,3 +171,44 @@ class VocabularyTests(TestCase):
     def test_keys_are_unique(self):
         self.assertEqual(len(SCREEN_KEYS), len(set(SCREEN_KEYS)))
         self.assertEqual(len(CAPABILITY_KEYS), len(set(CAPABILITY_KEYS)))
+
+
+class DashboardFollowsTheTreeTests(TestCase):
+    """Pinning a dashboard changes which view opens, never what the numbers
+    count: the figures stay scoped by role and the reporting tree."""
+
+    def setUp(self):
+        from sales.models import Lead, LeadSource, Project
+        self.co = Company.objects.create(code='TREE', name='Tree Co')
+        self.proj = Project.objects.create(company=self.co, name='Tundav')
+        self.src = LeadSource.objects.create(company=self.co, name='Meta')
+        self.desig = _designation(self.co, 'Telecaller', 'Sales')
+        self.boss = User.objects.create_user('boss@x.com', company=self.co, user_code='T0', password='x',
+                                             name='Boss', role='Manager', modules=['Sales'],
+                                             designation='Sales Head')
+        self.tc = User.objects.create_user('tc@x.com', company=self.co, user_code='T1', password='x',
+                                           name='Tele', role='Employee', modules=['Sales'],
+                                           designation='Telecaller', reporting_manager=self.boss)
+        self.other = User.objects.create_user('other@x.com', company=self.co, user_code='T2', password='x',
+                                              name='Other', role='Employee', modules=['Sales'],
+                                              designation='Telecaller', reporting_manager=self.boss)
+        for owner, name in ((self.tc, 'Mine'), (self.other, 'Theirs'), (self.other, 'Theirs too')):
+            Lead.objects.create(company=self.co, project=self.proj, source=self.src,
+                                name=name, phone='9000000000', telecaller=owner)
+
+    def _my_total(self, user):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=user.pk))
+        return api.get('/api/sales/stats/').json()['total_leads']
+
+    def test_pinning_the_manager_dashboard_shows_no_one_else_s_numbers(self):
+        self.assertEqual(self._my_total(self.tc), 1)          # their own lead
+        self.desig.dashboard = 'manager'
+        self.desig.save(update_fields=['dashboard'])
+        from accounts.capabilities import dashboard_for
+        self.assertEqual(dashboard_for(User.objects.get(pk=self.tc.pk)), 'manager')
+        # The Manager view opens, but the figures are still theirs alone.
+        self.assertEqual(self._my_total(self.tc), 1)
+
+    def test_a_manager_sees_the_tree_below_them(self):
+        self.assertEqual(self._my_total(self.boss), 3)
