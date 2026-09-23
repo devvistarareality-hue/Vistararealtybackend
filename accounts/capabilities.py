@@ -98,14 +98,16 @@ PRESET_SCREENS = {
 
 # ── Which dashboard opens ────────────────────────────────────────────────────
 DASHBOARD_AUTO = ''
+# (value, label, module) — a new module adds its own rows here and nothing else
+# needs changing: the editor groups them and the screens read the chosen value.
 DASHBOARDS = [
-    (DASHBOARD_AUTO, 'Decide from their permissions (default)'),
-    ('telecaller', 'Telecaller — the call queue'),
-    ('stm', 'Sales Executive — their own pipeline'),
-    ('manager', 'Manager — the whole desk'),
-    ('director', 'Director — company-wide figures'),
+    (DASHBOARD_AUTO, 'Decide from their permissions (default)', ''),
+    ('telecaller', 'Telecaller — the call queue', 'Sales'),
+    ('stm', 'Sales Executive — their own pipeline', 'Sales'),
+    ('manager', 'Manager — the whole desk', 'Sales'),
+    ('director', 'Director — company-wide figures', 'Sales'),
 ]
-DASHBOARD_KEYS = [d for d, _ in DASHBOARDS]
+DASHBOARD_KEYS = [d[0] for d in DASHBOARDS]
 
 # Granted to everyone by default, because before capabilities anyone with the
 # module could already do them. Ticking stays with the company to remove.

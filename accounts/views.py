@@ -295,7 +295,7 @@ class CapabilityCatalogueView(APIView):
             'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
             'screens': [{'key': k, 'label': l, 'module': m} for k, l, m in SCREENS],
             'scopes': [{'value': v, 'label': l} for v, l in DATA_SCOPES],
-            'dashboards': [{'value': v, 'label': l} for v, l in DASHBOARDS],
+            'dashboards': [{'value': v, 'label': l, 'module': m} for v, l, m in DASHBOARDS],
             'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
                          'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
         })
