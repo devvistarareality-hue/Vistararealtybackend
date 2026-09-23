@@ -83,10 +83,13 @@ SCREENS = [
     ('ar.screen.import', 'Import receipts', 'AR'),
     ('club.screen.dashboard', 'Dashboard', 'Club 1000'),
     ('club.screen.leads', 'Leads', 'Club 1000'),
+    ('club.screen.followups', 'Follow-Ups', 'Club 1000'),
     ('club.screen.investors', 'Investors', 'Club 1000'),
     ('club.screen.schemes', 'Schemes', 'Club 1000'),
     ('club.screen.payouts', 'Payouts', 'Club 1000'),
+    ('club.screen.rewards', 'Referral Rewards', 'Club 1000'),
     ('club.screen.approvals', 'Approvals', 'Club 1000'),
+    ('club.screen.myteam', 'My Team', 'Club 1000'),
 ]
 SCREEN_KEYS = [s[0] for s in SCREENS]
 
