@@ -839,17 +839,14 @@ class StatsView(APIView):
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        # Active projects are the company's projects, not a count of the person's
+        # own records: the same number on every dashboard, so "9 here, 11 there,
+        # 4 after changing a scope" cannot happen. The only narrowing is a
+        # manager assigned to particular projects, who sees theirs.
         active_projects_qs = scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter)
-        # "Active projects" means the ones their own records are on, once the
-        # scope narrows what those records are.
-        if data_scope(request.user) in (SCOPE_OWN, SCOPE_TEAM):
-            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
-        if cp_only:
-            # The CP dashboard's "Active Projects" means projects with actual CP
-            # activity, not every active project company-wide — leads_scope is
-            # already split to the CP pool above (cp_lead_q), not date-windowed
-            # so this stays a stable "currently active in CP" count.
-            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
+        _assigned = manager_project_ids(request.user)
+        if _assigned is not None:
+            active_projects_qs = active_projects_qs.filter(id__in=_assigned)
         sv_done, closures, active_projects = (
             sv_scoped.count(),
             cl_scoped.count(),
