@@ -364,25 +364,6 @@ def cp_booking_q(source_field='source', lead_prefix='lead__'):
     return names_cp | (unset & cp_lead_q(prefix=lead_prefix))
 
 
-def cp_closure_q():
-    """A closure belongs to the Channel Partner module when its booking does.
-
-    Deliberately defined as "any of its bookings is a CP booking" rather than by
-    restating the rule: every closure figure then splits the two books exactly
-    where the approvals do. Reading only the lead, as the dashboard used to, left
-    47 of Vistara's closures in neither book — counted in Sales, approved by the
-    CP approvers.
-
-    A closure recorded before its booking exists has nothing to read, so that one
-    falls back to its lead — the older rule, and the only case where it applies.
-
-    It reaches through the reverse `bookings` relation, so a `filter()` on it
-    needs `.distinct()`. `exclude()` compiles to a subquery and does not.
-    """
-    return (Q(bookings__id__in=Booking.objects.filter(cp_booking_q()).values('id'))
-            | (Q(bookings__isnull=True) & cp_lead_q(prefix='lead__')))
-
-
 def _can_approve_booking(user, project_id, project, lead_id, company, booking_source=None):
     """Which approver list gates a booking or closure: a Channel-Partner-sourced
     one is approved by the project's CP approvers, everything else by its regular
@@ -818,13 +799,14 @@ class StatsView(APIView):
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
+        _stale_cl, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
-            cl_qs = cl_qs.filter(cp_closure_q()).distinct()
+            cl_qs = cl_qs.filter(_cp_cl).distinct()
         else:
             # Same ownership exception as leads_qs above.
             sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
-            cl_qs = cl_qs.exclude(cp_closure_q() & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
+            cl_qs = cl_qs.exclude(_cp_cl & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
         # Whose visits and closures these are follows the designation's scope, the
         # same one the leads above use — otherwise the tiles disagree with each
         # other and the conversion rate compares two different populations.
@@ -832,9 +814,8 @@ class StatsView(APIView):
         sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'lead__project', request)
         cl_qs = scope_owned_to_role(cl_qs, request.user, owners, 'project', request)
         # A revised booking brings its own closure and the replaced one stays on
-        # the books, so without this the tile counts a revised deal twice and
-        # disagrees with Approvals, which drops the superseded bookings.
-        cl_qs = cl_qs.exclude(id__in=_superseded_closure_ids(_stats_company_id(request, company_id)))
+        # the books, so without this the tile counts a revised deal twice.
+        cl_qs = cl_qs.exclude(id__in=_stale_cl)
         if date_from:
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
@@ -1046,13 +1027,14 @@ class StatsTrendView(APIView):
         if company_id and is_platform_admin(request.user):
             cl_qs = cl_qs.filter(company_id=company_id)
         # The same two books the tile above splits into, or the chart contradicts it.
+        _stale_cl, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
-            cl_qs = cl_qs.filter(cp_closure_q()).distinct()
+            cl_qs = cl_qs.filter(_cp_cl).distinct()
         else:
             _own = _visible_user_ids(request.user)
-            cl_qs = cl_qs.exclude(cp_closure_q() & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+            cl_qs = cl_qs.exclude(_cp_cl & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
         # Same as the Closures tile: one deal, one closure, however often it was revised.
-        cl_qs = cl_qs.exclude(id__in=_superseded_closure_ids(_stats_company_id(request, company_id)))
+        cl_qs = cl_qs.exclude(id__in=_stale_cl)
         # booking/total amounts are EncryptedDecimalField (cannot Sum() in the DB),
         # so aggregate count + amount per day in Python for the closures chart tooltip.
         closure_map = {}
@@ -2696,23 +2678,24 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
+        _stale_cl, _cp_cl = _closure_books(_stats_company_id(request, cid))
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            # The Channel Partner book — see cp_closure_q for what counts as one.
-            qs = qs.filter(cp_closure_q()).distinct()
+            # The Channel Partner book — see _closure_books for what counts as one.
+            qs = qs.filter(_cp_cl).distinct()
         else:
             # The Sales module's book. A partner-sourced closure belongs to Channel
             # Partner, with the same handed-off exception the dashboard makes: a CP
             # lead passed to a Sales person is theirs to show once it is theirs to
             # work. Written as the dashboard writes it so the two cannot drift.
             _own = _visible_user_ids(request.user)
-            qs = qs.exclude(cp_closure_q() & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+            qs = qs.exclude(_cp_cl & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
         # A cancelled closure is a deal that came off the books, not a conversion —
         # the dashboard has always left it out, and this list counted it.
         qs = qs.exclude(status='cancelled')
         # One deal, one closure. Revising a booking issues the revision its own
         # closure and leaves the replaced one behind, so a revised deal was listed
         # twice here while Approvals showed it once.
-        qs = qs.exclude(id__in=_superseded_closure_ids(_stats_company_id(request, cid)))
+        qs = qs.exclude(id__in=_stale_cl)
         if request.query_params.get('counts_only') == 'true':
             return Response({'total': qs.count()})
         return maybe_paginate(request, qs.order_by('-closure_date', '-id'), ClosureSerializer)
@@ -5375,26 +5358,40 @@ def _stats_company_id(request, company_id):
     return getattr(request.user, 'company_id', None)
 
 
-def _superseded_closure_ids(company_id):
-    """Closures left stranded by a revision.
+def _closure_books(company_id):
+    """How a company's closures divide up, as (superseded, is_channel_partner).
 
-    Revising a booking issues the revision its own closure and leaves the old
-    booking's closure on the books, so every closure figure counted a revised
-    deal twice — the Sales dashboard read 479 closures where Approvals listed
-    418 live bookings for the same company, and My Conversions read 512.
+    Both answers come from one walk of the revision chains, because both are
+    really the same question — which booking of a deal is the one that stands.
 
-    Only a closure whose every booking has been superseded is dropped: one still
-    carried by a live booking is the deal, whatever else points at it.
+    `superseded` are the closures a revision stranded. Revising a booking issues
+    the revision its own closure and leaves the old booking's closure on the
+    books, so every closure figure counted a revised deal twice: the Sales
+    dashboard read 479 where Approvals listed 418 for the same company, and My
+    Conversions read 512. A closure still carried by a booking that stands is the
+    deal, whatever else points at it.
+
+    `is_channel_partner` is a Q: a closure belongs to the Channel Partner book
+    when the booking that stands for it does. Reading the lead alone, as the
+    dashboard used to, left 47 of Vistara's closures in neither book — counted in
+    Sales, approved by the CP approvers. Reading every booking, superseded ones
+    included, put 2 more in the wrong one: a deal revised from Channel Partner to
+    Reference is a Reference deal now. A closure recorded before its booking
+    exists has nothing to read and falls back to its lead.
+
+    The Q reaches through the reverse `bookings` relation, so `filter()` on it
+    needs `.distinct()`. `exclude()` compiles to a subquery and does not.
     """
-    if not company_id:
-        return set()
+    dead = _superseded_booking_ids(Booking.objects.filter(company_id=company_id)) if company_id else set()
+    cp = Booking.objects.filter(cp_booking_q()).exclude(id__in=dead)
+    is_cp = (Q(bookings__id__in=cp.values('id'))
+             | (Q(bookings__isnull=True) & cp_lead_q(prefix='lead__')))
+    if not dead:
+        return set(), is_cp
     scope = Booking.objects.filter(company_id=company_id)
-    dropped = _superseded_booking_ids(scope)
-    if not dropped:
-        return set()
-    stale = {c for c in scope.filter(id__in=dropped).values_list('closure_id', flat=True) if c}
-    live = {c for c in scope.exclude(id__in=dropped).values_list('closure_id', flat=True) if c}
-    return stale - live
+    stale = {c for c in scope.filter(id__in=dead).values_list('closure_id', flat=True) if c}
+    stands = {c for c in scope.exclude(id__in=dead).values_list('closure_id', flat=True) if c}
+    return stale - stands, is_cp
 
 
 def _revision_groups(scope):

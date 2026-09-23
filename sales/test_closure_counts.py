@@ -123,3 +123,54 @@ class ClosureCountsAgree(TestCase):
         cp_listed = api.get('/api/sales/site-visits/?counts_only=true&cp_only=true').json()
         self.assertEqual(cp_tile, 1, "Channel Partner's tile")
         self.assertEqual(cp_listed.get('completed'), 1, "Channel Partner's list")
+
+
+class ARevisedDealFollowsItsCurrentSource(TestCase):
+    """A deal revised from Channel Partner to Reference is a Reference deal now.
+
+    Two of Vistara's closures were filed under Channel Partner because a booking
+    that had been superseded named that source, while the booking that stands
+    named another — so the closure sat in one book and its live booking in the
+    other, and the CP closure figure read 69 against 68 CP bookings.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='REV', name='Revised Co')
+        self.p = Project.objects.create(company=self.co, name='Tundav')
+        self.admin = User.objects.create_user('a@rev.com', company=self.co, user_code='RV-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales', 'Channel Partner'])
+        self.stm = User.objects.create_user('s@rev.com', company=self.co, user_code='RV-S',
+                                            password='x', name='Seller', role='Employee',
+                                            modules=['Sales'])
+        lead = Lead.objects.create(company=self.co, project=self.p, name='Buyer',
+                                   phone='9222200000', stm=self.stm)
+        self.closure = Closure.objects.create(company=self.co, project=self.p, lead=lead,
+                                              stm=self.stm, closure_date=date(2026, 8, 1))
+        # Booked through a channel partner, then revised — same closure, same unit.
+        for revision_no, source in ((0, 'Channel Partner'), (1, 'Reference')):
+            Booking.objects.create(company=self.co, project=self.p, lead=lead, stm=self.stm,
+                                   client_name='Buyer', phone='9222200000', plot_numbers='E-1',
+                                   revision_no=revision_no, closure=self.closure, source=source,
+                                   status='sold', approval_status='APPROVED',
+                                   booking_date=date(2026, 8, 1))
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.admin.pk))
+        return api
+
+    def test_the_closure_moves_to_the_sales_book_with_its_booking(self):
+        api = self._api()
+        self.assertEqual(api.get('/api/sales/closures/?counts_only=true').json()['total'], 1,
+                         'Sales keeps the closure, because the booking that stands is a Sales one')
+        self.assertEqual(
+            api.get('/api/sales/closures/?counts_only=true&cp_only=true').json()['total'], 0,
+            'Channel Partner does not, on the strength of a superseded booking')
+
+    def test_the_tile_says_the_same(self):
+        cache.clear()
+        api = self._api()
+        self.assertEqual(api.get('/api/sales/stats/').json()['closures'], 1)
+        self.assertEqual(api.get('/api/sales/stats/?cp_only=true').json()['closures'], 0)
