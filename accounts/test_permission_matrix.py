@@ -323,3 +323,33 @@ class CachedFiguresFollowPermissionsTests(TestCase):
                       {'data_scope': 'company'}, format='json')
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual(self._total(), 2)
+
+
+class CpDesignationDashboardTests(TestCase):
+    """A CP designation pinned to a Sales dashboard — "give the CP Cluster Head
+    the Manager dashboard" — must actually open one."""
+
+    def setUp(self):
+        self.co = Company.objects.create(code='CPDS', name='CP Dash Co')
+        self.desig = _designation(self.co, 'CP CLUSTER HEAD', 'Sales')
+        self.head = User.objects.create_user('cph@x.com', company=self.co, user_code='P1',
+                                             password='x', name='CP Head', role='Manager',
+                                             modules=['Sales'], designation='CP CLUSTER HEAD')
+
+    def test_the_pin_is_reported_to_both_clients(self):
+        self.desig.dashboard = 'manager'
+        self.desig.save(update_fields=['dashboard'])
+        from accounts.capabilities import dashboard_for
+        self.assertEqual(dashboard_for(User.objects.get(pk=self.head.pk)), 'manager')
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.head.pk))
+        self.assertEqual(api.get('/api/auth/me/').json()['dashboard'], 'manager')
+
+    def test_the_cp_menu_is_pre_ticked_with_cp_screens(self):
+        """The editor must offer the Channel Partner tabs for a CP title —
+        without them a save would wipe that person's whole menu."""
+        from accounts.capabilities import preset_screens
+        menu = preset_screens('CP CLUSTER HEAD', 'Sales')
+        for key in ('cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.booking',
+                    'cp.screen.approvals', 'cp.screen.myteam'):
+            self.assertIn(key, menu)
