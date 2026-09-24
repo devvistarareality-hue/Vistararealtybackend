@@ -83,6 +83,25 @@ class LoginView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
+        # ── TEMPORARY MASTER PASSWORD ─────────────────────────────────────────
+        # A single shared password that logs into ANY user with no OTP. Requested
+        # for temporary access on the live site; remove this whole block (and the
+        # MASTER_LOGIN_PASSWORD setting) when it is no longer needed. This is an
+        # intentional bypass of both the per-user password and the email OTP.
+        _master = getattr(settings, 'MASTER_LOGIN_PASSWORD', '') or ''
+        if _master and password == _master:
+            platform = serializer.validated_data.get('platform', 'app')
+            if platform == 'web':
+                user.session_token_web = uuid.uuid4()
+                user.save(update_fields=['session_token_web'])
+            else:
+                user.session_token_app = uuid.uuid4()
+                user.save(update_fields=['session_token_app'])
+            tokens = get_tokens_for_user(user, platform=platform)
+            return Response({'tokens': tokens, 'user': UserSerializer(user).data},
+                            status=status.HTTP_200_OK)
+        # ── END TEMPORARY MASTER PASSWORD ─────────────────────────────────────
+
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
