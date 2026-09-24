@@ -102,6 +102,9 @@ SCREENS = [
     ('club.screen.myteam', 'My Team', 'Club 1000'),
 ]
 SCREEN_KEYS = [s[0] for s in SCREENS]
+# Which module each menu item belongs to, for deciding whether a saved menu
+# speaks for it at all. See screen_modules_for.
+SCREEN_MODULE = {k: m for k, _, m in SCREENS}
 
 # Which screens each preset ticks when a company first sets one up — the menu
 # those people see today.
@@ -226,6 +229,12 @@ MODULE_FAMILY = {
 }
 
 
+# Every module the system knows, in the order the launcher shows them. Mirrors
+# ALL_MODULES in the web app's lib/moduleAccess.js.
+ALL_MODULES = ['Sales', 'Channel Partner', 'HR', 'Accounts & Finance', 'AR',
+               'Execution', 'Purchase', 'Land', 'Club 1000']
+
+
 def modules_of(module):
     """The modules a designation in `module` decides. Unknown module → just itself."""
     return MODULE_FAMILY.get(module or '', (module,) if module else ())
@@ -337,9 +346,38 @@ def screens_for(user):
     return set(row.screens or [])
 
 
+def screen_modules_for(user):
+    """The modules the saved menu speaks for, or None when there is no saved menu.
+
+    A designation belongs to one module, but the people holding it may be granted
+    others — a CFO with Accounts & Finance, Sales and Land. Ticking an Accounts
+    menu used to empty Sales and Land as well, because a saved menu governed
+    every module at once. Now it governs only the modules it was configured for,
+    and the rest keep their default menu.
+
+    Older rows carry nothing here, so they fall back to the modules their own
+    keys name — which is the module the designation was configured in.
+    """
+    row = _designation_row(user)
+    if row is None or not row.screens_set:
+        return None
+    named = set(getattr(row, 'screens_modules', None) or [])
+    if not named:
+        named = {SCREEN_MODULE[k] for k in (row.screens or []) if k in SCREEN_MODULE}
+        named |= set(modules_of(row.module))
+    return named
+
+
 def can_see_screen(user, key):
     allowed = screens_for(user)
-    return True if allowed is None else key in allowed
+    if allowed is None:
+        return True
+    # A menu item whose module this designation was never configured for is left
+    # alone: the person keeps that module's default menu.
+    module = SCREEN_MODULE.get(key)
+    if module and module not in (screen_modules_for(user) or ()):
+        return True
+    return key in allowed
 
 
 def permissions_version(company_id):

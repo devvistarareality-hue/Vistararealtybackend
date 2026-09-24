@@ -151,6 +151,12 @@ class Designation(models.Model):
     # role-based menu, so a company that never opens the screen sees no change.
     screens          = models.JSONField(default=list, blank=True)
     screens_set      = models.BooleanField(default=False)
+    # Which modules that menu speaks for. A designation belongs to one module but
+    # its people may be granted others — a CFO with Sales and Land, say — and the
+    # menu saved here would otherwise empty those too. A module named here is
+    # governed by `screens` (so unticking all of its tabs really does hide them);
+    # a module not named keeps its default menu.
+    screens_modules  = models.JSONField(default=list, blank=True)
     # Which dashboard opens; '' decides from their permissions, as before.
     dashboard        = models.CharField(max_length=20, blank=True, default='')
 

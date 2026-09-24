@@ -40,6 +40,15 @@ class UserSerializer(serializers.ModelSerializer):
         allowed = screens_for(obj)
         return None if allowed is None else sorted(allowed)
 
+    # The modules that saved menu speaks for. The browser filters its own sidebar
+    # too, so it needs the same rule: a module not named here keeps its defaults.
+    screen_modules = serializers.SerializerMethodField()
+
+    def get_screen_modules(self, obj):
+        from .capabilities import screen_modules_for
+        named = screen_modules_for(obj)
+        return None if named is None else sorted(named)
+
     def get_dashboard(self, obj):
         from .capabilities import dashboard_for
         return dashboard_for(obj)
@@ -73,7 +82,7 @@ class UserSerializer(serializers.ModelSerializer):
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver', 'can_export_bookings',
-            'capabilities', 'screens', 'dashboard', 'role_dashboards',
+            'capabilities', 'screens', 'screen_modules', 'dashboard', 'role_dashboards',
         ]
 
 
@@ -95,11 +104,24 @@ class DesignationSerializer(serializers.ModelSerializer):
         from .capabilities import preset_screens
         return sorted(obj.screens or []) if obj.screens_set else preset_screens(obj.name, obj.module)
 
+    # Which modules that menu speaks for. Older rows say nothing, so they read as
+    # the module the designation was configured in — see screen_modules_for.
+    effective_screen_modules = serializers.SerializerMethodField()
+
+    def get_effective_screen_modules(self, obj):
+        from .capabilities import SCREEN_MODULE, modules_of
+        named = sorted(obj.screens_modules or [])
+        if named or not obj.screens_set:
+            return named
+        return sorted({SCREEN_MODULE[k] for k in (obj.screens or []) if k in SCREEN_MODULE}
+                      | set(modules_of(obj.module)))
+
     class Meta:
         model  = Designation
         fields = ['id', 'name', 'module', 'company_code', 'company_name',
                   'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope',
-                  'screens', 'screens_set', 'effective_screens', 'dashboard']
+                  'screens', 'screens_set', 'effective_screens',
+                  'screens_modules', 'effective_screen_modules', 'dashboard']
 
 
 class UserListSerializer(serializers.ModelSerializer):

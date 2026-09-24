@@ -294,9 +294,36 @@ class ScreenAndDashboardTests(TestCase):
         fresh = User.objects.get(pk=self.tc.pk)
         self.assertEqual(screens_for(fresh), set())
         self.assertFalse(can_see_screen(fresh, 'sales.screen.leads'))
-        self.assertFalse(can_see_screen(fresh, 'cp.screen.dashboard'))
         self.api.force_authenticate(fresh)
         self.assertEqual(self.api.get('/api/auth/me/').json()['screens'], [])
+
+    def test_a_module_this_designation_never_configured_keeps_its_menu(self):
+        """A Sales designation says nothing about Channel Partner, so someone
+        granted both modules keeps the CP menu. Clearing the Sales menu is an
+        answer about Sales — not about every module the person happens to hold."""
+        self.api.force_authenticate(self.admin)
+        self.api.patch(f'/api/auth/designations/{self.desig.id}/',
+                       {'screens': []}, format='json')
+        from accounts.capabilities import can_see_screen
+        fresh = User.objects.get(pk=self.tc.pk)
+        self.assertTrue(can_see_screen(fresh, 'cp.screen.dashboard'))
+
+    def test_naming_a_second_module_makes_the_menu_answer_for_it_too(self):
+        """Once the editor has offered a module, an empty tick list for it means
+        empty — the same promise the designation's own module already makes."""
+        self.api.force_authenticate(self.admin)
+        r = self.api.patch(f'/api/auth/designations/{self.desig.id}/', {
+            'screens': ['sales.screen.dashboard'],
+            'screens_modules': ['Sales', 'Channel Partner']}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['screens_modules'], ['Channel Partner', 'Sales'])
+        from accounts.capabilities import can_see_screen
+        fresh = User.objects.get(pk=self.tc.pk)
+        self.assertTrue(can_see_screen(fresh, 'sales.screen.dashboard'))
+        self.assertFalse(can_see_screen(fresh, 'cp.screen.dashboard'),
+                         'named and unticked means hidden')
+        self.assertTrue(can_see_screen(fresh, 'land.screen.dashboard'),
+                        'a module still unnamed keeps its default')
 
     def test_the_channel_partner_menu_has_its_own_keys(self):
         """A CP Cluster Head's whole sidebar is the Channel Partner module, so

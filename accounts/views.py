@@ -389,8 +389,8 @@ class DesignationDetailView(APIView):
     def patch(self, request, pk):
         """Set what this designation may do, and whose records it sees. Company
         admins only — this decides everyone else's access."""
-        from .capabilities import (CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES, SCREEN_KEYS,
-                                   with_module_defaults)
+        from .capabilities import (ALL_MODULES, CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES,
+                                   SCREEN_KEYS, SCREEN_MODULE, modules_of, with_module_defaults)
         if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
             return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
         desig = self._get(request, pk)
@@ -414,6 +414,20 @@ class DesignationDetailView(APIView):
                 return Response({'screens': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
             desig.screens = with_module_defaults(screens)
             desig.screens_set = True
+            # Which modules this menu speaks for. Sent by the editor, which knows
+            # the modules it offered; falling back to the modules the keys name
+            # keeps an older browser saving exactly what it used to.
+            mods = request.data.get('screens_modules')
+            if isinstance(mods, list):
+                unknown = [m for m in mods if m not in ALL_MODULES]
+                if unknown:
+                    return Response({'screens_modules': f'Unknown: {", ".join(map(str, unknown))}'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                desig.screens_modules = sorted(set(mods) | set(modules_of(desig.module)))
+            else:
+                desig.screens_modules = sorted(
+                    {SCREEN_MODULE[k] for k in desig.screens if k in SCREEN_MODULE}
+                    | set(modules_of(desig.module)))
         if 'dashboard' in request.data:
             dash = request.data.get('dashboard') or ''
             if dash not in DASHBOARD_KEYS:
@@ -425,7 +439,7 @@ class DesignationDetailView(APIView):
                 return Response({'data_scope': 'Unknown scope.'}, status=status.HTTP_400_BAD_REQUEST)
             desig.data_scope = scope
         desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope',
-                                  'screens', 'screens_set', 'dashboard'])
+                                  'screens', 'screens_set', 'screens_modules', 'dashboard'])
         # Anything this company has cached was worked out under the old rules.
         bump_permissions_version(desig.company_id)
         return Response(DesignationSerializer(desig).data)
