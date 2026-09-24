@@ -866,6 +866,13 @@ class StatsView(APIView):
         # Follow-Ups screen is, so the tile and that list agree.
         fu_qs = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company')
         fu_qs = scope_owned_to_role(fu_qs, request.user, ('assigned_to',), 'lead__project', request)
+        # The same two books as the leads, visits and closures above — the tiles
+        # had been counting both, which is why they never contradicted the
+        # Follow-Ups list: it counted both as well.
+        if cp_only:
+            fu_qs = fu_qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            fu_qs = fu_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=own_ids))
         if company_id and is_platform_admin(request.user):
             fu_qs = fu_qs.filter(lead__company_id=company_id)
         fu_done = fu_qs.filter(status='completed', completed_at__isnull=False)
@@ -2553,6 +2560,14 @@ class FollowUpListView(APIView):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            # The Sales module's book, the last of the five to be split. A follow-up
+            # on a partner lead belongs to Channel Partner, with the handed-off
+            # exception the leads and visits make: one passed to a Sales person is
+            # theirs to chase once it is theirs to work. A follow-up is owned by
+            # whoever it is assigned to, so that is what the exception reads.
+            _own = _visible_user_ids(request.user)
+            qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=_own))
         return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), FollowUpSerializer)
 
     def post(self, request):

@@ -12,6 +12,11 @@ which is what makes the three figures one figure.
 Site visits had the narrower half of the same fault: the Sales list kept the
 partner-sourced visits the dashboard left out, so it read 1,623 completed
 against the tile's 1,563.
+
+Follow-ups had neither half: the list and the tiles both counted the two books
+together, so nothing contradicted anything and the Sales module quietly held
+the partner desk's chasing. They are split here too, which makes all five —
+leads, visits, closures, bookings, follow-ups — answer to the same line.
 """
 from datetime import date
 
@@ -23,7 +28,8 @@ from django.utils import timezone
 
 from accounts.models import User
 from companies.models import Company
-from sales.models import Booking, Closure, Lead, LeadSource, Plot, Project, SiteVisit
+from sales.models import (Booking, Closure, FollowUp, Lead, LeadSource, Plot,
+                          Project, SiteVisit)
 
 
 class ClosureCountsAgree(TestCase):
@@ -110,6 +116,25 @@ class ClosureCountsAgree(TestCase):
         self.assertIn(self.revised.id, ids, 'the revision stands')
         self.assertNotIn(self.superseded.id, ids, 'the closure it replaced does not')
 
+
+    def test_follow_ups_split_into_the_same_two_books(self):
+        cache.clear()
+        api = self._api()
+        # One follow-up per deal, chased by the person who owns the lead.
+        for lead in Lead.objects.filter(company=self.co):
+            FollowUp.objects.create(lead=lead, assigned_to=self.stm, status='pending',
+                                    scheduled_at=timezone.now())
+        sales = api.get('/api/sales/follow-ups/').json()
+        sales = sales if isinstance(sales, list) else sales.get('results', [])
+        cp = api.get('/api/sales/follow-ups/?cp_only=true').json()
+        cp = cp if isinstance(cp, list) else cp.get('results', [])
+        self.assertEqual(len(cp), 1, "the partner lead's follow-up")
+        self.assertEqual(len(sales), Lead.objects.filter(company=self.co).count() - 1,
+                         'and the Sales list holds every other one, and not that')
+        tile = api.get('/api/sales/stats/').json()['followup_pending_count']
+        self.assertEqual(tile, len(sales), 'the tile counts what the list shows')
+        cp_tile = api.get('/api/sales/stats/?cp_only=true').json()['followup_pending_count']
+        self.assertEqual(cp_tile, len(cp), "and so does Channel Partner's")
 
     def test_site_visits_split_into_the_same_two_books(self):
         cache.clear()
