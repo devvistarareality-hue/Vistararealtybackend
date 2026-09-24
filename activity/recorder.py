@@ -22,7 +22,7 @@ SKIP = re.compile(
     r'|.*/(search|preview)/?$)')
 MODULES = {
     'sales': 'Sales', 'ar': 'AR', 'club1000': 'Club 1000', 'attendance': 'HR',
-    'auth': 'Admin', 'company': 'Admin', 'activity': 'Admin',
+    'auth': 'Admin', 'company': 'Admin', 'activity': 'Admin', 'tasks': 'Task Allocation',
 }
 VERBS = {
     'approve': 'Approved', 'reject': 'Rejected', 'cancel': 'Cancelled', 'withdraw': 'Withdrew',
