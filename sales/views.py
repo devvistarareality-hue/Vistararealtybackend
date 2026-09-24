@@ -815,7 +815,16 @@ class StatsView(APIView):
         else:
             # Same ownership exception as leads_qs above.
             sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
-            cl_qs = cl_qs.exclude(_cp_cl & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
+            # A closure with a booking follows that booking, and the booking lists
+            # split the two books strictly — so this does too, or the tile counts
+            # partner deals the list it opens can never show. A Regional Head read
+            # 377 against a list of 367, the 10 being his team's partner-sourced
+            # work. A closure with no booking has nothing to follow and keeps the
+            # handed-off exception, same as the leads and visits above.
+            _booked = _closures_with_a_booking(_stats_company_id(request, company_id))
+            cl_qs = cl_qs.exclude(_cp_cl & (Q(id__in=_booked)
+                                            | (~Q(stm__in=own_ids)
+                                               & ~Q(referred_by_telecaller__in=own_ids))))
         # Whose visits and closures these are follows the designation's scope, the
         # same one the leads above use — otherwise the tiles disagree with each
         # other and the conversion rate compares two different populations.
@@ -4738,6 +4747,17 @@ class BookingListCreateView(APIView):
         #   under My Bookings instead.
         if request.query_params.get('mine'):
             mine_q = Q(stm_id__in=own_and_team)
+            # `scope=visible` widens My Bookings to everything this person may see,
+            # which for a manager or department head is the company. It is what the
+            # Closures tile opens, because that tile counts the same population —
+            # a Regional Head read 367 closures against a list of 270 otherwise.
+            # The list still defaults to their own desk: this is a view they choose,
+            # not what "My Bookings" means. In the CP module it does nothing, since
+            # that list is the partner pool by design.
+            if (request.query_params.get('scope') == 'visible'
+                    and request.query_params.get('cp_only') != 'true'
+                    and _sees_all_company(request.user, request)):
+                mine_q = Q()
             # The CP pool belongs to My Bookings only in the CP module, so this reads
             # the explicit flag rather than the viewer's designation: a CP manager
             # looking at Sales My Bookings should see their own and their team's work,
@@ -5398,6 +5418,13 @@ def _stats_company_id(request, company_id):
     if company_id and is_platform_admin(request.user):
         return company_id
     return getattr(request.user, 'company_id', None)
+
+
+def _closures_with_a_booking(company_id):
+    """The closures a company's bookings point at. A closure in this set has a
+    booking to follow; one outside it has only its lead."""
+    return {c for c in Booking.objects.filter(company_id=company_id)
+            .values_list('closure_id', flat=True) if c}
 
 
 def _closure_books(company_id):

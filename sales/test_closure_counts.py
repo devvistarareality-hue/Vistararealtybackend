@@ -400,3 +400,61 @@ class WhenAccountsRejects(TestCase):
             self.assertEqual(len(rows), expected, f'the {tab} tab')
         waiting = api.get('/api/sales/bookings/?status=sold&accounts_status=pending&source=sales').json()
         self.assertEqual(len(waiting), 0, 'no longer waiting on Accounts')
+
+
+class TheClosuresTileOpensAListThatMatchesIt(TestCase):
+    """A manager's dashboard counts everything they can see; My Bookings is their
+    own desk. The tile therefore opens the list on `scope=visible`, or a Regional
+    Head reads 367 closures and lands on 270.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='SCP', name='Scope Co')
+        self.p = Project.objects.create(company=self.co, name='Tundav')
+        self.head = User.objects.create_user('h@scp.com', company=self.co, user_code='SC-H',
+                                             password='x', name='Head', role='Manager',
+                                             modules=['Sales'])
+        self.mine = User.objects.create_user('m@scp.com', company=self.co, user_code='SC-M',
+                                             password='x', name='Mine', role='Employee',
+                                             modules=['Sales'], reporting_manager=self.head)
+        self.theirs = User.objects.create_user('t@scp.com', company=self.co, user_code='SC-T',
+                                               password='x', name='Theirs', role='Employee',
+                                               modules=['Sales'])
+        self.n = 0
+        for owner in (self.mine, self.theirs):
+            self._deal(owner)
+
+    def _deal(self, owner):
+        self.n += 1
+        lead = Lead.objects.create(company=self.co, project=self.p, name=f'C{self.n}',
+                                   phone=f'96666000{self.n:02d}', stm=owner)
+        closure = Closure.objects.create(company=self.co, project=self.p, lead=lead,
+                                         stm=owner, closure_date=date(2026, 8, 1))
+        Booking.objects.create(company=self.co, project=self.p, lead=lead, stm=owner,
+                               client_name=f'C{self.n}', phone=lead.phone,
+                               plot_numbers=f'J-{self.n}', closure=closure, status='sold',
+                               approval_status='APPROVED', booking_date=date(2026, 8, 1))
+
+    def _api(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.head.pk))
+        return api
+
+    def _approved(self, query):
+        rows = self._api().get(f'/api/sales/bookings/?mine=1&source=sales{query}').json()
+        return len([b for b in rows if b['status'] == 'sold'])
+
+    def test_the_tile_matches_the_wider_view_and_not_the_default(self):
+        cache.clear()
+        tile = self._api().get('/api/sales/stats/').json()['closures']
+        self.assertEqual(tile, 2, 'a manager sees the company')
+        self.assertEqual(self._approved(''), 1, "My Bookings is still the head's own desk")
+        self.assertEqual(self._approved('&scope=visible'), tile,
+                         'and the view the tile opens holds exactly what it counted')
+
+    def test_the_wider_view_is_no_wider_than_the_person_may_see(self):
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.mine.pk))
+        rows = api.get('/api/sales/bookings/?mine=1&source=sales&scope=visible').json()
+        self.assertEqual(len(rows), 1, 'an employee sees their own work either way')
