@@ -261,6 +261,31 @@ def _visible_user_ids(user):
     return ids
 
 
+def _cp_desk_ids(user):
+    """Whose bookings the Channel Partner module shows this person: their own, and
+    those of everyone under them in the reporting tree who works Channel Partner
+    (holds the module, or a CP designation). A Sales STM under the same head who
+    closed a partner-sourced lead stays in Sales. Applies to admins too — the CP
+    module is the viewer's own partner desk, not the company's."""
+    ids = _visible_user_ids(user)
+    desk = {user.id}
+    for u in User.objects.filter(id__in=ids).only(
+            'id', 'modules', 'manager_modules', 'admin_modules', 'designation', 'role'):
+        held = (u.modules or []) + (u.manager_modules or []) + (u.admin_modules or [])
+        if CP_MODULE in held or is_cp_designated(u):
+            desk.add(u.id)
+    return desk
+
+
+def _cp_desk_closure_q(company_id, desk_ids):
+    """Closures belonging to a CP desk, read the way My Bookings reads them: by the
+    owner of the booking that stands, and for a closure with no booking, by its own
+    STM or referrer."""
+    return Q(id__in=_closures_booked_by(company_id, desk_ids)) | (
+        ~Q(id__in=_closures_with_a_booking(company_id))
+        & (Q(stm__in=desk_ids) | Q(referred_by_telecaller__in=desk_ids)))
+
+
 def _is_hard_admin(user):
     """A real company/platform administrator, as opposed to someone who merely reaches
     company-wide visibility through the org tree (a top-of-tree department head) or the
@@ -800,25 +825,12 @@ class StatsView(APIView):
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
         _not_sold, _awaiting_accounts, _cp_cl = _closure_books(_stats_company_id(request, company_id))
-        # The partner desk also closes deals that did not come from a partner. Those
-        # belong to the Sales book and are not in `closures`, but the people reading
-        # this dashboard did the work, so the Closures tile says how many there are
-        # rather than leaving the difference against their own My Bookings
-        # unexplained. Own and team only — this is their desk, not the company's.
-        if cp_only:
-            # Whose work it is, read off the booking that stands, so this figure
-            # holds exactly the deals the same person's My Bookings shows. A
-            # closure with no booking has none to read and falls back to its own.
-            _co_id = _stats_company_id(request, company_id)
-            _desk = Q(id__in=_closures_booked_by(_co_id, own_ids)) | (
-                ~Q(id__in=_closures_with_a_booking(_co_id))
-                & (Q(stm__in=own_ids) | Q(referred_by_telecaller__in=own_ids)))
-        _cl_desk = cl_qs.exclude(_cp_cl).filter(_desk) if cp_only else None
-        cl_other = _cl_desk.exclude(id__in=_not_sold) if cp_only else None
-        cl_other_waiting = _cl_desk.filter(id__in=_awaiting_accounts) if cp_only else None
         if cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
-            cl_qs = cl_qs.filter(_cp_cl).distinct()
+            # Strictly the partner book, and only this person's partner desk — the
+            # same deals the CP module's My Bookings lists (see _cp_desk_ids).
+            cl_qs = cl_qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
         else:
             # Same ownership exception as leads_qs above.
             sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
@@ -850,16 +862,10 @@ class StatsView(APIView):
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
             cl_waiting = cl_waiting.filter(closure_date__gte=date_from)
-            if cl_other is not None:
-                cl_other = cl_other.filter(closure_date__gte=date_from)
-                cl_other_waiting = cl_other_waiting.filter(closure_date__gte=date_from)
         if date_to:
             sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
             cl_waiting = cl_waiting.filter(closure_date__lte=date_to)
-            if cl_other is not None:
-                cl_other = cl_other.filter(closure_date__lte=date_to)
-                cl_other_waiting = cl_other_waiting.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
         # same way it does to everything else. Scoped by assignee exactly as the
@@ -922,9 +928,6 @@ class StatsView(APIView):
             active_projects_qs.count(),
         )
         accounts_pending = cl_waiting.filter(**cl_filter).count()
-        closures_other_source = cl_other.filter(**cl_filter).count() if cl_other is not None else 0
-        accounts_pending_other_source = (cl_other_waiting.filter(**cl_filter).count()
-                                         if cl_other_waiting is not None else 0)
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
         sv_warm_count = sv_scoped.filter(outcome='warm').count()
@@ -977,11 +980,6 @@ class StatsView(APIView):
             # Closed, approved by Sales or CP, waiting at the Accounts gate. These
             # are not in `closures` yet — they join it when Accounts signs off.
             'accounts_pending':   accounts_pending,
-            # Channel Partner only: what this desk closed from other sources. Those
-            # belong to the Sales book, so they are NOT part of `closures` — the
-            # tile names them so the two figures are not mistaken for one.
-            'closures_other_source': closures_other_source,
-            'accounts_pending_other_source': accounts_pending_other_source,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
             'active_projects':    active_projects,
@@ -1086,7 +1084,8 @@ class StatsTrendView(APIView):
         # The same two books the tile above splits into, or the chart contradicts it.
         _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
-            cl_qs = cl_qs.filter(_cp_cl).distinct()
+            cl_qs = cl_qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
         else:
             _own = _visible_user_ids(request.user)
             cl_qs = cl_qs.exclude(_cp_cl & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
@@ -2745,8 +2744,10 @@ class ClosureListView(APIView):
             qs = qs.filter(company_id=cid)
         _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, cid))
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            # The Channel Partner book — see _closure_books for what counts as one.
-            qs = qs.filter(_cp_cl).distinct()
+            # The Channel Partner book — see _closure_books for what counts as one —
+            # and only this person's partner desk (see _cp_desk_ids).
+            qs = qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, cid), _cp_desk_ids(request.user))).distinct()
         else:
             # The Sales module's book. A partner-sourced closure belongs to Channel
             # Partner, with the same handed-off exception the dashboard makes: a CP
@@ -4760,8 +4761,8 @@ class BookingListCreateView(APIView):
         # Two screens, two questions, and conflating them is what made this drift.
         #
         #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
-        #   reporting tree, and in the CP module the CP pool as well, since that is
-        #   the business the module exists to track.
+        #   reporting tree; in the CP module, strictly partner-sourced deals by me
+        #   and the Channel Partner people under me (see _cp_desk_ids).
         #
         #   otherwise — "Approvals": what I am named to decide, and nothing else.
         #   Deliberately NOT widened to my own work: a booking I made but cannot
@@ -4775,17 +4776,18 @@ class BookingListCreateView(APIView):
             # a Regional Head read 367 closures against a list of 270 otherwise.
             # The list still defaults to their own desk: this is a view they choose,
             # not what "My Bookings" means. In the CP module it does nothing, since
-            # that list is the partner pool by design.
+            # that list is always the viewer's own partner desk.
             if (request.query_params.get('scope') == 'visible'
                     and request.query_params.get('cp_only') != 'true'
                     and _sees_all_company(request.user, request)):
                 mine_q = Q()
-            # The CP pool belongs to My Bookings only in the CP module, so this reads
-            # the explicit flag rather than the viewer's designation: a CP manager
-            # looking at Sales My Bookings should see their own and their team's work,
-            # not every partner-sourced deal in the company.
+            # The CP module's My Bookings is strictly partner-sourced, and only this
+            # person's partner desk — not every partner deal in the company, and not
+            # a Sales STM's partner-sourced sale. It reads the explicit flag rather
+            # than the viewer's designation, so a CP manager looking at Sales My
+            # Bookings still sees their own and their team's work there.
             if request.query_params.get('cp_only') == 'true':
-                mine_q |= is_cp_booking_q
+                mine_q = Q(stm_id__in=_cp_desk_ids(request.user)) & is_cp_booking_q
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
