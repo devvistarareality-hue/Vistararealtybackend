@@ -308,6 +308,37 @@ class AccountsHasTheLastWord(TestCase):
         self.assertEqual(d['closures_other_source'], 2)
         self.assertEqual(d['accounts_pending_other_source'], 1)
 
+    def test_a_deal_revised_into_someone_elses_name_leaves_the_desk(self):
+        """The figure reads the booking that stands, so a deal revised away from
+        this desk goes with it — otherwise the tiles add up to one more than the
+        list, which is how 25 + 36 came to face a My Bookings of 60."""
+        cache.clear()
+        cp_head = User.objects.create_user('r@acc.com', company=self.co, user_code='AC-R',
+                                           password='x', name='Head', role='Manager',
+                                           designation='CP CLUSTER HEAD',
+                                           modules=['Channel Partner'])
+        self.stm.reporting_manager = cp_head
+        self.stm.save(update_fields=['reporting_manager'])
+        outsider = User.objects.create_user('o@acc.com', company=self.co, user_code='AC-O',
+                                            password='x', name='Outsider', role='Employee',
+                                            modules=['Sales'])
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=cp_head.pk))
+        before = api.get('/api/sales/stats/?cp_only=true').json()['closures_other_source']
+
+        # His man's deal is revised, and the revision is booked by someone else.
+        deal = Booking.objects.filter(stm=self.stm, lead__source__isnull=True,
+                                      accounts_status='approved').first()
+        Booking.objects.create(company=self.co, project=self.p, lead=deal.lead, stm=outsider,
+                               client_name=deal.client_name, phone=deal.phone,
+                               plot_numbers=deal.plot_numbers, closure=deal.closure,
+                               revision_no=1, status='sold', approval_status='APPROVED',
+                               accounts_status=deal.accounts_status,
+                               booking_date=date(2026, 8, 1))
+        cache.clear()
+        after = api.get('/api/sales/stats/?cp_only=true').json()['closures_other_source']
+        self.assertEqual(after, before - 1, 'the closure follows the booking that stands')
+
     def test_the_other_source_figures_are_channel_partner_only(self):
         cache.clear()
         d = self._api().get('/api/sales/stats/').json()

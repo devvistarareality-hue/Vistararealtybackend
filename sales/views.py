@@ -805,8 +805,15 @@ class StatsView(APIView):
         # this dashboard did the work, so the Closures tile says how many there are
         # rather than leaving the difference against their own My Bookings
         # unexplained. Own and team only — this is their desk, not the company's.
-        _cl_desk = (cl_qs.exclude(_cp_cl)
-                    .filter(Q(stm__in=own_ids) | Q(referred_by_telecaller__in=own_ids))) if cp_only else None
+        if cp_only:
+            # Whose work it is, read off the booking that stands, so this figure
+            # holds exactly the deals the same person's My Bookings shows. A
+            # closure with no booking has none to read and falls back to its own.
+            _co_id = _stats_company_id(request, company_id)
+            _desk = Q(id__in=_closures_booked_by(_co_id, own_ids)) | (
+                ~Q(id__in=_closures_with_a_booking(_co_id))
+                & (Q(stm__in=own_ids) | Q(referred_by_telecaller__in=own_ids)))
+        _cl_desk = cl_qs.exclude(_cp_cl).filter(_desk) if cp_only else None
         cl_other = _cl_desk.exclude(id__in=_not_sold) if cp_only else None
         cl_other_waiting = _cl_desk.filter(id__in=_awaiting_accounts) if cp_only else None
         if cp_only:
@@ -5424,6 +5431,21 @@ def _closures_with_a_booking(company_id):
     """The closures a company's bookings point at. A closure in this set has a
     booking to follow; one outside it has only its lead."""
     return {c for c in Booking.objects.filter(company_id=company_id)
+            .values_list('closure_id', flat=True) if c}
+
+
+def _closures_booked_by(company_id, user_ids):
+    """Closures whose standing booking belongs to one of these people.
+
+    My Bookings lists by the booking's owner, so a figure that has to agree with
+    it has to read the same thing. A superseded booking does not count: a deal
+    revised into someone else's name is theirs now, and the closure goes with it.
+    That one deal is why a CP cluster head's tiles read 25 + 36 against a list of
+    60.
+    """
+    scope = Booking.objects.filter(company_id=company_id)
+    return {c for c in scope.filter(stm_id__in=user_ids)
+            .exclude(id__in=_superseded_booking_ids(scope))
             .values_list('closure_id', flat=True) if c}
 
 
