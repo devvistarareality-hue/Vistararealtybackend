@@ -94,7 +94,7 @@ class EveryScreenTests(TestCase):
                 f'{code.lower()}@s.com', company=self.co, user_code=code, password='x',
                 name=name, role='Manager', designation=name,
                 modules=['Sales', 'AR', 'Club 1000', 'Accounts & Finance', 'HR',
-                         'Execution', 'Purchase', 'Land'])
+                         'Task Allocation', 'Purchase', 'Land'])
         return desig, user
 
     def test_every_screen_can_be_shown_and_hidden(self):

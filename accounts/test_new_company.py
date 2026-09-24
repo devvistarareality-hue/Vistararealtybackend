@@ -154,7 +154,7 @@ class NewCompanyWalkthrough(TestCase):
             if row['module']:
                 by_module.setdefault(row['module'], set()).add(row['role'])
         for module in ('Sales', 'Channel Partner', 'AR', 'Accounts & Finance', 'Club 1000',
-                       'HR', 'Execution', 'Purchase', 'Land'):
+                       'HR', 'Task Allocation', 'Purchase', 'Land'):
             self.assertIn(module, by_module, module)
         # AR's one dashboard is offered to every role.
         self.assertEqual(by_module['AR'], set(DASHBOARD_ROLES))

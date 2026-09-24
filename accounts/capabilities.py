@@ -80,8 +80,11 @@ SCREENS = [
     ('accounts.screen.bookings', 'Bookings', 'Accounts & Finance'),
     ('hr.screen.dashboard', 'Dashboard', 'HR'),
     ('hr.screen.myteam', 'My Team', 'HR'),
-    ('execution.screen.dashboard', 'Dashboard', 'Execution'),
-    ('execution.screen.myteam', 'My Team', 'Execution'),
+    ('execution.screen.dashboard', 'Dashboard', 'Task Allocation'),
+    ('execution.screen.board', 'Board', 'Task Allocation'),
+    ('execution.screen.list', 'List', 'Task Allocation'),
+    ('execution.screen.lists', 'Task Lists', 'Task Allocation'),
+    ('execution.screen.myteam', 'My Team', 'Task Allocation'),
     ('purchase.screen.dashboard', 'Dashboard', 'Purchase'),
     ('purchase.screen.myteam', 'My Team', 'Purchase'),
     ('land.screen.dashboard', 'Dashboard', 'Land'),
@@ -157,7 +160,7 @@ _SHARED_DASHBOARDS = [
     ('ar', 'AR', 'the receivables book'),
     ('accounts', 'Accounts & Finance', 'the approvals desk'),
     ('hr', 'HR', 'the department'),
-    ('execution', 'Execution', 'the site desk'),
+    ('execution', 'Task Allocation', 'the site desk'),
     ('purchase', 'Purchase', 'the buying desk'),
     ('land', 'Land', 'the land desk'),
 ]
@@ -232,7 +235,7 @@ MODULE_FAMILY = {
 # Every module the system knows, in the order the launcher shows them. Mirrors
 # ALL_MODULES in the web app's lib/moduleAccess.js.
 ALL_MODULES = ['Sales', 'Channel Partner', 'HR', 'Accounts & Finance', 'AR',
-               'Execution', 'Purchase', 'Land', 'Club 1000']
+               'Task Allocation', 'Purchase', 'Land', 'Club 1000']
 
 
 def modules_of(module):
