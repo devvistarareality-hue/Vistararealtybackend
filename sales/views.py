@@ -4758,8 +4758,8 @@ class BookingListCreateView(APIView):
         # Two screens, two questions, and conflating them is what made this drift.
         #
         #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
-        #   reporting tree; in the CP module, strictly partner-sourced deals by me
-        #   and everyone under me (see _cp_desk_ids).
+        #   reporting tree; in the CP module, the partner book I answer for (see
+        #   _cp_desk_ids) plus my own bookings from any source.
         #
         #   otherwise — "Approvals": what I am named to decide, and nothing else.
         #   Deliberately NOT widened to my own work: a booking I made but cannot
@@ -4783,8 +4783,12 @@ class BookingListCreateView(APIView):
             # than the viewer's designation, so a CP manager looking at Sales My
             # Bookings still sees their own and their team's work there.
             if request.query_params.get('cp_only') == 'true':
+                # Plus my own bookings from any other source — my own work is listed
+                # wherever I look for it (my team's non-partner work stays in Sales).
+                # One filter, so a booking that qualifies both ways is listed once.
                 _desk = _cp_desk_ids(request.user)
-                mine_q = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
+                cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
+                mine_q = cp_part | Q(stm_id=request.user.id)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
