@@ -54,6 +54,7 @@ SCREENS = [
     ('sales.screen.followups', 'Follow-Ups', 'Sales'),
     ('sales.screen.sitevisits', 'Site Visits', 'Sales'),
     ('sales.screen.booking', 'Booking', 'Sales'),
+    ('sales.screen.conversions', 'My Conversions', 'Sales'),
     ('sales.screen.myteam', 'My Team', 'Sales'),
     ('sales.screen.approvals', 'Approvals', 'Sales'),
     ('sales.screen.import', 'Import Leads', 'Sales'),
@@ -113,7 +114,7 @@ SCREEN_MODULE = {k: m for k, _, m in SCREENS}
 # those people see today.
 PRESET_SCREENS = {
     'telecaller': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
-                   'sales.screen.import', 'sales.screen.reports'],
+                   'sales.screen.conversions', 'sales.screen.import', 'sales.screen.reports'],
     'stm': ['sales.screen.dashboard', 'sales.screen.leads', 'sales.screen.followups',
             'sales.screen.sitevisits', 'sales.screen.booking', 'sales.screen.import', 'sales.screen.reports'],
     'cp_executive': ['cp.screen.dashboard', 'cp.screen.leads', 'cp.screen.sitevisits',
