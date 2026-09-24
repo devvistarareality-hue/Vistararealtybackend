@@ -262,19 +262,11 @@ def _visible_user_ids(user):
 
 
 def _cp_desk_ids(user):
-    """Whose bookings the Channel Partner module shows this person: their own, and
-    those of everyone under them in the reporting tree who works Channel Partner
-    (holds the module, or a CP designation). A Sales STM under the same head who
-    closed a partner-sourced lead stays in Sales. Applies to admins too — the CP
-    module is the viewer's own partner desk, not the company's."""
-    ids = _visible_user_ids(user)
-    desk = {user.id}
-    for u in User.objects.filter(id__in=ids).only(
-            'id', 'modules', 'manager_modules', 'admin_modules', 'designation', 'role'):
-        held = (u.modules or []) + (u.manager_modules or []) + (u.admin_modules or [])
-        if CP_MODULE in held or is_cp_designated(u):
-            desk.add(u.id)
-    return desk
+    """Whose partner-sourced bookings the Channel Partner module shows this person:
+    their own and everyone's under them in the reporting tree, whatever module that
+    person works. Applies to admins too — the CP module is the viewer's own desk,
+    not the company's."""
+    return _visible_user_ids(user)
 
 
 def _cp_desk_closure_q(company_id, desk_ids):
@@ -4762,7 +4754,7 @@ class BookingListCreateView(APIView):
         #
         #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
         #   reporting tree; in the CP module, strictly partner-sourced deals by me
-        #   and the Channel Partner people under me (see _cp_desk_ids).
+        #   and everyone under me (see _cp_desk_ids).
         #
         #   otherwise — "Approvals": what I am named to decide, and nothing else.
         #   Deliberately NOT widened to my own work: a booking I made but cannot
@@ -4782,8 +4774,7 @@ class BookingListCreateView(APIView):
                     and _sees_all_company(request.user, request)):
                 mine_q = Q()
             # The CP module's My Bookings is strictly partner-sourced, and only this
-            # person's partner desk — not every partner deal in the company, and not
-            # a Sales STM's partner-sourced sale. It reads the explicit flag rather
+            # person's reporting tree — not every partner deal in the company. It reads the explicit flag rather
             # than the viewer's designation, so a CP manager looking at Sales My
             # Bookings still sees their own and their team's work there.
             if request.query_params.get('cp_only') == 'true':
