@@ -4794,7 +4794,18 @@ class BookingListCreateView(APIView):
                     | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
                 )
             elif not _sees_all_company(request.user, request, include_manager_role=False):
-                qs = qs.filter(stm_id__in=own_and_team)
+                # `to_decide` is the Approvals screen asking its own question: what
+                # am I named to rule on? Named on no project, that is nothing. It
+                # used to fall back to the viewer's own work, which put a Cluster
+                # Head's 44 own sales on the screen where verdicts are given, with
+                # Cancel and Revise offered on each — Cancel the server then refused.
+                # They are on My Bookings, and still are.
+                #
+                # Everything else this endpoint serves — the Drafts a rep is still
+                # writing, the search the Revise form runs — is their own work, and
+                # comes back as before. Real admins are exempt above.
+                qs = (qs.none() if request.query_params.get('to_decide') == '1'
+                      else qs.filter(stm_id__in=own_and_team))
             if cp_scoped:
                 # The CP module's approvals are the CP pool, full stop. Reuse
                 # is_cp_booking_q rather than cp_lead_q alone: a Sales-module booking
