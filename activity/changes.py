@@ -20,7 +20,7 @@ SKIP_FIELDS = {
 }
 SKIP_MODELS = {'activitylog', 'notification', 'session', 'logentry', 'arreceiptaudit', 'userlocation',
                'otp', 'outstandingtoken', 'blacklistedtoken'}
-TRACKED_APPS = {'sales', 'club1000', 'receivables', 'attendance', 'accounts', 'companies'}
+TRACKED_APPS = {'sales', 'club1000', 'receivables', 'attendance', 'accounts', 'companies', 'tasks'}
 
 # Model → the target_type the log uses (matches the URL-based names).
 TYPE_OF = {

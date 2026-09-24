@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'club1000',
     'receivables',
     'activity',
+    'tasks',
 ]
 
 MIDDLEWARE = [
