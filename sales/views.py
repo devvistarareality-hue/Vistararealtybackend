@@ -262,17 +262,22 @@ def _visible_user_ids(user):
 
 
 def _cp_desk_ids(user):
-    """Whose partner-sourced bookings the Channel Partner module shows this person:
-    their own and everyone's under them in the reporting tree, whatever module that
-    person works. Applies to admins too — the CP module is the viewer's own desk,
-    not the company's."""
+    """Whose partner-sourced bookings the Channel Partner module shows this person,
+    or None for all of them. A CP head (CP-designation manager, or anyone who sees
+    the whole company) sees every partner-sourced deal, whoever booked it — so a
+    CP Cluster Head and the CMO above him read the same figure. Everyone else sees
+    their own and their reporting tree's."""
+    if is_cp_manager(user) or _sees_all_company(user):
+        return None
     return _visible_user_ids(user)
 
 
 def _cp_desk_closure_q(company_id, desk_ids):
     """Closures belonging to a CP desk, read the way My Bookings reads them: by the
     owner of the booking that stands, and for a closure with no booking, by its own
-    STM or referrer."""
+    STM or referrer. desk_ids None means the whole partner book."""
+    if desk_ids is None:
+        return Q()
     return Q(id__in=_closures_booked_by(company_id, desk_ids)) | (
         ~Q(id__in=_closures_with_a_booking(company_id))
         & (Q(stm__in=desk_ids) | Q(referred_by_telecaller__in=desk_ids)))
@@ -4778,7 +4783,8 @@ class BookingListCreateView(APIView):
             # than the viewer's designation, so a CP manager looking at Sales My
             # Bookings still sees their own and their team's work there.
             if request.query_params.get('cp_only') == 'true':
-                mine_q = Q(stm_id__in=_cp_desk_ids(request.user)) & is_cp_booking_q
+                _desk = _cp_desk_ids(request.user)
+                mine_q = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
