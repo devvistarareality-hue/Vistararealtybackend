@@ -7735,11 +7735,17 @@ class CompanyResetView(APIView):
         if err:
             return err
 
+        # `check_only` asks "would the key and confirmation be accepted?" and
+        # changes nothing — so the page can refuse a wrong key before it spends
+        # minutes taking a backup. It skips only the backup gate, which the page
+        # is about to satisfy.
+        check_only = str(request.data.get('check_only') or '').lower() in ('1', 'true')
+
         # 1. A backup has to exist, and be this company's, and be recent. The
         #    server records it when the workbook is built — a click in the
         #    browser is not evidence that anything was downloaded.
-        stamp = self._covering_backup(company)
-        if not stamp:
+        stamp = None if check_only else self._covering_backup(company)
+        if not check_only and not stamp:
             return Response(
                 {'detail': "Download this company's Excel backup first. A reset is only "
                            'allowed within 2 hours of taking one.'},
@@ -7763,6 +7769,8 @@ class CompanyResetView(APIView):
         # 3. And say it out loud.
         if str(request.data.get('confirm') or '').strip() != 'DELETE':
             return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        if check_only:
+            return Response({'ok': True})
 
         from .backup_excel import reset_company
         deleted = reset_company(company, keep_user_id=request.user.id)

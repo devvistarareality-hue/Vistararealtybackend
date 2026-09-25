@@ -138,8 +138,11 @@ class CompanyDetailView(APIView):
         if company.id == getattr(request.user, 'company_id', None):
             return Response({'detail': 'You cannot delete the company you are signed in under.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # `check_only` validates the key and code and changes nothing, so the page
+        # can refuse a wrong key before it spends minutes taking a backup.
+        check_only = str(request.data.get('check_only') or '').lower() in ('1', 'true')
         # 2. A recent full backup, the same rule a reset uses.
-        if not CompanyResetView()._covering_backup(company):
+        if not check_only and not CompanyResetView()._covering_backup(company):
             return Response(
                 {'detail': "Take this company's backup first. Deleting is only allowed within "
                            '2 hours of a full backup.'},
@@ -160,6 +163,8 @@ class CompanyDetailView(APIView):
         if str(request.data.get('confirm') or '').strip().upper() != company.code.upper():
             return Response({'detail': f'Type the company code ({company.code}) to confirm.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        if check_only:
+            return Response({'ok': True})
 
         logging.getLogger(__name__).warning('Company %s (%s) deleted by user %s',
                                             company.id, company.code, request.user.id)

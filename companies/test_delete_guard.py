@@ -67,3 +67,10 @@ class DeleteCompanyGuardTests(APITestCase):
         self.assertEqual(r.status_code, 204)
         self.assertFalse(Company.objects.filter(pk=self.target.pk).exists())
         self.assertFalse(Lead.objects.filter(name='A lead').exists())
+
+    def test_check_only_validates_without_a_backup_and_deletes_nothing(self):
+        bad = self._delete(self.target, reset_key='nope', confirm='GONE', check_only=True)
+        self.assertEqual(bad.status_code, 403)
+        ok = self._delete(self.target, reset_key='the-key', confirm='GONE', check_only=True)
+        self.assertEqual(ok.status_code, 200)
+        self.assertTrue(Company.objects.filter(pk=self.target.pk).exists())
