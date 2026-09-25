@@ -72,3 +72,16 @@ class SvScheduledTileTests(APITestCase):
         n = listed.get('count') if isinstance(listed, dict) else len(listed)
         self.assertEqual(tile, 1)
         self.assertEqual(tile, n)
+
+    def test_trend_charts_load_for_every_role(self):
+        # The chart endpoint referenced cp_only without defining it, so it 500'd for
+        # everyone and every Sales dashboard's charts sat empty.
+        cp = User.objects.create(email='cp@svt.com', company=self.co, role='Employee',
+                                 designation='CP Executive', modules=['Channel Partner'], user_code='C1')
+        tc = User.objects.create(email='tc2@svt.com', company=self.co, role='Employee',
+                                 designation='Telecaller', modules=['Sales'], user_code='T2')
+        for who in (self.stm, cp, tc):
+            self.client.force_authenticate(who)
+            r = self.client.get('/api/sales/stats/trend/')
+            self.assertEqual(r.status_code, 200, who.designation)
+            self.assertIn('mql', r.data)
