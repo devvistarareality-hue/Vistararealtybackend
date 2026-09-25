@@ -61,6 +61,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     session_token_app = models.UUIDField(default=uuid.uuid4)
     session_token_web = models.UUIDField(default=uuid.uuid4)
 
+    # Not a column: set per-request by SessionJWTAuthentication to the id of the
+    # platform admin viewing the app as this user, or left None. Declared here so
+    # `user.impersonator_id` reads the same whether the instance came from a
+    # request or a query.
+    impersonator_id = None
+
     objects = UserManager()
 
     def save(self, *args, **kwargs):

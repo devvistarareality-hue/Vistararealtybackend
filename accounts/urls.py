@@ -7,6 +7,7 @@ from .views import (
     NotificationTestView, NotificationListView, NotificationReadView,
     SessionTokenRefreshView,
     VerifyOtpView, ResendOtpView,
+    ImpersonateView,
 )
 
 urlpatterns = [
@@ -15,6 +16,7 @@ urlpatterns = [
     path('otp/resend/',               ResendOtpView.as_view(),            name='otp-resend'),
     path('token/refresh/',            SessionTokenRefreshView.as_view(),  name='token-refresh'),
     path('me/',                       MeView.as_view(),                   name='me'),
+    path('impersonate/',              ImpersonateView.as_view(),          name='impersonate'),
     path('change-password/',          ChangePasswordView.as_view(),       name='change-password'),
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),
     path('users/<int:pk>/',           UserDetailView.as_view(),            name='user-detail'),

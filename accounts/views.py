@@ -20,6 +20,7 @@ from .serializers import (
     DesignationSerializer,
 )
 from .tokens import SessionRefreshToken
+from activity.recorder import note
 
 VRL_CODE = 'VRL'
 
@@ -47,8 +48,9 @@ def is_platform_admin(user):
     )
 
 
-def get_tokens_for_user(user, platform='app'):
-    refresh = SessionRefreshToken.for_user(user, platform=platform)
+def get_tokens_for_user(user, platform='app', impersonator=None):
+    refresh = SessionRefreshToken.for_user(user, platform=platform,
+                                           impersonator=impersonator)
     return {
         'refresh': str(refresh),
         'access':  str(refresh.access_token),
@@ -122,7 +124,92 @@ class MeView(APIView):
 
     def get(self, request):
         user = User.objects.select_related('company', 'reporting_manager').get(pk=request.user.pk)
-        return Response(UserSerializer(user).data)
+        data = UserSerializer(user).data
+        # So a page reload keeps showing "viewing as …" instead of silently
+        # looking like an ordinary session.
+        data['impersonated_by'] = _impersonator_of(request.user)
+        return Response(data)
+
+
+def _impersonator_of(user):
+    """{id, name} of the admin viewing the app as this user, or None."""
+    actor_id = getattr(user, 'impersonator_id', None)
+    if not actor_id:
+        return None
+    actor = User.objects.filter(pk=actor_id).only('id', 'name', 'user_code').first()
+    if not actor:
+        return None
+    return {'id': actor.id, 'name': actor.name, 'user_code': actor.user_code}
+
+
+class ImpersonateView(APIView):
+    """Open a session as another user, for a platform admin only.
+
+    This replaces the shared master password that used to be checked in
+    LoginView. That password let anyone holding one string sign in as anybody,
+    left no record of who had used it, and could not be taken away from one
+    person without changing it for everyone. This does the same job — see the
+    app exactly as a user sees it, to reproduce what they are reporting —
+    without any of that: the admin authenticates as themselves first (OTP
+    included), only they can reach this endpoint, the issued token names them in
+    an `impersonator` claim that survives refresh, and the activity log records
+    the switch.
+
+    No OTP is sent to the target: the person at the keyboard has already proven
+    who *they* are, and the target's own credentials are neither used nor needed.
+    Their password is not read, not changed, and not revealed. The target's
+    session token is reused rather than rotated, so opening this does not sign
+    the real user out — and their next login rotates it, which ends the
+    impersonated session too.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Platform admins only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        # No chaining: an impersonated session must not be able to hop onward, or
+        # the `impersonator` claim would stop naming the person responsible.
+        if getattr(request.user, 'impersonator_id', None):
+            return Response({'detail': 'Already viewing as another user. Exit first.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            target_id = int(request.data.get('user_id'))
+        except (TypeError, ValueError):
+            return Response({'detail': 'user_id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        target = User.objects.select_related('company', 'reporting_manager').filter(
+            pk=target_id, is_active=True).first()
+        if not target:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if target.pk == request.user.pk:
+            return Response({'detail': 'That is already you.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # is_staff / is_superuser reach the Django admin, which is outside
+        # everything this app's permissions cover. Impersonation stays inside the app.
+        if target.is_staff or target.is_superuser:
+            return Response({'detail': 'Cannot view as a platform staff account.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        platform = request.data.get('platform') or 'web'
+        if platform not in ('web', 'app'):
+            platform = 'web'
+
+        tokens = get_tokens_for_user(target, platform=platform,
+                                     impersonator=request.user.pk)
+        note(request,
+             f'{request.user.name or request.user.user_code} signed in as '
+             f'{target.name or target.user_code} ({target.company.code if target.company else "—"})',
+             action='impersonate', target_type='User', target_id=str(target.pk),
+             module='Admin')
+        return Response({
+            'tokens': tokens,
+            'user': UserSerializer(target).data,
+            'impersonated_by': {'id': request.user.pk, 'name': request.user.name,
+                                'user_code': request.user.user_code},
+        }, status=status.HTTP_200_OK)
 
 
 class ChangePasswordView(APIView):

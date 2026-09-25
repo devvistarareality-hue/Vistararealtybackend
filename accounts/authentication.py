@@ -18,4 +18,8 @@ class SessionJWTAuthentication(JWTAuthentication):
                 'Session expired. Please log in again.',
                 code='session_expired',
             )
+        # Set by ImpersonateView only. Carried on the user instance so any view or
+        # the activity log can tell "this user" from "an admin acting as this user"
+        # without re-reading the token.
+        user.impersonator_id = validated_token.get('impersonator')
         return user
