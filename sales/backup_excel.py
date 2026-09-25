@@ -62,19 +62,31 @@ class Table:
 # closures before bookings (Booking.closure), leads before both.
 SHEETS = [
     ('Sales', [
+        # Restore writes these in this order, so it follows the pipeline: a lead,
+        # then its visits, then the closure that can name one, then the booking
+        # that names the closure.
         Table('Leads', 'sales.Lead', 'company', restorable=True),
+        Table('Site Visits', 'sales.SiteVisit', 'lead__company', restorable=True),
         Table('Closures', 'sales.Closure', 'company', restorable=True),
         Table('Bookings', 'sales.Booking', 'company', restorable=True),
         Table('Follow-Ups', 'sales.FollowUp', 'lead__company', restorable=True),
-        Table('Site Visits', 'sales.SiteVisit', 'lead__company', restorable=True),
         Table('Lead History', 'sales.LeadStatusHistory', 'lead__company', restorable=True),
         Table('Distribution Log', 'sales.DistributionLog', 'company', restorable=True),
         Table('Availability', 'sales.UserAvailability', 'user__company', restorable=True),
         Table('Notifications', 'accounts.Notification', 'recipient__company', restorable=True),
+        # Data Reset never names lead transfers, but LeadTransfer.lead is CASCADE,
+        # so wiping leads takes them with it — restorable or they are lost for good.
+        Table('Lead Transfers', 'sales.LeadTransfer', 'company', restorable=True),
         # Data Reset keeps these, so they are snapshot-only.
         Table('Lead Sources', 'sales.LeadSource', 'company'),
         Table('Projects', 'sales.Project', 'company'),
         Table('Plots', 'sales.Plot', 'project__company'),
+        Table('Project Assignments', 'sales.UserProjectAssignment', 'user__company'),
+        Table('Sales Team', 'sales.SalesTeamMember', 'user__company'),
+        Table('Distribution Settings', 'sales.DistributionSettings', 'company'),
+        Table('Distribution Weights', 'sales.UserDistributionWeight', 'user__company'),
+        Table('Meta Form Mappings', 'sales.MetaFormMapping', 'company'),
+        Table('Meta Webhook Config', 'sales.MetaWebhookConfig', 'company'),
     ]),
     ('Channel Partner', [
         Table('Channel Partners', 'sales.ChannelPartner', 'company'),
@@ -82,17 +94,21 @@ SHEETS = [
     ('HR', [
         Table('Users', 'accounts.User', 'company'),
         Table('Designations', 'accounts.Designation', 'company'),
+        Table('Role Dashboards', 'accounts.RoleDashboard', 'company'),
         Table('Attendance', 'attendance.AttendanceRecord', 'user__company'),
         Table('Leave Applications', 'attendance.LeaveApplication', 'user__company'),
         Table('Leave Balances', 'attendance.LeaveBalance', 'user__company'),
+        Table('Leave Transactions', 'attendance.LeaveTransaction', 'user__company'),
     ]),
     ('AR', [
         Table('AR Accounts', 'receivables.ARAccount', 'company'),
         Table('AR Receipts', 'receivables.ARReceipt', 'account__company'),
         Table('AR Follow-Ups', 'receivables.ARFollowUp', 'account__company'),
+        Table('AR Receipt Audit', 'receivables.ARReceiptAudit', 'receipt__account__company'),
     ]),
     ('Task Allocation', [
         Table('Task Lists', 'tasks.TaskList', 'company'),
+        Table('Task Tags', 'tasks.TaskTag', 'company'),
         Table('Tasks', 'tasks.Task', 'company'),
         Table('Task Checklist', 'tasks.TaskChecklistItem', 'task__company'),
         Table('Task Comments', 'tasks.TaskComment', 'task__company'),
@@ -105,6 +121,9 @@ SHEETS = [
         Table('Investors', 'club1000.Investor', 'company'),
         Table('Payouts', 'club1000.Payout', 'investor__company'),
         Table('Referral Rewards', 'club1000.ReferralReward', 'investor__company'),
+    ]),
+    ('Activity Log', [
+        Table('Activity Log', 'activity.ActivityLog', 'company'),
     ]),
 ]
 
