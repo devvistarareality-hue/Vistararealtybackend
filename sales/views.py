@@ -7557,14 +7557,16 @@ class BackupExcelView(APIView):
         company, err = _backup_company(request)
         if err:
             return err
-        from .backup_excel import build_workbook, reset_counts
+        from .backup_excel import build_workbook, pick_modules, reset_counts
+        modules = pick_modules([m for m in (request.query_params.get('modules') or '').split(',') if m.strip()])
         buf = BytesIO()
-        build_workbook(company).save(buf)
-        # Record that this company's backup was taken. A reset asks for one of
-        # these, and only the server can honestly say the workbook was built.
+        build_workbook(company, modules).save(buf)
+        # Record what this backup actually covered. A reset asks for one of
+        # these, and only the server can honestly say the workbook was built —
+        # or which modules went into it.
         from .models import BackupStamp
-        BackupStamp.objects.create(company=company, taken_by=request.user,
-                                   rows=sum(reset_counts(company).values()))
+        BackupStamp.objects.create(company=company, taken_by=request.user, modules=modules,
+                                   rows=sum(reset_counts(company, modules).values()))
         safe = re.sub(r'[^A-Za-z0-9]+', '-', company.name).strip('-') or 'company'
         resp = HttpResponse(
             buf.getvalue(),
@@ -7572,6 +7574,110 @@ class BackupExcelView(APIView):
         resp['Content-Disposition'] = (
             f'attachment; filename="{safe}-backup-{timezone.localdate().isoformat()}.xlsx"')
         return resp
+
+
+class BackupScheduleView(APIView):
+    """Per company: whether to take an Excel backup on a schedule, and the ones
+    already taken. The list is stored backups only — the on-demand ones stream
+    to the browser and are never kept."""
+    permission_classes = [IsAuthenticated]
+
+    def _payload(self, company):
+        from .backup_excel import MODULES
+        from .models import BackupSchedule, BackupStamp
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        stored = (BackupStamp.objects.filter(company=company).exclude(file_path='')
+                  .select_related('taken_by').order_by('-taken_at')[:20])
+        return {
+            'modules': MODULES,
+            'is_enabled': sched.is_enabled,
+            'frequency': sched.frequency,
+            'selected_modules': list(sched.modules or []),
+            'keep_last': sched.keep_last,
+            'updated_by': getattr(sched.updated_by, 'name', None),
+            'updated_at': sched.updated_at,
+            'history': [{
+                'id': b.id,
+                'taken_at': b.taken_at,
+                'rows': b.rows,
+                'size': b.file_size,
+                'modules': list(b.modules or []),
+                'by': 'Automatic' if b.automatic and not b.taken_by else getattr(b.taken_by, 'name', None),
+            } for b in stored],
+        }
+
+    def get(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        return Response(self._payload(company))
+
+    def patch(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_excel import pick_modules
+        from .models import BackupSchedule
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        if 'is_enabled' in request.data:
+            sched.is_enabled = bool(request.data['is_enabled'])
+        if request.data.get('frequency') in dict(BackupSchedule.FREQUENCY_CHOICES):
+            sched.frequency = request.data['frequency']
+        if 'modules' in request.data:
+            raw = request.data['modules'] or []
+            if isinstance(raw, str):
+                raw = [m for m in raw.split(',') if m.strip()]
+            # Empty means every module; anything else is pinned to real names.
+            sched.modules = [] if not raw else pick_modules([m.strip() for m in raw])
+        if str(request.data.get('keep_last') or '').isdigit():
+            sched.keep_last = max(1, min(50, int(request.data['keep_last'])))
+        sched.updated_by = request.user
+        sched.save()
+        return Response(self._payload(company))
+
+    def post(self, request):
+        """Take a stored backup now, on the schedule's terms."""
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_schedule import take
+        from .models import BackupSchedule
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        stamp = take(sched, triggered_by=request.user)
+        if not stamp:
+            return Response({'detail': 'Could not store the backup. Check the storage settings.'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response(self._payload(company), status=status.HTTP_201_CREATED)
+
+
+class BackupStoredDownloadView(APIView):
+    """A short-lived signed URL for one stored backup. The bucket is private, so
+    this is the only way to open it."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .models import BackupStamp
+        # Scoped to the company: an id from someone else's list is a 404, not a file.
+        stamp = BackupStamp.objects.filter(pk=pk, company=company).exclude(file_path='').first()
+        if not stamp:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from .backup_storage import signed_backup_url
+        url = signed_backup_url(stamp.file_path)
+        if not url:
+            return Response({'detail': 'Could not generate a download link.'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response({'url': url})
 
 
 class CompanyResetView(APIView):
@@ -7587,10 +7693,27 @@ class CompanyResetView(APIView):
     # workbook and read it, short enough that it is this data, not last week's.
     BACKUP_MAX_AGE = timedelta(hours=2)
 
-    def _recent_backup(self, company):
+    def _requested_modules(self, request):
+        raw = request.data.get('modules') or request.query_params.get('modules') or ''
+        if isinstance(raw, str):
+            raw = [m for m in raw.split(',') if m.strip()]
+        from .backup_excel import pick_modules
+        return pick_modules([m.strip() for m in raw])
+
+    def _covering_backup(self, company, needed):
+        """A recent backup that covers every module this reset would destroy.
+
+        Holding a backup of HR does not entitle anyone to wipe Sales, and
+        resetting HR destroys part of Sales anyway — so the test is coverage of
+        what will actually be lost, not of what was ticked.
+        """
         from .models import BackupStamp
         cutoff = timezone.now() - self.BACKUP_MAX_AGE
-        return BackupStamp.objects.filter(company=company, taken_at__gte=cutoff).first()
+        want = set(needed)
+        for stamp in BackupStamp.objects.filter(company=company, taken_at__gte=cutoff):
+            if want <= set(stamp.modules or []):
+                return stamp
+        return None
 
     def get(self, request):
         if not _may_back_up(request.user):
@@ -7598,14 +7721,20 @@ class CompanyResetView(APIView):
         company, err = _backup_company(request)
         if err:
             return err
-        from .backup_excel import reset_counts
-        stamp = self._recent_backup(company)
-        counts = reset_counts(company)
+        from .backup_excel import MODULES, cascade_modules, reset_counts
+        modules = self._requested_modules(request)
+        destroys = cascade_modules(modules)
+        stamp = self._covering_backup(company, destroys)
+        counts = reset_counts(company, modules)
         return Response({
             'company': company.name,
+            'modules': MODULES,
+            'selected': modules,
+            'destroys': destroys,          # includes what cascades out of the selection
             'counts': {k: v for k, v in counts.items() if v},
             'total': sum(counts.values()),
             'backup_taken_at': stamp.taken_at if stamp else None,
+            'backup_covers': list(stamp.modules) if stamp else [],
             'can_reset': bool(stamp),
             'key_configured': bool((os.getenv('DATA_RESET_KEY') or '').strip()),
         })
@@ -7620,11 +7749,16 @@ class CompanyResetView(APIView):
         # 1. A backup has to exist, and be this company's, and be recent. The
         #    server records it when the workbook is built — a click in the
         #    browser is not evidence that anything was downloaded.
-        stamp = self._recent_backup(company)
+        from .backup_excel import cascade_modules
+        modules = self._requested_modules(request)
+        destroys = cascade_modules(modules)
+        stamp = self._covering_backup(company, destroys)
         if not stamp:
             return Response(
-                {'detail': 'Download this company\'s Excel backup first. A reset is only '
-                           'allowed within 2 hours of taking one.'},
+                {'detail': 'Take a backup covering ' + ', '.join(destroys) + ' first. A reset '
+                           'is only allowed within 2 hours of a backup that covers everything '
+                           'it would delete.',
+                 'destroys': destroys},
                 status=status.HTTP_409_CONFLICT)
 
         # 2. The reset key lives in the server environment, so a signed-in admin
@@ -7647,7 +7781,7 @@ class CompanyResetView(APIView):
             return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
 
         from .backup_excel import reset_company
-        deleted = reset_company(company, keep_user_id=request.user.id)
+        deleted = reset_company(company, modules=modules, keep_user_id=request.user.id)
         logger.warning('Company %s reset by user %s: %s rows deleted',
                        company.id, request.user.id, sum(deleted.values()))
         return Response({

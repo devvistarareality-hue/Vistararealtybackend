@@ -127,11 +127,63 @@ SHEETS = [
     ]),
 ]
 
+# A sheet is a module: what you pick when backing up or resetting part of a company.
+MODULES = [name for name, _ in SHEETS]
+TABLES_BY_MODULE = {name: list(tables) for name, tables in SHEETS}
+MODULE_OF = {t.model: name for name, tables in SHEETS for t in tables}
+
 ALL_TABLES = [t for _, tables in SHEETS for t in tables]
 # Everything is restorable: the workbook has to be able to rebuild a company
 # from nothing, not just undo a Data Reset.
 RESTORABLE = ALL_TABLES
 ALL_LABELS = {t.label for t in ALL_TABLES}
+
+
+def pick_modules(modules):
+    """The requested modules, or all of them. Unknown names are dropped."""
+    if not modules:
+        return list(MODULES)
+    wanted = [m for m in MODULES if m in set(modules)]
+    return wanted or list(MODULES)
+
+
+# A child with one of these either dies with its parent or refuses to let the
+# parent go. Either way it has to be part of the reset, and part of the backup
+# that authorises it. SET_NULL children simply survive with an empty column.
+_PULLS_IN = {'CASCADE', 'PROTECT', 'RESTRICT'}
+
+
+def cascade_modules(modules):
+    """The modules a reset of `modules` actually destroys.
+
+    Ticking a module is rarely the whole story. HR holds the users, and a user's
+    departure takes their follow-ups in Sales and Club 1000 with it. Sales holds
+    the bookings, and AR accounts PROTECT those — so Sales cannot go without AR
+    going first. Both cases mean the same thing: the honest list of what will be
+    lost is wider than what was ticked, and it is that list the backup gate has
+    to cover and the screen has to show.
+    """
+    # A module-level fixpoint, not a table-level one: a reset empties whole
+    # modules, so the moment any of Sales is doomed every Sales table goes —
+    # bookings included — and that is what drags AR in behind it.
+    chosen = set(pick_modules(modules))
+    while True:
+        doomed = {t.model for m in chosen for t in TABLES_BY_MODULE[m]}
+        pulled = set()
+        for table in ALL_TABLES:
+            if table.model in doomed:
+                continue
+            for f in table.cls._meta.fields:
+                if not (f.is_relation and f.related_model):
+                    continue
+                on_delete = getattr(getattr(f, 'remote_field', None), 'on_delete', None)
+                if (getattr(on_delete, '__name__', '') in _PULLS_IN
+                        and f.related_model._meta.label in doomed):
+                    pulled.add(MODULE_OF[table.model])
+                    break
+        if pulled <= chosen:
+            return [m for m in MODULES if m in chosen]
+        chosen |= pulled
 
 
 # ── Columns ──────────────────────────────────────────────────────────────────
@@ -246,15 +298,18 @@ def _append_table(ws, table, company, cache):
     ws.append([])   # blank spacer closes the table for the restore parser
 
 
-def build_workbook(company):
-    """A workbook holding everything this company owns, a sheet per module.
+def build_workbook(company, modules=None):
+    """A workbook of what this company owns, a sheet per module.
 
     write_only so the rows stream out instead of being held as cell objects —
     a full company runs to a couple of hundred thousand rows.
     """
+    chosen = set(pick_modules(modules))
     wb = openpyxl.Workbook(write_only=True)
     cache = {}
     for sheet_name, tables in SHEETS:
+        if sheet_name not in chosen:
+            continue
         ws = wb.create_sheet(sheet_name[:31])   # Excel caps sheet names at 31
         ws.append(_styled(ws, [f'{sheet_name} — {company.name}'],
                           Font(bold=True, size=14, color=NAVY)))
@@ -588,14 +643,19 @@ def restore(company, parsed, commit=False):
 
 
 # ── Reset ────────────────────────────────────────────────────────────────────
-def reset_counts(company):
-    """What a full reset would delete, table by table."""
+def reset_counts(company, modules=None):
+    """What a reset of these modules would delete, table by table.
+
+    Counts the cascade too: ticking HR empties part of Sales, and a number that
+    hid that would be the one people check before pressing the button.
+    """
+    doomed = {t.model for m in cascade_modules(modules) for t in TABLES_BY_MODULE[m]}
     return {t.label: t.cls.objects.filter(**{t.scope: company}).count()
-            for t in restore_order()}
+            for t in restore_order() if t.model in doomed}
 
 
-def reset_company(company, keep_user_id=None):
-    """Delete everything this company owns, leaving it at zero.
+def reset_company(company, modules=None, keep_user_id=None):
+    """Delete what these modules own, leaving them at zero.
 
     Deliberately the exact set of tables the backup covers, walked in reverse
     dependency order — children before the rows they hang off, which is also
@@ -608,9 +668,12 @@ def reset_company(company, keep_user_id=None):
     re-creates everyone else and skips that one.
     """
     User = apps.get_model('accounts.User')
+    doomed = {t.model for m in cascade_modules(modules) for t in TABLES_BY_MODULE[m]}
     deleted = {}
     with transaction.atomic():
         for table in reversed(restore_order()):
+            if table.model not in doomed:
+                continue
             qs = table.cls.objects.filter(**{table.scope: company})
             if table.cls is User and keep_user_id:
                 qs = qs.exclude(pk=keep_user_id)

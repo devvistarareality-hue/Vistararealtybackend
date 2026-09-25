@@ -5,7 +5,7 @@ backup covers, the restore writes what the reset deleted, and all three read one
 registry (SHEETS in backup_excel) so they cannot drift apart.
 """
 import os
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 
 from django.test import override_settings
@@ -192,3 +192,117 @@ class ResetIsGated(APITestCase):
         r = self.client.post(f'/api/sales/backups/reset/?company_id={other.id}',
                              {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
         self.assertEqual(r.status_code, 403)
+
+
+class ModuleScopedBackupAndReset(APITestCase):
+    """You may delete what you hold a backup of — and only that."""
+
+    def setUp(self):
+        self.co, self.boss, self.rep, self.proj, self.other, self.bk = _seed()
+        self.client.force_authenticate(self.boss)
+        os.environ['DATA_RESET_KEY'] = RESET_KEY
+
+    def _backup(self, modules=None):
+        q = f'?company_id={self.co.id}' + (f'&modules={",".join(modules)}' if modules else '')
+        r = self.client.get(f'/api/sales/backups/excel/{q}')
+        self.assertEqual(r.status_code, 200)
+
+    def _reset(self, modules=None):
+        return self.client.post(f'/api/sales/backups/reset/?company_id={self.co.id}',
+                                {'reset_key': RESET_KEY, 'confirm': 'DELETE',
+                                 'modules': ','.join(modules) if modules else ''}, format='json')
+
+    def test_a_module_backup_covers_only_that_module(self):
+        self._backup(['AR'])
+        r = self._reset(['Sales'])
+        self.assertEqual(r.status_code, 409, 'an AR backup must not authorise wiping Sales')
+        self.assertTrue(Lead.objects.filter(company=self.co).exists())
+
+    def test_a_module_backup_authorises_that_modules_reset(self):
+        self._backup(['Task Allocation'])
+        self.assertEqual(self._reset(['Task Allocation']).status_code, 200)
+        self.assertFalse(Task.objects.filter(company=self.co).exists())
+        # ...and left every other module alone.
+        self.assertTrue(Lead.objects.filter(company=self.co).exists())
+        self.assertTrue(Booking.objects.filter(company=self.co).exists())
+
+    def test_resetting_hr_needs_the_modules_it_cascades_into(self):
+        """Users live in HR, and losing a user takes their Sales follow-ups too."""
+        self._backup(['HR'])
+        r = self._reset(['HR'])
+        self.assertEqual(r.status_code, 409)
+        self.assertIn('Sales', r.json()['destroys'])
+        self.assertTrue(User.objects.filter(company=self.co).exists())
+
+        self._backup(['HR', 'Sales', 'AR', 'Club 1000'])
+        self.assertEqual(self._reset(['HR']).status_code, 200)
+
+    def test_a_full_backup_authorises_anything(self):
+        self._backup()
+        self.assertEqual(self._reset(['Sales']).status_code, 200)
+
+    def test_the_preview_reports_what_a_selection_would_destroy(self):
+        r = self.client.get(f'/api/sales/backups/reset/?company_id={self.co.id}&modules=HR')
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body['selected'], ['HR'])
+        self.assertIn('Sales', body['destroys'])
+        self.assertFalse(body['can_reset'], 'no covering backup yet')
+
+
+class ScheduledBackups(APITestCase):
+    """Taking a company's backup on a schedule, and keeping it."""
+
+    def setUp(self):
+        self.co, self.boss, self.rep, *_ = _seed()
+        self.client.force_authenticate(self.boss)
+        self.url = f'/api/sales/backups/schedule/?company_id={self.co.id}'
+
+    def test_a_schedule_starts_off(self):
+        body = self.client.get(self.url).json()
+        self.assertFalse(body['is_enabled'])
+        self.assertEqual(body['history'], [])
+
+    def test_the_schedule_can_be_set(self):
+        r = self.client.patch(self.url, {'is_enabled': True, 'frequency': 'daily',
+                                         'modules': ['Sales', 'AR'], 'keep_last': 3},
+                              format='json')
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body['is_enabled'])
+        self.assertEqual(body['frequency'], 'daily')
+        self.assertEqual(body['selected_modules'], ['Sales', 'AR'])
+        self.assertEqual(body['keep_last'], 3)
+
+    def test_an_employee_cannot_touch_the_schedule(self):
+        self.client.force_authenticate(self.rep)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+        self.assertEqual(self.client.patch(self.url, {'is_enabled': True}, format='json').status_code, 403)
+
+    def test_due_respects_the_frequency(self):
+        from sales.backup_schedule import due
+        from sales.models import BackupSchedule, BackupStamp
+        sched, _ = BackupSchedule.objects.get_or_create(company=self.co)
+        sched.is_enabled = True
+        sched.frequency = 'weekly'
+        sched.save()
+        self.assertTrue(due(sched), 'never backed up, so due now')
+
+        stamp = BackupStamp.objects.create(company=self.co, automatic=True, file_path='x.xlsx')
+        self.assertFalse(due(sched), 'just backed up, so not due')
+
+        BackupStamp.objects.filter(pk=stamp.pk).update(taken_at=timezone.now() - timedelta(days=8))
+        self.assertTrue(due(sched), 'a week later, due again')
+
+    def test_a_disabled_schedule_is_never_due(self):
+        from sales.backup_schedule import due
+        from sales.models import BackupSchedule
+        sched, _ = BackupSchedule.objects.get_or_create(company=self.co)
+        self.assertFalse(due(sched))
+
+    def test_a_stored_backup_belongs_to_its_company(self):
+        from sales.models import BackupStamp
+        other = Company.objects.create(code='NOPE', name='Other Co', is_active=True)
+        theirs = BackupStamp.objects.create(company=other, file_path='theirs.xlsx')
+        r = self.client.get(f'/api/sales/backups/stored/{theirs.id}/?company_id={self.co.id}')
+        self.assertEqual(r.status_code, 404, "another company's backup is not downloadable")

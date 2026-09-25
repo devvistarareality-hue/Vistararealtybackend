@@ -902,10 +902,41 @@ class BackupStamp(models.Model):
     taken_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
     taken_at = models.DateTimeField(auto_now_add=True)
     rows     = models.IntegerField(default=0)
+    # Which modules the workbook actually covered. A reset is only allowed for
+    # modules that are in here: you may delete what you hold a backup of.
+    modules  = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ['-taken_at']
         indexes = [models.Index(fields=['company', '-taken_at'])]
 
+    # Set when the workbook was kept rather than just streamed to the browser —
+    # the scheduled backups. Downloaded again through a signed URL.
+    file_path = models.CharField(max_length=300, blank=True)
+    file_size = models.BigIntegerField(null=True, blank=True)
+    # null for the nightly job; a user when someone pressed the button.
+    automatic = models.BooleanField(default=False)
+
     def __str__(self):
         return f'Backup of {self.company_id} at {self.taken_at:%d %b %Y %H:%M}'
+
+
+class BackupSchedule(models.Model):
+    """Per company: take an Excel backup on a schedule and keep it.
+
+    Per company rather than platform-wide, because a backup is of one company —
+    the file, the restore and the reset gate all are.
+    """
+    FREQUENCY_CHOICES = [('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')]
+    company    = models.OneToOneField('companies.Company', on_delete=models.CASCADE,
+                                      related_name='backup_schedule')
+    is_enabled = models.BooleanField(default=False)
+    frequency  = models.CharField(max_length=10, choices=FREQUENCY_CHOICES, default='weekly')
+    # Empty means every module.
+    modules    = models.JSONField(default=list, blank=True)
+    keep_last  = models.IntegerField(default=10)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.company_id}: {self.frequency} ({"on" if self.is_enabled else "off"})'
