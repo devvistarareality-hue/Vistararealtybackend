@@ -38,14 +38,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, BackupSettings, BackupRecord, LeadTransfer, ChannelPartner,
+    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
-    BackupSettingsSerializer, BackupRecordSerializer, LeadTransferSerializer, ChannelPartnerSerializer,
+    LeadTransferSerializer, ChannelPartnerSerializer,
 )
 
 PAGE_SIZE = 25
@@ -4845,17 +4845,22 @@ class BookingListCreateView(APIView):
                     and request.query_params.get('cp_only') != 'true'
                     and _sees_all_company(request.user, request)):
                 mine_q = Q()
-            # The CP module's My Bookings is strictly partner-sourced, and only this
-            # person's reporting tree — not every partner deal in the company. It reads the explicit flag rather
-            # than the viewer's designation, so a CP manager looking at Sales My
-            # Bookings still sees their own and their team's work there.
+            # The CP module's My Bookings is the partner book this person answers
+            # for — their own desk, not every partner deal in the company. It reads
+            # the explicit flag rather than the viewer's designation, so a CP manager
+            # looking at Sales My Bookings still sees their own and their team's work
+            # there.
             if request.query_params.get('cp_only') == 'true':
-                # Plus my own bookings from any other source — my own work is listed
-                # wherever I look for it (my team's non-partner work stays in Sales).
-                # One filter, so a booking that qualifies both ways is listed once.
+                # Plus everything this person and their reporting tree sold, whatever
+                # the source: My Bookings answers "what have I and my people sold",
+                # and a CP Cluster Head's team does not stop being their team the
+                # moment a deal comes in as a walk-in. Without the tree half, a
+                # reportee's non-partner booking appeared on no screen this manager
+                # could reach. One filter, so a booking that qualifies both ways is
+                # listed once.
                 _desk = _cp_desk_ids(request.user)
                 cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
-                mine_q = cp_part | Q(stm_id=request.user.id)
+                mine_q = cp_part | Q(stm_id__in=own_and_team)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
@@ -7496,68 +7501,6 @@ class SalesDataResetView(APIView):
         if n_booking_closures and 'closures' not in effective:
             deleted['closures'] = n_booking_closures  # the booking-mirrored ones only
         return Response({'detail': 'Trial data cleared.', 'deleted': deleted, 'targets': sorted(effective)})
-
-
-class BackupSettingsView(APIView):
-    """Platform-super-user-only: view/update the automatic backup schedule."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
-        return Response(BackupSettingsSerializer(settings_row).data)
-
-    def patch(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
-        ser = BackupSettingsSerializer(settings_row, data=request.data, partial=True)
-        if not ser.is_valid():
-            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        ser.save(updated_by=request.user)
-        return Response(ser.data)
-
-
-class BackupListView(APIView):
-    """Platform-super-user-only: recent backup history."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        records = BackupRecord.objects.select_related('triggered_by')[:50]
-        return Response(BackupRecordSerializer(records, many=True).data)
-
-
-class BackupRunNowView(APIView):
-    """Platform-super-user-only: trigger a backup immediately, outside the schedule."""
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        from .backup_service import run_backup
-        record = run_backup(triggered_by=request.user)
-        return Response(BackupRecordSerializer(record).data,
-                         status=status.HTTP_201_CREATED if record.status == 'success' else status.HTTP_502_BAD_GATEWAY)
-
-
-class BackupDownloadView(APIView):
-    """Platform-super-user-only: a short-lived signed URL for one backup file."""
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, pk):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        record = BackupRecord.objects.filter(pk=pk, status='success').first()
-        if not record or not record.file_path:
-            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        from .backup_storage import signed_backup_url
-        url = signed_backup_url(record.file_path)
-        if not url:
-            return Response({'detail': 'Could not generate a download link.'}, status=status.HTTP_502_BAD_GATEWAY)
-        return Response({'url': url})
 
 
 def _may_back_up(user):

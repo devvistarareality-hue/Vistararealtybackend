@@ -23,8 +23,6 @@ LOCAL_APPS = {'sales', 'club1000', 'receivables', 'tasks', 'attendance',
 EXCLUDED = {
     'companies.Company':    'the backup is OF a company — this row is the container, not content',
     'accounts.OtpCode':     'short-lived login codes: a liability in a downloaded file, no value in a backup',
-    'sales.BackupSettings': "the backup system's own schedule, platform-level rather than a company's data",
-    'sales.BackupRecord':   "the backup system's own history, platform-level rather than a company's data",
 }
 
 
