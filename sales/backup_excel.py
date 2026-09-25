@@ -317,6 +317,69 @@ def _append_table(ws, table, company, cache):
     ws.append([])   # blank spacer closes the table for the restore parser
 
 
+# The company record itself. Every other sheet only carries the company's id, which
+# is all a restore into a living company needs — but once a company has been
+# deleted there is nothing for those rows to go back into. This sheet is what lets
+# "Bring back a deleted company" recreate it under its original id and details.
+COMPANY_MARK = 'Company record'
+COMPANY_FIELDS = ('id', 'code', 'name', 'email', 'phone', 'address', 'logo_url', 'loi_enabled')
+
+
+def _append_company_sheet(wb, company):
+    ws = wb.create_sheet('Company')
+    ws.append(_styled(ws, [f'Company — {company.name}'], Font(bold=True, size=14, color=NAVY)))
+    ws.append(_styled(ws, ['Used to bring this company back if it is ever deleted.'],
+                      Font(italic=True, size=9, color='FF6B7280')))
+    ws.append([])
+    ws.append([COMPANY_MARK])
+    for f in COMPANY_FIELDS:
+        ws.append([f, _cell(getattr(company, f, None))])
+    ws.append([])
+
+
+def read_company_info(fileobj):
+    """The company a workbook came from, as far as the file can say.
+
+    Newer backups carry a Company sheet with the full record. Older ones do not,
+    so the name is taken from the sheet titles ("Sales — Metropolis Group") and
+    the id is left for the caller to find in the rows themselves.
+    """
+    wb = openpyxl.load_workbook(fileobj, read_only=True, data_only=True)
+    info, title_name = {}, None
+    try:
+        for ws in wb.worksheets:
+            in_record = False
+            for row in ws.iter_rows(values_only=True):
+                first = row[0] if row else None
+                if title_name is None and isinstance(first, str) and ' — ' in first:
+                    title_name = first.split(' — ', 1)[1].strip() or None
+                if ws.title != 'Company':
+                    break          # only the title row of the other sheets is needed
+                if first == COMPANY_MARK:
+                    in_record = True
+                    continue
+                if in_record:
+                    if first in (None, ''):
+                        break
+                    info[str(first)] = row[1] if len(row) > 1 else None
+    finally:
+        wb.close()
+    if not info.get('name') and title_name:
+        info['name'] = title_name
+    return info
+
+
+def company_ids_in(parsed):
+    """Every company id the workbook's rows name, from the tables that carry one."""
+    ids = set()
+    for rows in parsed.values():
+        for row in rows:
+            cid = _as_int(row.get('company_id'))
+            if cid is not None:
+                ids.add(cid)
+    return ids
+
+
 def build_workbook(company, modules=None):
     """A workbook of what this company owns, a sheet per module.
 
@@ -326,6 +389,7 @@ def build_workbook(company, modules=None):
     chosen = set(pick_modules(modules))
     wb = openpyxl.Workbook(write_only=True)
     cache = {}
+    _append_company_sheet(wb, company)
     for sheet_name, tables in SHEETS:
         if sheet_name not in chosen:
             continue

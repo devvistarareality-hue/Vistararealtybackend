@@ -7827,6 +7827,93 @@ class BackupRestoreView(APIView):
         return Response(result)
 
 
+class BackupReviveView(APIView):
+    """Bring a deleted company back from its backup workbook.
+
+    A restore only ever goes into the company the workbook came from, matched by
+    id — so once a company is deleted its backups have nowhere to go, and a new
+    company with the same name is a different company. This recreates it under
+    its original id (and code and details, when the workbook carries its Company
+    sheet), then runs the ordinary restore into it: every row comes back with its
+    own id, so everything still points where it did.
+
+    Platform admins only. Without `commit` it reports what would happen and
+    writes nothing. Refuses if that company still exists (use Restore) or if its
+    code has since been taken by another company.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Only a platform admin can bring a company back.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Attach the backup workbook.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from companies.models import Company as Co
+        from .backup_excel import parse_workbook, read_company_info, company_ids_in, restore
+        try:
+            parsed = parse_workbook(upload)
+            upload.seek(0)
+            info = read_company_info(upload)
+        except Exception:
+            return Response({'detail': 'That file could not be read as a backup workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not any(parsed.values()):
+            return Response({'detail': 'No restorable rows found in that workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Which company it came from: its own record if the file has one, else the
+        # one id every row agrees on.
+        ids = {int(info['id'])} if str(info.get('id') or '').isdigit() else company_ids_in(parsed)
+        if len(ids) != 1:
+            return Response({'detail': 'This workbook does not belong to exactly one company, '
+                                       'so it cannot be used to bring one back.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        cid = ids.pop()
+        if Co.objects.filter(pk=cid).exists():
+            return Response({'detail': 'That company still exists. Restore into it with '
+                                       '"Put a backup back" instead.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        file_code = str(info.get('code') or '').strip().upper()
+        code = file_code or str(request.data.get('code') or '').strip().upper()
+        name = str(info.get('name') or '').strip() or code
+        summary = {'company': {'id': cid, 'code': code, 'name': name}, 'needs_code': not file_code}
+        if code and Co.objects.filter(code__iexact=code).exists():
+            return Response({**summary, 'detail': f'The code {code} now belongs to another company. '
+                                                  'Rename that company first.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        commit = str(request.data.get('commit', '')).strip() in ('1', 'true', 'True')
+        if commit and not code:
+            return Response({**summary, 'detail': "This backup is older and does not record the "
+                                                  "company's code. Type it to continue."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                co = Co.objects.create(
+                    pk=cid, code=code or f'REVIVE{cid}', name=name or f'Company {cid}',
+                    email=info.get('email') or '', phone=info.get('phone') or '',
+                    address=info.get('address') or '', logo_url=info.get('logo_url') or '',
+                    loi_enabled=bool(info.get('loi_enabled')), is_active=True)
+                result = restore(co, parsed, commit=commit)
+                # A preview, or a refused restore, must leave no company behind.
+                if not commit or not result['ok']:
+                    transaction.set_rollback(True)
+        except Exception as exc:
+            logger.exception('Company revive failed')
+            return Response({'detail': f'Could not bring the company back, nothing was written: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not result['ok']:
+            return Response({**result, **summary}, status=status.HTTP_409_CONFLICT)
+        if commit:
+            logger.warning('Company %s (%s) brought back by user %s: %s rows',
+                           cid, code, request.user.id, result.get('total'))
+        return Response({**result, **summary})
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Lead transfer: one STM hands a lead to another, held for approval
 # ─────────────────────────────────────────────────────────────────────────────
