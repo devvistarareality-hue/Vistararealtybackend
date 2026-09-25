@@ -54,3 +54,21 @@ class SvScheduledTileTests(APITestCase):
         n = listed.get('count') if isinstance(listed, dict) else len(listed)
         self.assertEqual(tile, 1)
         self.assertEqual(tile, n)
+
+    def test_undated_telecaller_warm_tile_counts_who_is_warm_now(self):
+        tc = User.objects.create(email='tc@svt.com', company=self.co, role='Employee',
+                                 designation='Telecaller', modules=['Sales'], user_code='T1')
+        now_warm = Lead.objects.create(company=self.co, name='Warm now', phone='9200000001',
+                                       telecaller=tc, telecaller_status='warm')
+        was_warm = Lead.objects.create(company=self.co, name='Was warm', phone='9200000002',
+                                       telecaller=tc, telecaller_status='cold')
+        for lead in (now_warm, was_warm):
+            LeadStatusHistory.objects.create(lead=lead, changed_by=tc, field_changed='telecaller_status',
+                                             old_value='', new_value='warm')
+        cache.clear()
+        self.client.force_authenticate(tc)
+        tile = self.client.get('/api/sales/stats/').data['warm_count']
+        listed = self.client.get('/api/sales/leads/?telecaller_status=warm&work=called').data
+        n = listed.get('count') if isinstance(listed, dict) else len(listed)
+        self.assertEqual(tile, 1)
+        self.assertEqual(tile, n)

@@ -809,6 +809,12 @@ class StatsView(APIView):
         # fix already applied to sql_count below and to StatsTrendView's per-day
         # warm/hot/cold rows; this brings the stat-card tiles in line with those.
         def _status_transition_count(field, value):
+            # Undated, the Leads list filtered by this status shows who is at it
+            # *now*, so the tile counts that — it used to count everyone who had
+            # *ever* been marked it, which no list could add up to. Dated, both
+            # mean "moved to it within the range".
+            if not date_from and not date_to:
+                return leads_scope.filter(**{field: value}).count()
             qs = LeadStatusHistory.objects.filter(
                 lead__in=leads_scope, field_changed=field, new_value=value)
             if date_from:
