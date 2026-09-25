@@ -23,7 +23,7 @@ from accounts.models import User
 from accounts.capabilities import (SCOPE_COMPANY, SCOPE_OWN, SCOPE_PROJECTS, SCOPE_TEAM,
                                    permissions_version,
                                    data_scope, user_can)
-from accounts.permissions import is_platform_admin, scope_to_company
+from accounts.permissions import is_module_admin, is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 
 
@@ -7460,11 +7460,37 @@ class BackupDownloadView(APIView):
         return Response({'url': url})
 
 
+def _may_back_up(user):
+    """Who can take or restore a backup: a platform admin, or a company's own
+    full Admin. Not a module-scoped admin — a Sales-only admin has no business
+    pulling the company's HR, AR and Club 1000 records out in one file."""
+    if is_platform_admin(user):
+        return True
+    return bool(getattr(user, 'role', '') == 'Admin' and not is_module_admin(user)
+                and getattr(user, 'company_id', None))
+
+
 def _backup_company(request):
-    """The company a backup is for. Explicit — a backup of "whichever company
-    happened to be selected" is not something to guess at."""
+    """The company a backup is for.
+
+    A platform admin names the company and may name any of them. Everyone else
+    gets their own, whatever they asked for — naming someone else's is refused
+    rather than quietly ignored, so a mistake is visible instead of handing back
+    the wrong company's file.
+    """
     from companies.models import Company as Co
     cid = request.query_params.get('company_id') or request.data.get('company_id')
+
+    if not is_platform_admin(request.user):
+        own = getattr(request.user, 'company', None)
+        if not own:
+            return None, Response({'detail': 'Your account is not attached to a company.'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        if cid and str(cid) != str(own.pk):
+            return None, Response({'detail': 'You can only back up your own company.'},
+                                  status=status.HTTP_403_FORBIDDEN)
+        return own, None
+
     if not cid:
         return None, Response({'detail': 'Choose a company first.'}, status=status.HTTP_400_BAD_REQUEST)
     company = Co.objects.filter(pk=cid).first()
@@ -7474,16 +7500,17 @@ def _backup_company(request):
 
 
 class BackupExcelView(APIView):
-    """Platform-super-user-only: one company's data as a readable workbook.
+    """One company's data as a readable workbook.
 
+    A company's own Admin can take their own; a platform admin can take any.
     Built and streamed in the moment — unlike the scheduled JSON dump this is
     never stored, so the figures are whatever is true when the button is tapped.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         company, err = _backup_company(request)
         if err:
             return err
@@ -7500,18 +7527,19 @@ class BackupExcelView(APIView):
 
 
 class BackupRestoreView(APIView):
-    """Platform-super-user-only: put a backup workbook's Sales rows back.
+    """Put a backup workbook's Sales rows back, into one company.
 
     The counterpart to Data Reset: clear a company's trial data, then upload the
     workbook taken before it to get those rows back with their original ids.
     Without `commit` it only reports what it would do, which is what the page
-    shows before anyone presses the real button.
+    shows before anyone presses the real button. Same access as taking one — a
+    company's own Admin, or a platform admin for any company.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         company, err = _backup_company(request)
         if err:
             return err

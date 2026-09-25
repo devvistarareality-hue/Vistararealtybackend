@@ -15,11 +15,9 @@ Encrypted columns need no special handling here. EncryptedTextField and friends
 (see fields.py) decrypt on read and encrypt on write, so reading an attribute
 gives plaintext for the sheet and writing plaintext back re-encrypts it.
 
-One fidelity note: Excel keeps datetimes as floating-point serial days, so a
-timestamp comes back rounded to the nearest millisecond. Values, links and ids
-survive exactly; created_at can differ by microseconds. Nothing here orders
-within a millisecond, and keeping the columns as real dates rather than text is
-worth more than that last digit in a file meant to be read.
+A workbook only ever goes back into the company it came from. The request being
+scoped to one company decides which file you get, not which rows get written —
+so restore checks the rows themselves and refuses a file holding anyone else's.
 """
 import json
 import uuid
@@ -143,10 +141,16 @@ def _cell(value):
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, datetime):
-        # Excel has no concept of a timezone; store local wall-clock time.
-        return timezone.localtime(value).replace(tzinfo=None) if timezone.is_aware(value) else value
-    if isinstance(value, (date, time)):
-        return value
+        # ISO text, not an Excel date cell. Excel keeps dates as floating-point
+        # days, which rounds a timestamp to the nearest millisecond and loses the
+        # offset — a backup that comes back a few microseconds off is not the
+        # same backup. ISO keeps both exactly, reads fine, and still sorts
+        # chronologically because it is zero-padded most-significant-first.
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value          # a whole day survives Excel's date cell exactly
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     if isinstance(value, uuid.UUID):
@@ -303,15 +307,17 @@ def _to_python(field, value):
         return _empty_for(field)
     if isinstance(field, models.DateTimeField):        # before DateField: it subclasses it
         if isinstance(value, datetime):
-            dt = value
+            dt = value                                  # an Excel date cell, from an older file
         elif isinstance(value, date):
             dt = datetime(value.year, value.month, value.day)
         else:
             from django.utils.dateparse import parse_datetime
-            dt = parse_datetime(str(value))
+            dt = parse_datetime(str(value).strip())
             if dt is None:
                 return None
-        return timezone.make_aware(dt) if timezone.is_naive(dt) and timezone.get_current_timezone() else dt
+        # Exported ISO carries its offset, so this normally keeps the exact
+        # original instant; a naive value (older file) is read as local time.
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
     if isinstance(field, models.DateField):
         if isinstance(value, datetime):
             return value.date()
@@ -388,14 +394,74 @@ def _keep_original_timestamps(model_classes):
             f.auto_now, f.auto_now_add = auto_now, auto_now_add
 
 
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _foreign_rows(company, parsed):
+    """Rows in the file that are not this company's.
+
+    A workbook is restored into the company it was taken from. Without this the
+    rows would be written with whatever company the *file* names, so one
+    company's admin uploading another's backup would put that company's records
+    into the database — the request being scoped to their own company would not
+    stop it, because the scope is only used to choose the file, not the rows.
+    """
+    from django.apps import apps as _apps
+    Lead = _apps.get_model('sales.Lead')
+    User = _apps.get_model('accounts.User')
+
+    lead_rows = parsed.get('Leads') or []
+    mine = {_as_int(r.get('id')) for r in lead_rows
+            if str(r.get('company_id') or '') == str(company.pk)}
+    # Children may also point at leads this company already has (a partial reset).
+    valid_leads = mine | set(Lead.objects.filter(company=company).values_list('pk', flat=True))
+    valid_users = set(User.objects.filter(company=company).values_list('pk', flat=True))
+
+    problems = []
+    for table in RESTORABLE:
+        rows = parsed.get(table.label) or []
+        bad = 0
+        for r in rows:
+            if table.scope == 'company':
+                own = str(r.get('company_id') or '') == str(company.pk)
+                # Booking.company is nullable; fall back to the lead it belongs to.
+                if not own and not r.get('company_id'):
+                    own = _as_int(r.get('lead_id')) in valid_leads
+            elif table.scope.startswith('lead__'):
+                own = _as_int(r.get('lead_id')) in valid_leads
+            elif table.scope.startswith('user__'):
+                own = _as_int(r.get('user_id')) in valid_users
+            elif table.scope.startswith('recipient__'):
+                own = _as_int(r.get('recipient_id')) in valid_users
+            else:
+                own = True
+            if not own:
+                bad += 1
+        if bad:
+            problems.append({'table': table.label, 'rows': bad})
+    return problems
+
+
 def restore(company, parsed, commit=False):
     """Put the rows in `parsed` back, or report what would happen.
 
     Refuses outright if any row already exists: a restore is only ever meant to
     run into the empty slate Data Reset leaves behind, so an id that is already
     taken means this is not that situation and writing anything would be
-    guesswork.
+    guesswork. Refuses too if the file holds another company's rows.
     """
+    foreign = _foreign_rows(company, parsed)
+    if foreign:
+        plan = [{'table': t.label, 'rows': len(parsed.get(t.label) or [])} for t in RESTORABLE]
+        return {'ok': False, 'committed': False, 'plan': plan,
+                'total': sum(p['rows'] for p in plan), 'conflicts': [], 'foreign': foreign,
+                'detail': f'This workbook holds records belonging to another company, so it '
+                          f'cannot be restored into {company.name}. Nothing was written.'}
+
     plan, conflicts = [], []
     for table in RESTORABLE:
         rows = parsed.get(table.label) or []
@@ -409,11 +475,12 @@ def restore(company, parsed, commit=False):
     total = sum(p['rows'] for p in plan)
     if conflicts:
         return {'ok': False, 'committed': False, 'plan': plan, 'total': total,
-                'conflicts': conflicts,
+                'conflicts': conflicts, 'foreign': [],
                 'detail': 'Some of these records already exist. Restore only runs into '
                           'data that has been cleared — nothing was written.'}
     if not commit:
-        return {'ok': True, 'committed': False, 'plan': plan, 'total': total, 'conflicts': []}
+        return {'ok': True, 'committed': False, 'plan': plan, 'total': total,
+                'conflicts': [], 'foreign': []}
 
     classes = [t.cls for t in RESTORABLE]
     with _keep_original_timestamps(classes), transaction.atomic():
@@ -438,4 +505,5 @@ def restore(company, parsed, commit=False):
                 objs.append(model(**kwargs))
             model.objects.bulk_create(objs, batch_size=500)
 
-    return {'ok': True, 'committed': True, 'plan': plan, 'total': total, 'conflicts': []}
+    return {'ok': True, 'committed': True, 'plan': plan, 'total': total,
+            'conflicts': [], 'foreign': []}
