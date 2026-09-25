@@ -842,7 +842,15 @@ class StatsView(APIView):
                 qs = qs.filter(_sv_visited__date__lte=date_to)
             return set(qs.values_list('id', flat=True))
 
-        def _effective_stm_count(value):
+        def _effective_stm_count(value, current_when_undated=True):
+            # With no date range the Leads list shows who is Hot/Warm/Cold *now*
+            # (sv-done leads counting by their latest visit's outcome), so the tile
+            # counts the same — it used to count everyone who had *ever* been hot,
+            # and opened a list that could never add up to it.
+            if current_when_undated and not date_from and not date_to:
+                return leads_scope.annotate(
+                    _sv_outcome=Subquery(_latest_sv_for_lead.values('outcome')[:1]),
+                ).filter(Q(stm_status=value) | Q(stm_status='sv_done', _sv_outcome=value)).count()
             direct_hist = LeadStatusHistory.objects.filter(
                 lead__in=leads_scope, field_changed='stm_status', new_value=value)
             if date_from:
@@ -856,7 +864,11 @@ class StatsView(APIView):
         stm_hot_count           = _effective_stm_count('hot')
         stm_warm_count          = _effective_stm_count('warm')
         stm_cold_count          = _effective_stm_count('cold')
-        stm_sv_scheduled_count  = _status_transition_count('stm_status', 'sv_scheduled')
+        # Visits that are scheduled right now, counted from the Site Visits list's own
+        # rows so the tile matches the Scheduled tab it opens. It used to count leads
+        # whose status had ever *moved* to "SV scheduled" in the period — 19 on the
+        # tile against 1 visit actually waiting, the rest long since done or dropped.
+        stm_sv_scheduled_count  = _site_visit_scope(request).filter(status='scheduled').count()
         # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
         # no-show or cancelled visit is not one. Counting every row made the tile read
         # 48 where only 26 had been done. Dated by when the visit happened, not when
@@ -981,8 +993,10 @@ class StatsView(APIView):
 
         # SQL funnel: distinct leads that are effectively warm (stm_status → warm,
         # or still sv_done with a Warm visit outcome) in the window — same
-        # definition as stm_warm_count above.
-        sql_count = stm_warm_count
+        # definition as stm_warm_count above — except undated, where the tile shows
+        # who is warm now but a conversion rate needs everyone who ever became SQL
+        # (a lead stops being warm the moment it closes).
+        sql_count = _effective_stm_count('warm', current_when_undated=False)
 
         # Avg closure timeline: mean days from lead arrival (created_at) to closure_date.
         _diffs = [
@@ -2657,43 +2671,51 @@ class FollowUpDetailView(APIView):
         return Response(FollowUpSerializer(ser.save()).data)
 
 
+def _site_visit_scope(request):
+    """The site visits this request may see — the Site Visits list's rows before
+    any status tab is applied. The dashboard's SV Scheduled tile counts from here
+    too, so the number on the tile is the number of rows the tile opens."""
+    qs = scope_to_company(
+        SiteVisit.objects.select_related('lead', 'project', 'stm',
+                                         'referred_by_telecaller', 'lead__telecaller')
+                         .defer(*PROJECT_BLOBS),
+        request.user, 'lead__company',
+    )
+    if not _sees_all_company(request.user, request):
+        _ids = _visible_user_ids(request.user)
+        qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+    else:
+        # A manager assigned to specific projects sees only those projects' visits.
+        qs = scope_leads_to_project(qs, request.user)
+    # Platform admin viewing a specific company (?company_id) — honour the filter.
+    # A site visit has no company of its own; it belongs to its lead's company, the
+    # same path scope_to_company uses above. Filtering company_id directly raised
+    # FieldError, so this endpoint 500'd for any platform admin with a company
+    # selected — which is what left My Conversions showing 0 site visits.
+    cid = request.query_params.get('company_id')
+    if cid and is_platform_admin(request.user):
+        qs = qs.filter(lead__company_id=cid)
+    if request.query_params.get('lead_id'):
+        qs = qs.filter(lead_id=request.query_params['lead_id'])
+    if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+        qs = qs.filter(cp_lead_q(prefix='lead__'))
+    else:
+        # The Sales module's book. A partner-sourced visit belongs to Channel
+        # Partner, with the same handed-off exception the dashboard makes: a CP
+        # lead passed to a Sales person is theirs to show once it is theirs to
+        # work. Written as the dashboard writes it so the two cannot drift —
+        # without it this list said 1,623 completed visits where the tile said
+        # 1,563, the 60 partner visits being the whole of the difference.
+        _own = _visible_user_ids(request.user)
+        qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+    return qs
+
+
 class SiteVisitListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = scope_to_company(
-            SiteVisit.objects.select_related('lead', 'project', 'stm',
-                                             'referred_by_telecaller', 'lead__telecaller')
-                             .defer(*PROJECT_BLOBS),
-            request.user, 'lead__company',
-        )
-        if not _sees_all_company(request.user, request):
-            _ids = _visible_user_ids(request.user)
-            qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
-        else:
-            # A manager assigned to specific projects sees only those projects' visits.
-            qs = scope_leads_to_project(qs, request.user)
-        # Platform admin viewing a specific company (?company_id) — honour the filter.
-        # A site visit has no company of its own; it belongs to its lead's company, the
-        # same path scope_to_company uses above. Filtering company_id directly raised
-        # FieldError, so this endpoint 500'd for any platform admin with a company
-        # selected — which is what left My Conversions showing 0 site visits.
-        cid = request.query_params.get('company_id')
-        if cid and is_platform_admin(request.user):
-            qs = qs.filter(lead__company_id=cid)
-        if request.query_params.get('lead_id'):
-            qs = qs.filter(lead_id=request.query_params['lead_id'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            qs = qs.filter(cp_lead_q(prefix='lead__'))
-        else:
-            # The Sales module's book. A partner-sourced visit belongs to Channel
-            # Partner, with the same handed-off exception the dashboard makes: a CP
-            # lead passed to a Sales person is theirs to show once it is theirs to
-            # work. Written as the dashboard writes it so the two cannot drift —
-            # without it this list said 1,623 completed visits where the tile said
-            # 1,563, the 60 partner visits being the whole of the difference.
-            _own = _visible_user_ids(request.user)
-            qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+        qs = _site_visit_scope(request)
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         # Headline counts without shipping the rows: the app's stat tiles used to
