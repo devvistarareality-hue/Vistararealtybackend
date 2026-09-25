@@ -19,7 +19,7 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from .engine import rupees
 from .models import ARAccount, ARFollowUp
-from .permissions import has_ar_access
+from .permissions import ar_can, has_ar_access
 from .services import parse_date, _d
 from .views import _accounts_qs, _as_of, _computed, _deny, _log, _summary, _sync
 
@@ -279,7 +279,7 @@ class ARAccountFollowUpsView(APIView):
                          'results': [serialize_followup(f, now) for f in items]})
 
     def post(self, request, pk):
-        if not has_ar_access(request.user):
+        if not ar_can(request.user, 'ar.followup.manage'):
             return _deny()
         acct = self._acct(request, pk)
         if not acct:
@@ -312,7 +312,7 @@ class ARFollowUpView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, fid):
-        if not has_ar_access(request.user):
+        if not ar_can(request.user, 'ar.followup.manage'):
             return _deny()
         f = _followup_qs(request).filter(pk=fid).first()
         if not f:

@@ -2,10 +2,12 @@ from django.urls import path
 from .views import (
     LoginView, MeView, ChangePasswordView,
     UserListCreateView, UserDetailView,
-    DesignationListCreateView, DesignationDetailView,
+    CapabilityCatalogueView, DesignationListCreateView, DesignationDetailView,
+    RoleDashboardView,
     NotificationTestView, NotificationListView, NotificationReadView,
     SessionTokenRefreshView,
     VerifyOtpView, ResendOtpView,
+    ImpersonateView,
 )
 
 urlpatterns = [
@@ -14,11 +16,14 @@ urlpatterns = [
     path('otp/resend/',               ResendOtpView.as_view(),            name='otp-resend'),
     path('token/refresh/',            SessionTokenRefreshView.as_view(),  name='token-refresh'),
     path('me/',                       MeView.as_view(),                   name='me'),
+    path('impersonate/',              ImpersonateView.as_view(),          name='impersonate'),
     path('change-password/',          ChangePasswordView.as_view(),       name='change-password'),
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),
     path('users/<int:pk>/',           UserDetailView.as_view(),            name='user-detail'),
     path('designations/',             DesignationListCreateView.as_view(), name='designation-list'),
+    path('designations/capabilities/', CapabilityCatalogueView.as_view(),  name='capability-catalogue'),
     path('designations/<int:pk>/',    DesignationDetailView.as_view(),     name='designation-detail'),
+    path('role-dashboards/',          RoleDashboardView.as_view(),         name='role-dashboards'),
     path('notifications/test/',       NotificationTestView.as_view(),      name='notification-test'),
     path('notifications/',            NotificationListView.as_view(),      name='notification-list'),
     path('notifications/read/',       NotificationReadView.as_view(),      name='notification-read-all'),

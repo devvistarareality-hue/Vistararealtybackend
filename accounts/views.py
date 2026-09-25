@@ -12,13 +12,15 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from companies.models import Company
-from .models import User, Designation, Notification, OtpCode
+from .models import User, Designation, Notification, OtpCode, RoleDashboard
+from .capabilities import bump_permissions_version
 from .serializers import (
     LoginSerializer, UserSerializer,
     UserListSerializer, UserCreateSerializer, UserUpdateSerializer,
     DesignationSerializer,
 )
 from .tokens import SessionRefreshToken
+from activity.recorder import note
 
 VRL_CODE = 'VRL'
 
@@ -46,8 +48,9 @@ def is_platform_admin(user):
     )
 
 
-def get_tokens_for_user(user, platform='app'):
-    refresh = SessionRefreshToken.for_user(user, platform=platform)
+def get_tokens_for_user(user, platform='app', impersonator=None):
+    refresh = SessionRefreshToken.for_user(user, platform=platform,
+                                           impersonator=impersonator)
     return {
         'refresh': str(refresh),
         'access':  str(refresh.access_token),
@@ -121,7 +124,92 @@ class MeView(APIView):
 
     def get(self, request):
         user = User.objects.select_related('company', 'reporting_manager').get(pk=request.user.pk)
-        return Response(UserSerializer(user).data)
+        data = UserSerializer(user).data
+        # So a page reload keeps showing "viewing as …" instead of silently
+        # looking like an ordinary session.
+        data['impersonated_by'] = _impersonator_of(request.user)
+        return Response(data)
+
+
+def _impersonator_of(user):
+    """{id, name} of the admin viewing the app as this user, or None."""
+    actor_id = getattr(user, 'impersonator_id', None)
+    if not actor_id:
+        return None
+    actor = User.objects.filter(pk=actor_id).only('id', 'name', 'user_code').first()
+    if not actor:
+        return None
+    return {'id': actor.id, 'name': actor.name, 'user_code': actor.user_code}
+
+
+class ImpersonateView(APIView):
+    """Open a session as another user, for a platform admin only.
+
+    This replaces the shared master password that used to be checked in
+    LoginView. That password let anyone holding one string sign in as anybody,
+    left no record of who had used it, and could not be taken away from one
+    person without changing it for everyone. This does the same job — see the
+    app exactly as a user sees it, to reproduce what they are reporting —
+    without any of that: the admin authenticates as themselves first (OTP
+    included), only they can reach this endpoint, the issued token names them in
+    an `impersonator` claim that survives refresh, and the activity log records
+    the switch.
+
+    No OTP is sent to the target: the person at the keyboard has already proven
+    who *they* are, and the target's own credentials are neither used nor needed.
+    Their password is not read, not changed, and not revealed. The target's
+    session token is reused rather than rotated, so opening this does not sign
+    the real user out — and their next login rotates it, which ends the
+    impersonated session too.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Platform admins only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        # No chaining: an impersonated session must not be able to hop onward, or
+        # the `impersonator` claim would stop naming the person responsible.
+        if getattr(request.user, 'impersonator_id', None):
+            return Response({'detail': 'Already viewing as another user. Exit first.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            target_id = int(request.data.get('user_id'))
+        except (TypeError, ValueError):
+            return Response({'detail': 'user_id is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        target = User.objects.select_related('company', 'reporting_manager').filter(
+            pk=target_id, is_active=True).first()
+        if not target:
+            return Response({'detail': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if target.pk == request.user.pk:
+            return Response({'detail': 'That is already you.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # is_staff / is_superuser reach the Django admin, which is outside
+        # everything this app's permissions cover. Impersonation stays inside the app.
+        if target.is_staff or target.is_superuser:
+            return Response({'detail': 'Cannot view as a platform staff account.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        platform = request.data.get('platform') or 'web'
+        if platform not in ('web', 'app'):
+            platform = 'web'
+
+        tokens = get_tokens_for_user(target, platform=platform,
+                                     impersonator=request.user.pk)
+        note(request,
+             f'{request.user.name or request.user.user_code} signed in as '
+             f'{target.name or target.user_code} ({target.company.code if target.company else "—"})',
+             action='impersonate', target_type='User', target_id=str(target.pk),
+             module='Admin')
+        return Response({
+            'tokens': tokens,
+            'user': UserSerializer(target).data,
+            'impersonated_by': {'id': request.user.pk, 'name': request.user.name,
+                                'user_code': request.user.user_code},
+        }, status=status.HTTP_200_OK)
 
 
 class ChangePasswordView(APIView):
@@ -148,6 +236,21 @@ class ChangePasswordView(APIView):
         return Response({'detail': 'Password changed successfully.'})
 
 
+def _may_manage_users(user):
+    """Who may create, edit or delete a user account.
+
+    Reading the list is company-scoped and harmless, but writing is not: `role`,
+    `modules` and `password` are all editable here, so without this any employee
+    could promote themselves to Admin or reset a colleague's password. Inside
+    the VRL company that promotion also satisfies is_platform_admin, which opens
+    every other company's data — so this gate is what keeps company scoping
+    meaning anything. Both clients only offer these screens to admins already.
+    """
+    return bool(
+        user and getattr(user, 'is_authenticated', False)
+        and (is_platform_admin(user) or getattr(user, 'role', '') == 'Admin'))
+
+
 class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -166,6 +269,8 @@ class UserListCreateView(APIView):
         return Response(UserListSerializer(users, many=True).data)
 
     def post(self, request):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = UserCreateSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.save()
@@ -191,6 +296,8 @@ class UserDetailView(APIView):
         return Response(UserListSerializer(user).data)
 
     def patch(self, request, pk):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         user = self._get_user(pk, request)
         if not user:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -201,6 +308,8 @@ class UserDetailView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         user = self._get_user(pk, request)
         if not user:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -284,6 +393,74 @@ class SessionTokenRefreshView(APIView):
         return Response(tokens, status=status.HTTP_200_OK)
 
 
+class CapabilityCatalogueView(APIView):
+    """The fixed vocabulary the designation screen ticks from."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .capabilities import (CAPABILITIES, DASHBOARD_ROLES, DASHBOARDS, DATA_SCOPES,
+                                   PRESETS, PRESET_LABELS, PRESET_MODULES, PRESET_SCREENS,
+                                   SCREENS)
+        return Response({
+            'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
+            'screens': [{'key': k, 'label': l, 'module': m} for k, l, m in SCREENS],
+            'scopes': [{'value': v, 'label': l} for v, l in DATA_SCOPES],
+            'dashboards': [{'value': v, 'label': l, 'module': m, 'role': r}
+                           for v, l, m, r in DASHBOARDS],
+            'dashboard_roles': DASHBOARD_ROLES,
+            'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
+                         'module': PRESET_MODULES.get(k, ''),
+                         'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
+        })
+
+
+class RoleDashboardView(APIView):
+    """Which dashboard each role opens in a module, for this company.
+
+    GET  ?module=Sales           → [{role, view}, …]
+    POST {module, role, view}    → the Copy button on a module's Dashboard
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _company_id(self, request):
+        if is_platform_admin(request.user):
+            return request.query_params.get('company_id') or request.data.get('company_id') \
+                or getattr(request.user, 'company_id', None)
+        return getattr(request.user, 'company_id', None)
+
+    def get(self, request):
+        rows = RoleDashboard.objects.filter(company_id=self._company_id(request))
+        module = request.query_params.get('module')
+        if module:
+            rows = rows.filter(module=module)
+        return Response([{'module': r.module, 'role': r.role, 'view': r.view} for r in rows])
+
+    def post(self, request):
+        from .capabilities import DASHBOARD_KEYS, DASHBOARD_ROLES
+        if not (is_platform_admin(request.user) or request.user.is_staff
+                or getattr(request.user, 'role', '') == 'Admin'):
+            return Response({'detail': 'Only an administrator can set a role\'s dashboard.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        module = (request.data.get('module') or '').strip()
+        roles = request.data.get('roles') or ([request.data.get('role')] if request.data.get('role') else [])
+        view = (request.data.get('view') or '').strip()
+        if not module:
+            return Response({'module': 'Which module?'}, status=status.HTTP_400_BAD_REQUEST)
+        if view not in DASHBOARD_KEYS or not view:
+            return Response({'view': 'Unknown dashboard.'}, status=status.HTTP_400_BAD_REQUEST)
+        bad = [r for r in roles if r not in DASHBOARD_ROLES]
+        if bad or not roles:
+            return Response({'roles': f'Pick from: {", ".join(DASHBOARD_ROLES)}.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        company_id = self._company_id(request)
+        for role in roles:
+            RoleDashboard.objects.update_or_create(
+                company_id=company_id, module=module, role=role, defaults={'view': view})
+        bump_permissions_version(company_id)
+        return Response([{'module': module, 'role': r, 'view': view} for r in roles],
+                        status=status.HTTP_200_OK)
+
+
 class DesignationListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -312,6 +489,68 @@ class DesignationListCreateView(APIView):
 
 class DesignationDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        qs = Designation.objects.all() if is_platform_admin(request.user) else Designation.objects.filter(company=request.user.company)
+        return qs.filter(pk=pk).first()
+
+    def patch(self, request, pk):
+        """Set what this designation may do, and whose records it sees. Company
+        admins only — this decides everyone else's access."""
+        from .capabilities import (ALL_MODULES, CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES,
+                                   SCREEN_KEYS, SCREEN_MODULE, modules_of, with_module_defaults)
+        if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
+            return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
+        desig = self._get(request, pk)
+        if desig is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if 'capabilities' in request.data:
+            caps = request.data.get('capabilities') or []
+            if not isinstance(caps, list):
+                return Response({'capabilities': 'Send a list of capability keys.'}, status=status.HTTP_400_BAD_REQUEST)
+            unknown = [c for c in caps if c not in CAPABILITY_KEYS]
+            if unknown:
+                return Response({'capabilities': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.capabilities = sorted(set(caps))
+            desig.capabilities_set = True
+        if 'screens' in request.data:
+            screens = request.data.get('screens') or []
+            if not isinstance(screens, list):
+                return Response({'screens': 'Send a list of screen keys.'}, status=status.HTTP_400_BAD_REQUEST)
+            unknown = [c for c in screens if c not in SCREEN_KEYS]
+            if unknown:
+                return Response({'screens': f'Unknown: {", ".join(map(str, unknown))}'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.screens = with_module_defaults(screens)
+            desig.screens_set = True
+            # Which modules this menu speaks for. Sent by the editor, which knows
+            # the modules it offered; falling back to the modules the keys name
+            # keeps an older browser saving exactly what it used to.
+            mods = request.data.get('screens_modules')
+            if isinstance(mods, list):
+                unknown = [m for m in mods if m not in ALL_MODULES]
+                if unknown:
+                    return Response({'screens_modules': f'Unknown: {", ".join(map(str, unknown))}'},
+                                    status=status.HTTP_400_BAD_REQUEST)
+                desig.screens_modules = sorted(set(mods) | set(modules_of(desig.module)))
+            else:
+                desig.screens_modules = sorted(
+                    {SCREEN_MODULE[k] for k in desig.screens if k in SCREEN_MODULE}
+                    | set(modules_of(desig.module)))
+        if 'dashboard' in request.data:
+            dash = request.data.get('dashboard') or ''
+            if dash not in DASHBOARD_KEYS:
+                return Response({'dashboard': 'Unknown dashboard.'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.dashboard = dash
+        if 'data_scope' in request.data:
+            scope = request.data.get('data_scope') or ''
+            if scope not in [s for s, _ in DATA_SCOPES]:
+                return Response({'data_scope': 'Unknown scope.'}, status=status.HTTP_400_BAD_REQUEST)
+            desig.data_scope = scope
+        desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope',
+                                  'screens', 'screens_set', 'screens_modules', 'dashboard'])
+        # Anything this company has cached was worked out under the old rules.
+        bump_permissions_version(desig.company_id)
+        return Response(DesignationSerializer(desig).data)
 
     def delete(self, request, pk):
         qs = Designation.objects.all() if is_platform_admin(request.user) else Designation.objects.filter(company=request.user.company)

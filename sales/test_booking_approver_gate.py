@@ -78,3 +78,70 @@ class ApproverGate(TestCase):
         from sales.views import ClosureCancelView
         self.assertTrue(hasattr(ClosureCancelView, 'post'))
         self.assertFalse(_can_approve_project(self.other, self.configured, self.co))
+
+
+class TheApprovalsListIsWhatYouMayDecide(TestCase):
+    """Named on no project, and the Approvals screen is empty.
+
+    It used to fall back to the viewer's own work, so a Cluster Head named
+    nowhere opened Approvals on 44 of his own sales, with Cancel and Revise
+    offered on each. Cancel was refused by the server, but a screen that offers
+    a verdict on your own deal is the wrong screen. They are on My Bookings,
+    which is where they belong, and still are.
+    """
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.co = Company.objects.create(code='APL', name='Approvals Co')
+        self.named = User.objects.create_user('n@apl.com', company=self.co, user_code='L-N',
+                                              password='x', name='Named', role='Manager',
+                                              modules=['Sales'])
+        self.nowhere = User.objects.create_user('x@apl.com', company=self.co, user_code='L-X',
+                                                password='x', name='Nowhere', role='Manager',
+                                                modules=['Sales'])
+        self.admin = User.objects.create_user('a@apl.com', company=self.co, user_code='L-A',
+                                              password='x', name='Admin', role='Admin',
+                                              modules=['Sales'])
+        self.p = Project.objects.create(company=self.co, name='Tundav',
+                                        booking_approvers=[self.named.id])
+        for i, seller in enumerate((self.named, self.nowhere)):
+            plot = Plot.objects.create(project=self.p, number=f'Q{i}')
+            Booking.objects.create(company=self.co, project=self.p, plot=plot, stm=seller,
+                                   client_name=f'C{i}', phone=f'977770000{i}', status='sold',
+                                   approval_status='APPROVED')
+
+    def _approvals(self, user):
+        from rest_framework.test import APIClient
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=user.pk))
+        return api.get('/api/sales/bookings/?to_decide=1&status=sold&source=sales').json()
+
+    def _my_bookings(self, user):
+        from rest_framework.test import APIClient
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=user.pk))
+        return api.get('/api/sales/bookings/?status=sold&mine=1&source=sales').json()
+
+    def test_a_manager_named_nowhere_gets_an_empty_list(self):
+        self.assertEqual(self._approvals(self.nowhere), [])
+
+    def test_the_rest_of_the_endpoint_is_unchanged(self):
+        """Drafts and the search the Revise form runs are the viewer's own work,
+        not a verdict — they do not ask to_decide and still come back."""
+        from rest_framework.test import APIClient
+        api = APIClient()
+        api.force_authenticate(User.objects.get(pk=self.nowhere.pk))
+        rows = api.get('/api/sales/bookings/?status=sold&source=sales').json()
+        self.assertEqual([b['client_name'] for b in rows], ['C1'])
+
+    def test_their_own_sale_is_still_on_my_bookings(self):
+        names = [b['client_name'] for b in self._my_bookings(self.nowhere)]
+        self.assertEqual(names, ['C1'], 'their own work did not go anywhere')
+
+    def test_the_named_approver_still_sees_the_project(self):
+        self.assertEqual(len(self._approvals(self.named)), 2,
+                         "both of the project's bookings, which is what they decide")
+
+    def test_an_admin_still_sees_the_company(self):
+        self.assertEqual(len(self._approvals(self.admin)), 2)

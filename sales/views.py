@@ -20,7 +20,10 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 logger = logging.getLogger(__name__)
 
 from accounts.models import User
-from accounts.permissions import is_platform_admin, scope_to_company
+from accounts.capabilities import (SCOPE_COMPANY, SCOPE_OWN, SCOPE_PROJECTS, SCOPE_TEAM,
+                                   permissions_version,
+                                   data_scope, user_can)
+from accounts.permissions import is_module_admin, is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 
 
@@ -35,14 +38,14 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, BackupSettings, BackupRecord, LeadTransfer, ChannelPartner,
+    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
     LeadStatusHistorySerializer, BookingSerializer,
-    BackupSettingsSerializer, BackupRecordSerializer, LeadTransferSerializer, ChannelPartnerSerializer,
+    LeadTransferSerializer, ChannelPartnerSerializer,
 )
 
 PAGE_SIZE = 25
@@ -108,32 +111,56 @@ def _is_sales_admin(user):
     )
 
 
+CP_MODULE = 'Channel Partner'
+
+
+def has_cp_access(user):
+    """Channel Partner is its own module now, granted in User Management the way
+    AR and Club 1000 are. Admins always have it."""
+    if not (user and getattr(user, 'is_authenticated', True)):
+        return False
+    return bool(
+        is_admin_or_manager(user)
+        or CP_MODULE in (getattr(user, 'modules', None) or [])
+        or CP_MODULE in (getattr(user, 'manager_modules', None) or [])
+        or CP_MODULE in (getattr(user, 'admin_modules', None) or [])
+    )
+
+
 def has_sales_access(user):
     """Admin/Manager, or a plain employee who's been granted the Sales module —
     used for actions (like bulk lead import) that used to be manager-only but
-    shouldn't be gated tighter than "can this person use Sales at all"."""
-    return is_admin_or_manager(user) or 'Sales' in (getattr(user, 'modules', None) or [])
+    shouldn't be gated tighter than "can this person use Sales at all".
+
+    Channel Partner counts too: it is a separate module that works the same lead
+    tables, scoped to partner-sourced records."""
+    mods = getattr(user, 'modules', None) or []
+    return is_admin_or_manager(user) or 'Sales' in mods or CP_MODULE in mods
 
 
 def _designation(user):
     return (getattr(user, 'designation', '') or '').lower()
 
 
+# Who does what is configured per company on the Designation master now (see
+# accounts/capabilities.py). A designation nobody has configured still falls back to
+# the old rules — matching text in the title — so behaviour is unchanged until a
+# company edits its own designations.
+
 def is_telecaller(user):
-    d = _designation(user)
-    return 'telecaller' in d or 'tele caller' in d
+    """Works the calling queue."""
+    return user_can(user, 'sales.pipeline.telecalling')
 
 
 def is_stm(user):
-    d = _designation(user)
-    return 'stm' in d or 'sales team' in d or 'sales executive' in d
+    """Works site visits, closures and bookings."""
+    return user_can(user, 'sales.pipeline.stm')
 
 
 def is_cp(user):
     """CP Executive — an employee-level Channel Partner who sources & works their
     own leads (no Meta distribution). Scoped like an STM (by the lead's stm field)."""
-    d = _designation(user)
-    return 'cp executive' in d or 'channel partner' in d
+    return user_can(user, 'sales.pipeline.cp')
 
 
 def is_cp_manager(user):
@@ -142,7 +169,7 @@ def is_cp_manager(user):
     visibility within it still comes from the existing Manager project-assignment
     mechanism (manager_project_ids/scope_leads_to_project) — no CP-specific
     scoping needed, it already applies to any Manager regardless of designation."""
-    return getattr(user, 'role', '') == 'Manager' and _designation(user).startswith('cp')
+    return getattr(user, 'role', '') == 'Manager' and user_can(user, 'sales.pipeline.cp_manager')
 
 
 def is_cp_designated(user):
@@ -157,11 +184,11 @@ def is_cp_designated(user):
 
 
 def can_access_cp_module(user):
-    """Who can reach the Channel Partner module: true/hard admins always can
-    (see _is_hard_admin); a CP-designation Manager or CP Executive gets in via
-    their designation. Mirrors web's canAccessChannelPartner(user) — keep in
-    sync."""
-    return bool(_is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
+    """Who can reach the Channel Partner module. It is a module of its own now,
+    so the answer is the same as for AR or Club 1000: whoever has been granted
+    it in User Management. A CP designation still gets in on its own, so nobody
+    loses access on the day this ships."""
+    return bool(has_cp_access(user) or _is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
 
 
 def cp_lead_q(prefix=''):
@@ -232,6 +259,28 @@ def _visible_user_ids(user):
         ids.update(children)
         frontier = children
     return ids
+
+
+def _cp_desk_ids(user):
+    """Whose partner-sourced bookings the Channel Partner module shows this person,
+    or None for all of them. A CP head (CP-designation manager, or anyone who sees
+    the whole company) sees every partner-sourced deal, whoever booked it — so a
+    CP Cluster Head and the CMO above him read the same figure. Everyone else sees
+    their own and their reporting tree's."""
+    if is_cp_manager(user) or _sees_all_company(user):
+        return None
+    return _visible_user_ids(user)
+
+
+def _cp_desk_closure_q(company_id, desk_ids):
+    """Closures belonging to a CP desk, read the way My Bookings reads them: by the
+    owner of the booking that stands, and for a closure with no booking, by its own
+    STM or referrer. desk_ids None means the whole partner book."""
+    if desk_ids is None:
+        return Q()
+    return Q(id__in=_closures_booked_by(company_id, desk_ids)) | (
+        ~Q(id__in=_closures_with_a_booking(company_id))
+        & (Q(stm__in=desk_ids) | Q(referred_by_telecaller__in=desk_ids)))
 
 
 def _is_hard_admin(user):
@@ -401,9 +450,10 @@ def _can_approve_accounts_booking(user, project_id, project, lead_id, company, b
 
 
 def can_assign_leads(user):
-    """Telecallers, STMs & CP Executives cannot (re)assign leads — only everyone
-    else (admins/managers/Sales CRM)."""
-    return not (is_telecaller(user) or is_stm(user) or is_cp(user))
+    """Who may hand a lead to someone else. By default telecallers, STMs and CP
+    Executives cannot and everyone else can — a company can change that on the
+    designation."""
+    return user_can(user, 'sales.lead.assign')
 
 
 # A project's floor plans, site-map zones and unit-type plans are large JSON blobs —
@@ -508,6 +558,43 @@ def scope_leads_to_project(qs, user, lead_prefix=''):
     return qs.filter(**{f'{lead_prefix}project__in': pids})
 
 
+def scope_owned_to_role(qs, user, owner_fields, project_field=None, request=None):
+    """The same restriction scope_leads_to_role applies to leads, for the records
+    that hang off them — site visits, closures, follow-ups.
+
+    They are counted from their own tables, not derived from the leads queryset,
+    so without this a designation set to "own records only" saw its lead count
+    shrink while Site Visits and Closures still showed the whole desk's — and the
+    conversion rate on the dashboard was one scope divided by another.
+
+    `owner_fields` are the columns that say whose record it is; `project_field`
+    is how the row reaches its project, for the project-scoped case.
+    """
+    def by_owner(ids):
+        f = Q()
+        for field in owner_fields:
+            f |= Q(**{f'{field}__in': ids})
+        return qs.filter(f)
+
+    def by_project():
+        pids = manager_project_ids(user)
+        if pids is None or project_field is None:
+            return qs
+        return qs.filter(**{f'{project_field}__in': pids})
+
+    scope = data_scope(user)
+    if scope == SCOPE_COMPANY:
+        return qs
+    if scope in (SCOPE_OWN, SCOPE_TEAM):
+        return by_owner({user.id} if scope == SCOPE_OWN else _visible_user_ids(user))
+    if scope == SCOPE_PROJECTS:
+        return by_project()
+    # Nothing configured: the rule these counts have always used.
+    if _sees_all_company(user, request):
+        return by_project()
+    return by_owner(_visible_user_ids(user))
+
+
 def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     """Restrict a Lead-related queryset by org hierarchy: a user sees leads OWNED (as
     STM or telecaller) by themselves or by anyone reporting to them, transitively.
@@ -525,6 +612,18 @@ def scope_leads_to_role(qs, user, lead_prefix='', request=None):
     # data — regardless of any manager_modules flag or reporting-line quirk. Without
     # this a telecaller who also carries the 'Sales' manager flag (mis-config) would
     # see every unrouted lead in the company as "My Leads".
+    # A company can set the scope on the designation itself; '' keeps the old
+    # role-and-reporting-tree behaviour below (see accounts/capabilities.py).
+    scope = data_scope(user)
+    if scope == SCOPE_COMPANY:
+        return scope_leads_to_project(qs, user, lead_prefix)
+    if scope in (SCOPE_OWN, SCOPE_TEAM):
+        ids = {user.id} if scope == SCOPE_OWN else _visible_user_ids(user)
+        return qs.filter(
+            Q(**{f'{lead_prefix}stm__in': ids}) | Q(**{f'{lead_prefix}telecaller__in': ids})
+        )
+    if scope == SCOPE_PROJECTS:
+        return scope_leads_to_project(qs, user, lead_prefix)
     if is_telecaller(user) or is_stm(user) or is_cp(user):
         ids = _visible_user_ids(user)
         return qs.filter(
@@ -554,6 +653,54 @@ def _project_in_scope(request, project_id):
     return scope_to_company(Project.objects.filter(pk=project_id), request.user).exists()
 
 
+def _refs_error(request, data, fields):
+    """The first id named in `data` that is not in the requester's company.
+
+    Several serializers here take fields='__all__' or plain ModelSerializer
+    foreign keys, which accept any primary key in the table. The create paths
+    check ownership; the update paths did not — so a PATCH could move a record
+    onto another company's lead, project or user, pulling their record into this
+    company's screens (or pushing this one into theirs).
+
+    `fields` maps a payload key to (model, ORM path from it to Company).
+    """
+    for name, (model, path) in fields.items():
+        if name not in data:
+            continue
+        value = data.get(name)
+        if value in (None, '', 0):
+            continue
+        if not scope_to_company(model.objects.filter(pk=value), request.user, path).exists():
+            return f'That {name.replace("_", " ")} belongs to another company.'
+    return None
+
+
+def _booking_refs_error(company, data):
+    """The first lead/project/plot named here that is not `company`'s, as a message.
+
+    A booking's own company is resolved server-side, but the ids hung off it were
+    taken as given — so a booking could be bound to another company's lead, and
+    their units flipped to 'hold', removing them from that company's bookable
+    pool. PlotHoldView already scopes the identical operation; these paths just
+    skipped it. `company` comes from _resolve_company, which only honours
+    ?company_id for platform admins, so this stays correct for them too.
+    """
+    lead_id = data.get('lead')
+    if lead_id and not Lead.objects.filter(pk=lead_id, company=company).exists():
+        return 'That lead belongs to another company.'
+
+    project_id = data.get('project')
+    if project_id and not Project.objects.filter(pk=project_id, company=company).exists():
+        return 'That project belongs to another company.'
+
+    pids = [int(x) for x in (data.get('plot_ids') or []) if str(x).isdigit()]
+    if str(data.get('plot') or '').isdigit():
+        pids.append(int(data['plot']))
+    if pids and Plot.objects.filter(pk__in=pids).exclude(project__company=company).exists():
+        return 'Those units belong to another company.'
+    return None
+
+
 class StatsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -577,7 +724,10 @@ class StatsView(APIView):
         # the frontend's cp_only param is the normal path but not the only one
         # that can reach this view.
         cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}'
+        # The permissions version is in the key so a designation change takes
+        # effect at once, instead of at the end of the cache's 20 seconds.
+        _pv = permissions_version(getattr(request.user, 'company_id', None))
+        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}:{_pv}'
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -659,6 +809,12 @@ class StatsView(APIView):
         # fix already applied to sql_count below and to StatsTrendView's per-day
         # warm/hot/cold rows; this brings the stat-card tiles in line with those.
         def _status_transition_count(field, value):
+            # Undated, the Leads list filtered by this status shows who is at it
+            # *now*, so the tile counts that — it used to count everyone who had
+            # *ever* been marked it, which no list could add up to. Dated, both
+            # mean "moved to it within the range".
+            if not date_from and not date_to:
+                return leads_scope.filter(**{field: value}).count()
             qs = LeadStatusHistory.objects.filter(
                 lead__in=leads_scope, field_changed=field, new_value=value)
             if date_from:
@@ -692,7 +848,15 @@ class StatsView(APIView):
                 qs = qs.filter(_sv_visited__date__lte=date_to)
             return set(qs.values_list('id', flat=True))
 
-        def _effective_stm_count(value):
+        def _effective_stm_count(value, current_when_undated=True):
+            # With no date range the Leads list shows who is Hot/Warm/Cold *now*
+            # (sv-done leads counting by their latest visit's outcome), so the tile
+            # counts the same — it used to count everyone who had *ever* been hot,
+            # and opened a list that could never add up to it.
+            if current_when_undated and not date_from and not date_to:
+                return leads_scope.annotate(
+                    _sv_outcome=Subquery(_latest_sv_for_lead.values('outcome')[:1]),
+                ).filter(Q(stm_status=value) | Q(stm_status='sv_done', _sv_outcome=value)).count()
             direct_hist = LeadStatusHistory.objects.filter(
                 lead__in=leads_scope, field_changed='stm_status', new_value=value)
             if date_from:
@@ -706,7 +870,11 @@ class StatsView(APIView):
         stm_hot_count           = _effective_stm_count('hot')
         stm_warm_count          = _effective_stm_count('warm')
         stm_cold_count          = _effective_stm_count('cold')
-        stm_sv_scheduled_count  = _status_transition_count('stm_status', 'sv_scheduled')
+        # Visits that are scheduled right now, counted from the Site Visits list's own
+        # rows so the tile matches the Scheduled tab it opens. It used to count leads
+        # whose status had ever *moved* to "SV scheduled" in the period — 19 on the
+        # tile against 1 visit actually waiting, the rest long since done or dropped.
+        stm_sv_scheduled_count  = _site_visit_scope(request).filter(status='scheduled').count()
         # The Site Visits tile reports visits that actually HAPPENED — a scheduled,
         # no-show or cancelled visit is not one. Counting every row made the tile read
         # 48 where only 26 had been done. Dated by when the visit happened, not when
@@ -719,30 +887,61 @@ class StatsView(APIView):
         # against SiteVisit/Closure, not derived from leads_qs, so they need the
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
+        _not_sold, _awaiting_accounts, _cp_cl = _closure_books(_stats_company_id(request, company_id))
         if cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
-            cl_qs = cl_qs.filter(cp_lead_q(prefix='lead__'))
+            # Strictly the partner book, and only this person's partner desk — the
+            # same deals the CP module's My Bookings lists (see _cp_desk_ids).
+            cl_qs = cl_qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
         else:
             # Same ownership exception as leads_qs above.
             sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
-            cl_qs = cl_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
-        if not _sees_all_company(request.user, request):
-            _ids = _visible_user_ids(request.user)
-            sv_qs = sv_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
-            cl_qs = cl_qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+            # A closure with a booking follows that booking, and the booking lists
+            # split the two books strictly — so this does too, or the tile counts
+            # partner deals the list it opens can never show. A Regional Head read
+            # 377 against a list of 367, the 10 being his team's partner-sourced
+            # work. A closure with no booking has nothing to follow and keeps the
+            # handed-off exception, same as the leads and visits above.
+            _booked = _closures_with_a_booking(_stats_company_id(request, company_id))
+            cl_qs = cl_qs.exclude(_cp_cl & (Q(id__in=_booked)
+                                            | (~Q(stm__in=own_ids)
+                                               & ~Q(referred_by_telecaller__in=own_ids))))
+        # Whose visits and closures these are follows the designation's scope, the
+        # same one the leads above use — otherwise the tiles disagree with each
+        # other and the conversion rate compares two different populations.
+        owners = ('stm', 'referred_by_telecaller')
+        sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'lead__project', request)
+        cl_qs = scope_owned_to_role(cl_qs, request.user, owners, 'project', request)
+        # The deals this book has closed but Accounts has not signed off yet. Taken
+        # before the line below removes them, because that is exactly what it
+        # removes: they become closures the moment Accounts approves.
+        cl_waiting = cl_qs.filter(id__in=_awaiting_accounts)
+        # One deal, one closure, and only once its booking is approved by Sales or
+        # CP and then by Accounts — so the tile counts what Approvals lists rather
+        # than a superseded revision or a deal still waiting for sign-off.
+        cl_qs = cl_qs.exclude(id__in=_not_sold)
         if date_from:
             sv_qs = sv_qs.filter(visited_at__date__gte=date_from)
             cl_qs = cl_qs.filter(closure_date__gte=date_from)
+            cl_waiting = cl_waiting.filter(closure_date__gte=date_from)
         if date_to:
             sv_qs = sv_qs.filter(visited_at__date__lte=date_to)
             cl_qs = cl_qs.filter(closure_date__lte=date_to)
+            cl_waiting = cl_waiting.filter(closure_date__lte=date_to)
         # Follow-up calls: a completed follow-up IS a call that was made, counted on
         # the day it was completed so the dashboard's date filter applies to it the
         # same way it does to everything else. Scoped by assignee exactly as the
         # Follow-Ups screen is, so the tile and that list agree.
         fu_qs = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company')
-        if not _sees_all_company(request.user, request):
-            fu_qs = fu_qs.filter(assigned_to__in=_visible_user_ids(request.user))
+        fu_qs = scope_owned_to_role(fu_qs, request.user, ('assigned_to',), 'lead__project', request)
+        # The same two books as the leads, visits and closures above — the tiles
+        # had been counting both, which is why they never contradicted the
+        # Follow-Ups list: it counted both as well.
+        if cp_only:
+            fu_qs = fu_qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            fu_qs = fu_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=own_ids))
         if company_id and is_platform_admin(request.user):
             fu_qs = fu_qs.filter(lead__company_id=company_id)
         fu_done = fu_qs.filter(status='completed', completed_at__isnull=False)
@@ -778,18 +977,20 @@ class StatsView(APIView):
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        # Active projects are the company's projects, not a count of the person's
+        # own records: the same number on every dashboard, so "9 here, 11 there,
+        # 4 after changing a scope" cannot happen. The only narrowing is a
+        # manager assigned to particular projects, who sees theirs.
         active_projects_qs = scope_to_company(Project.objects.filter(is_active=True), request.user).filter(**prj_filter)
-        if cp_only:
-            # The CP dashboard's "Active Projects" means projects with actual CP
-            # activity, not every active project company-wide — leads_scope is
-            # already split to the CP pool above (cp_lead_q), not date-windowed
-            # so this stays a stable "currently active in CP" count.
-            active_projects_qs = active_projects_qs.filter(id__in=leads_scope.values('project_id'))
+        _assigned = manager_project_ids(request.user)
+        if _assigned is not None:
+            active_projects_qs = active_projects_qs.filter(id__in=_assigned)
         sv_done, closures, active_projects = (
             sv_scoped.count(),
             cl_scoped.count(),
             active_projects_qs.count(),
         )
+        accounts_pending = cl_waiting.filter(**cl_filter).count()
         # Post-visit outcome breakdown of the same completed-visits window above.
         sv_hot_count  = sv_scoped.filter(outcome='hot').count()
         sv_warm_count = sv_scoped.filter(outcome='warm').count()
@@ -798,8 +999,10 @@ class StatsView(APIView):
 
         # SQL funnel: distinct leads that are effectively warm (stm_status → warm,
         # or still sv_done with a Warm visit outcome) in the window — same
-        # definition as stm_warm_count above.
-        sql_count = stm_warm_count
+        # definition as stm_warm_count above — except undated, where the tile shows
+        # who is warm now but a conversion rate needs everyone who ever became SQL
+        # (a lead stops being warm the moment it closes).
+        sql_count = _effective_stm_count('warm', current_when_undated=False)
 
         # Avg closure timeline: mean days from lead arrival (created_at) to closure_date.
         _diffs = [
@@ -839,6 +1042,9 @@ class StatsView(APIView):
             'sv_cold_count': sv_cold_count,
             'sv_not_interested_count': sv_not_interested_count,
             'closures':           closures,
+            # Closed, approved by Sales or CP, waiting at the Accounts gate. These
+            # are not in `closures` yet — they join it when Accounts signs off.
+            'accounts_pending':   accounts_pending,
             'sql_count':          sql_count,
             'avg_closure_days':   avg_closure_days,
             'active_projects':    active_projects,
@@ -940,6 +1146,16 @@ class StatsTrendView(APIView):
             cl_qs = cl_qs.filter(Q(stm__in=ids) | Q(referred_by_telecaller__in=ids))
         if company_id and is_platform_admin(request.user):
             cl_qs = cl_qs.filter(company_id=company_id)
+        # The same two books the tile above splits into, or the chart contradicts it.
+        _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, company_id))
+        if cp_only:
+            cl_qs = cl_qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
+        else:
+            _own = _visible_user_ids(request.user)
+            cl_qs = cl_qs.exclude(_cp_cl & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+        # Same as the Closures tile: one approved deal, one closure.
+        cl_qs = cl_qs.exclude(id__in=_not_sold)
         # booking/total amounts are EncryptedDecimalField (cannot Sum() in the DB),
         # so aggregate count + amount per day in Python for the closures chart tooltip.
         closure_map = {}
@@ -1553,6 +1769,14 @@ class LeadDetailView(APIView):
         lead = self._get_lead(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        refs_err = _refs_error(request, request.data, {
+            'project': (Project, 'company'), 'source': (LeadSource, 'company'),
+            'channel_partner': (ChannelPartner, 'company'),
+            'telecaller': (User, 'company'), 'stm': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
 
         old_status       = lead.status
         old_tc_status    = lead.telecaller_status
@@ -2408,6 +2632,14 @@ class FollowUpListView(APIView):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
+        else:
+            # The Sales module's book, the last of the five to be split. A follow-up
+            # on a partner lead belongs to Channel Partner, with the handed-off
+            # exception the leads and visits make: one passed to a Sales person is
+            # theirs to chase once it is theirs to work. A follow-up is owned by
+            # whoever it is assigned to, so that is what the exception reads.
+            _own = _visible_user_ids(request.user)
+            qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=_own))
         return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), FollowUpSerializer)
 
     def post(self, request):
@@ -2434,40 +2666,62 @@ class FollowUpDetailView(APIView):
             followup = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company').get(pk=pk)
         except FollowUp.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        refs_err = _refs_error(request, request.data, {
+            'lead': (Lead, 'company'), 'assigned_to': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
         ser = FollowUpSerializer(followup, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         return Response(FollowUpSerializer(ser.save()).data)
 
 
+def _site_visit_scope(request):
+    """The site visits this request may see — the Site Visits list's rows before
+    any status tab is applied. The dashboard's SV Scheduled tile counts from here
+    too, so the number on the tile is the number of rows the tile opens."""
+    qs = scope_to_company(
+        SiteVisit.objects.select_related('lead', 'project', 'stm',
+                                         'referred_by_telecaller', 'lead__telecaller')
+                         .defer(*PROJECT_BLOBS),
+        request.user, 'lead__company',
+    )
+    if not _sees_all_company(request.user, request):
+        _ids = _visible_user_ids(request.user)
+        qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
+    else:
+        # A manager assigned to specific projects sees only those projects' visits.
+        qs = scope_leads_to_project(qs, request.user)
+    # Platform admin viewing a specific company (?company_id) — honour the filter.
+    # A site visit has no company of its own; it belongs to its lead's company, the
+    # same path scope_to_company uses above. Filtering company_id directly raised
+    # FieldError, so this endpoint 500'd for any platform admin with a company
+    # selected — which is what left My Conversions showing 0 site visits.
+    cid = request.query_params.get('company_id')
+    if cid and is_platform_admin(request.user):
+        qs = qs.filter(lead__company_id=cid)
+    if request.query_params.get('lead_id'):
+        qs = qs.filter(lead_id=request.query_params['lead_id'])
+    if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+        qs = qs.filter(cp_lead_q(prefix='lead__'))
+    else:
+        # The Sales module's book. A partner-sourced visit belongs to Channel
+        # Partner, with the same handed-off exception the dashboard makes: a CP
+        # lead passed to a Sales person is theirs to show once it is theirs to
+        # work. Written as the dashboard writes it so the two cannot drift —
+        # without it this list said 1,623 completed visits where the tile said
+        # 1,563, the 60 partner visits being the whole of the difference.
+        _own = _visible_user_ids(request.user)
+        qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+    return qs
+
+
 class SiteVisitListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = scope_to_company(
-            SiteVisit.objects.select_related('lead', 'project', 'stm',
-                                             'referred_by_telecaller', 'lead__telecaller')
-                             .defer(*PROJECT_BLOBS),
-            request.user, 'lead__company',
-        )
-        if not _sees_all_company(request.user, request):
-            _ids = _visible_user_ids(request.user)
-            qs = qs.filter(Q(stm__in=_ids) | Q(referred_by_telecaller__in=_ids))
-        else:
-            # A manager assigned to specific projects sees only those projects' visits.
-            qs = scope_leads_to_project(qs, request.user)
-        # Platform admin viewing a specific company (?company_id) — honour the filter.
-        # A site visit has no company of its own; it belongs to its lead's company, the
-        # same path scope_to_company uses above. Filtering company_id directly raised
-        # FieldError, so this endpoint 500'd for any platform admin with a company
-        # selected — which is what left My Conversions showing 0 site visits.
-        cid = request.query_params.get('company_id')
-        if cid and is_platform_admin(request.user):
-            qs = qs.filter(lead__company_id=cid)
-        if request.query_params.get('lead_id'):
-            qs = qs.filter(lead_id=request.query_params['lead_id'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            qs = qs.filter(cp_lead_q(prefix='lead__'))
+        qs = _site_visit_scope(request)
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         # Headline counts without shipping the rows: the app's stat tiles used to
@@ -2515,6 +2769,12 @@ class SiteVisitDetailView(APIView):
             sv = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').get(pk=pk)
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        refs_err = _refs_error(request, request.data, {
+            'lead': (Lead, 'company'), 'project': (Project, 'company'),
+            'stm': (User, 'company'), 'referred_by_telecaller': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
         old_status = sv.status
         # Marking a visit Done must record what came of it — an outcome and remarks,
         # not just a status flip — so the pipeline can tell an interested walk-in
@@ -2574,14 +2834,25 @@ class ClosureListView(APIView):
         cid = request.query_params.get('company_id')
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
+        _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, cid))
         if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
-            # A closure counts as CP the same way its booking does — either its
-            # lead is CP-attributed (cp_lead_q) or the booking that became this
-            # closure had its own free-text Source set to "Channel Partner" (see
-            # _is_cp_sourced_booking) — otherwise a Sales-module booking that
-            # chose that source silently drops out of the CP Closures tab once
-            # approved.
-            qs = qs.filter(cp_lead_q(prefix='lead__') | Q(bookings__source__iexact='channel partner')).distinct()
+            # The Channel Partner book — see _closure_books for what counts as one —
+            # and only this person's partner desk (see _cp_desk_ids).
+            qs = qs.filter(_cp_cl).filter(_cp_desk_closure_q(
+                _stats_company_id(request, cid), _cp_desk_ids(request.user))).distinct()
+        else:
+            # The Sales module's book. A partner-sourced closure belongs to Channel
+            # Partner, with the same handed-off exception the dashboard makes: a CP
+            # lead passed to a Sales person is theirs to show once it is theirs to
+            # work. Written as the dashboard writes it so the two cannot drift.
+            _own = _visible_user_ids(request.user)
+            qs = qs.exclude(_cp_cl & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+        # A cancelled closure is a deal that came off the books, not a conversion —
+        # the dashboard has always left it out, and this list counted it.
+        qs = qs.exclude(status='cancelled')
+        # One deal, one closure, and only once its booking is approved — the same
+        # deals Approvals lists, so the two screens never disagree.
+        qs = qs.exclude(id__in=_not_sold)
         if request.query_params.get('counts_only') == 'true':
             return Response({'total': qs.count()})
         return maybe_paginate(request, qs.order_by('-closure_date', '-id'), ClosureSerializer)
@@ -4385,18 +4656,31 @@ def _loi_enabled(company):
     return bool(getattr(company, 'loi_enabled', False))
 
 
+LOI_NAME_ALLOWED = r'[^A-Za-z0-9 ._-]+'
+
+
+def _loi_safe(s):
+    """A file/folder name that can never break a signed link: letters, digits,
+    spaces, dot, underscore and hyphen only. Everything else a buyer's name can
+    hold — "&", "%", ",", brackets, slashes, non-Latin script — is dropped.
+
+    This used to be a list of characters to remove, grown one broken booking at a
+    time ("&" for "PARAG & SAHIL BHAI", then "," for joint buyers "A (50) ,B (50)"),
+    each failing every open with Supabase's InvalidSignature. An allow-list can't
+    be surprised by the next character."""
+    import re
+    import unicodedata
+    text = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode()
+    text = re.sub(LOI_NAME_ALLOWED, ' ', text)
+    return re.sub(r'\s+', ' ', text).strip(' .') or 'NA'
+
+
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
-    import re
-    # Also strips &%#+;= — safe as literal filesystem chars, but they break Supabase's
-    # signed-URL scheme (an "&" in the path produced a token whose embedded path didn't
-    # match the actual object key, failing signature verification on every open —
-    # confirmed against a real booking, "PARAG & SAHIL BHAI").
-    san = lambda s: (re.sub(r'[\\/:*?"<>|&%#+;=]+', '', str(s or '')).strip() or 'NA')
-    proj = san(b.project.name if b.project_id else 'Project')
+    proj = _loi_safe(b.project.name if b.project_id else 'Project')
     # EOI bookings have no plot — fall back to the EOI code held in plot_numbers.
-    plot = san(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
-    client = san(b.client_name)
+    plot = _loi_safe(b.plot.number if b.plot_id else (b.plot_numbers or b.area))
+    client = _loi_safe(b.client_name)
     rev = b.revision_no or 0
     return f'{proj}/Plot {plot} - {client}/R{rev}_LOI_Plot{plot}_{client}.pdf'
 
@@ -4485,7 +4769,28 @@ def _schedule_gap(data):
     return total - deal
 
 
+MIN_INST_YEAR, MAX_INST_YEAR = 2015, 2100
+
+
+def _bad_installment_dates(data):
+    """Installment dates whose year can't be real — "0026-01-26" for 2026, typed on
+    the booking form. AR then reads the unit as two thousand years overdue and it
+    tops the collections list with a meaningless figure."""
+    bad = []
+    for key in ('installments', 'extra_work_inst'):
+        for i in (data.get(key) or []):
+            d = str((i or {}).get('date') or '')
+            if len(d) >= 4 and d[:4].isdigit() and not (MIN_INST_YEAR <= int(d[:4]) <= MAX_INST_YEAR):
+                bad.append((str((i or {}).get('no') or '?'), d))
+    return bad
+
+
 def _schedule_error(data):
+    bad = _bad_installment_dates(data)
+    if bad:
+        return ('Check the installment date%s: %s. The year must be between %d and %d.'
+                % ('' if len(bad) == 1 else 's',
+                   ', '.join('#%s is %s' % (no, d) for no, d in bad[:5]), MIN_INST_YEAR, MAX_INST_YEAR))
     gap = _schedule_gap(data)
     if gap is None or abs(gap) <= SCHEDULE_TOLERANCE:
         return None
@@ -4548,8 +4853,8 @@ class BookingListCreateView(APIView):
         # Two screens, two questions, and conflating them is what made this drift.
         #
         #   `mine` — "My Bookings": what I and my people have sold. Own work plus the
-        #   reporting tree, and in the CP module the CP pool as well, since that is
-        #   the business the module exists to track.
+        #   reporting tree; in the CP module, the partner book I answer for (see
+        #   _cp_desk_ids) plus my own bookings from any source.
         #
         #   otherwise — "Approvals": what I am named to decide, and nothing else.
         #   Deliberately NOT widened to my own work: a booking I made but cannot
@@ -4557,12 +4862,33 @@ class BookingListCreateView(APIView):
         #   under My Bookings instead.
         if request.query_params.get('mine'):
             mine_q = Q(stm_id__in=own_and_team)
-            # The CP pool belongs to My Bookings only in the CP module, so this reads
-            # the explicit flag rather than the viewer's designation: a CP manager
-            # looking at Sales My Bookings should see their own and their team's work,
-            # not every partner-sourced deal in the company.
+            # `scope=visible` widens My Bookings to everything this person may see,
+            # which for a manager or department head is the company. It is what the
+            # Closures tile opens, because that tile counts the same population —
+            # a Regional Head read 367 closures against a list of 270 otherwise.
+            # The list still defaults to their own desk: this is a view they choose,
+            # not what "My Bookings" means. In the CP module it does nothing, since
+            # that list is always the viewer's own partner desk.
+            if (request.query_params.get('scope') == 'visible'
+                    and request.query_params.get('cp_only') != 'true'
+                    and _sees_all_company(request.user, request)):
+                mine_q = Q()
+            # The CP module's My Bookings is the partner book this person answers
+            # for — their own desk, not every partner deal in the company. It reads
+            # the explicit flag rather than the viewer's designation, so a CP manager
+            # looking at Sales My Bookings still sees their own and their team's work
+            # there.
             if request.query_params.get('cp_only') == 'true':
-                mine_q |= is_cp_booking_q
+                # Plus everything this person and their reporting tree sold, whatever
+                # the source: My Bookings answers "what have I and my people sold",
+                # and a CP Cluster Head's team does not stop being their team the
+                # moment a deal comes in as a walk-in. Without the tree half, a
+                # reportee's non-partner booking appeared on no screen this manager
+                # could reach. One filter, so a booking that qualifies both ways is
+                # listed once.
+                _desk = _cp_desk_ids(request.user)
+                cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
+                mine_q = cp_part | Q(stm_id__in=own_and_team)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
@@ -4571,13 +4897,35 @@ class BookingListCreateView(APIView):
                     | (Q(project_id__in=cp_approver_project_ids) & is_cp_booking_q)
                 )
             elif not _sees_all_company(request.user, request, include_manager_role=False):
-                qs = qs.filter(stm_id__in=own_and_team)
+                # `to_decide` is the Approvals screen asking its own question: what
+                # am I named to rule on? Named on no project, that is nothing. It
+                # used to fall back to the viewer's own work, which put a Cluster
+                # Head's 44 own sales on the screen where verdicts are given, with
+                # Cancel and Revise offered on each — Cancel the server then refused.
+                # They are on My Bookings, and still are.
+                #
+                # Everything else this endpoint serves — the Drafts a rep is still
+                # writing, the search the Revise form runs — is their own work, and
+                # comes back as before. Real admins are exempt above.
+                qs = (qs.none() if request.query_params.get('to_decide') == '1'
+                      else qs.filter(stm_id__in=own_and_team))
             if cp_scoped:
                 # The CP module's approvals are the CP pool, full stop. Reuse
                 # is_cp_booking_q rather than cp_lead_q alone: a Sales-module booking
                 # tagged Source = "Channel Partner" routes to the CP approvers, so it
                 # has to be visible to them or it is authorized but unreachable.
                 qs = qs.filter(is_cp_booking_q)
+        # Which book this list is: the Sales module asks for source=sales so its
+        # bookings and approvals hold no partner-sourced deals — those belong to
+        # Channel Partner, which has its own module, its own approvers and its own
+        # list. A booking counts as partner-sourced by its own Source, falling back
+        # to its lead — the same rule the CP module's scoping uses, so the two
+        # always agree and no booking lands in both.
+        source = (request.query_params.get('source') or '').lower()
+        if source == 'cp':
+            qs = qs.filter(is_cp_booking_q)
+        elif source == 'sales':
+            qs = qs.exclude(is_cp_booking_q)
         # Chains are resolved against the whole company, not this viewer's slice —
         # otherwise whether a replaced booking still shows depends on who is looking.
         qs = _drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))
@@ -4597,6 +4945,15 @@ class BookingListCreateView(APIView):
             qs = qs.filter(status='rejected').exclude(approval_status__icontains='CANCEL')
         elif st:
             qs = qs.filter(status=st)
+        # The second gate. A deal Sales or CP has approved still waits on Accounts,
+        # and until that sign-off it is not a closure and the unit is held, not sold
+        # — so the Approvals list can ask for exactly those. Blank reads as approved,
+        # the way everything booked before this gate existed carries it.
+        acc = (request.query_params.get('accounts_status') or '').lower()
+        if acc == 'approved':
+            qs = qs.filter(Q(accounts_status='approved') | Q(accounts_status=''))
+        elif acc in ('pending', 'rejected'):
+            qs = qs.filter(accounts_status=acc)
         # The visibility rules above are ORed conditions that reach through `lead`
         # into the CP directory and the source table. Those are forward foreign keys
         # today, so a booking matching two arms still comes back once — but that is a
@@ -4617,6 +4974,10 @@ class BookingListCreateView(APIView):
     def post(self, request):
         company = _resolve_company(request)
         data = request.data
+
+        refs_err = _booking_refs_error(company, data)
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
 
         # Reject an oversized signed LOI before any booking/lead/plot side effects run —
         # base64 inflates the raw file by ~1/3, so compare against the encoded length.
@@ -5015,6 +5376,10 @@ class BookingDraftView(APIView):
         company = _resolve_company(request)
         data = request.data
 
+        refs_err = _booking_refs_error(company, data)
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+
         draft = None
         if data.get('id'):
             draft = Booking.objects.filter(id=data['id'], company=company,
@@ -5175,14 +5540,103 @@ def _drop_superseded_revisions(qs, scope=None):
     was booked by someone outside his module — so his figure read 108 where the same
     slice read 107 in Sales, and the extra row carried superseded commercial terms.
     """
-    groups = _revision_groups(scope if scope is not None else qs)
+    drop = _superseded_booking_ids(scope if scope is not None else qs)
+    return qs.exclude(id__in=drop) if drop else qs
+
+
+def _superseded_booking_ids(scope):
+    """The bookings a later revision has replaced. See _drop_superseded_revisions
+    for how a deal's rows are connected; this is which of them lose."""
     drop = set()
-    for g in groups.values():
+    for g in _revision_groups(scope).values():
         if len(g) < 2 or not any((x['revision_no'] or 0) > 0 for x in g):
             continue
         keep = max(g, key=lambda x: ((x['revision_no'] or 0), x['id']))
         drop.update(x['id'] for x in g if x['id'] != keep['id'])
-    return qs.exclude(id__in=drop) if drop else qs
+    return drop
+
+
+def _stats_company_id(request, company_id):
+    """Whose books these figures are: the company a platform admin has picked in
+    the company switcher, and otherwise the viewer's own."""
+    if company_id and is_platform_admin(request.user):
+        return company_id
+    return getattr(request.user, 'company_id', None)
+
+
+def _closures_with_a_booking(company_id):
+    """The closures a company's bookings point at. A closure in this set has a
+    booking to follow; one outside it has only its lead."""
+    return {c for c in Booking.objects.filter(company_id=company_id)
+            .values_list('closure_id', flat=True) if c}
+
+
+def _closures_booked_by(company_id, user_ids):
+    """Closures whose standing booking belongs to one of these people.
+
+    My Bookings lists by the booking's owner, so a figure that has to agree with
+    it has to read the same thing. A superseded booking does not count: a deal
+    revised into someone else's name is theirs now, and the closure goes with it.
+    That one deal is why a CP cluster head's tiles read 25 + 36 against a list of
+    60.
+    """
+    scope = Booking.objects.filter(company_id=company_id)
+    return {c for c in scope.filter(stm_id__in=user_ids)
+            .exclude(id__in=_superseded_booking_ids(scope))
+            .values_list('closure_id', flat=True) if c}
+
+
+def _closure_books(company_id):
+    """How a company's closures divide up, as
+    (not_a_live_sale, awaiting_accounts, is_channel_partner).
+
+    All three come from one walk of the revision chains, because they are the
+    same question asked three ways — which booking stands for this deal, and how
+    far has it got.
+
+    `not_a_live_sale` are the closures a closure figure must leave out. A deal is
+    counted once, on the booking that stands, and only once that booking has been
+    signed off by Sales/CP *and* by Accounts:
+
+      * the closure a revision stranded — revising a booking issues the revision
+        its own closure and leaves the old one on the books, which is why the
+        Sales dashboard read 479 where Approvals listed 418, and My Conversions
+        read 512;
+      * the deal still waiting on its Sales or CP approver; and
+      * the deal approved there but not yet at the Accounts gate, which is what
+        `awaiting_accounts` counts separately so a dashboard can show it.
+
+    A closure with no booking at all is nobody's revision and has no approval to
+    wait for, so it is left alone — it is only cancelled ones that drop out, and
+    the caller does that.
+
+    `is_channel_partner` is a Q: a closure belongs to the Channel Partner book
+    when the booking that stands for it does. Reading the lead alone, as the
+    dashboard used to, left 47 of Vistara's closures in neither book — counted in
+    Sales, approved by the CP approvers. Reading every booking, superseded ones
+    included, put 2 more in the wrong one: a deal revised from Channel Partner to
+    Reference is a Reference deal now. A closure recorded before its booking
+    exists has nothing to read and falls back to its lead.
+
+    The Q reaches through the reverse `bookings` relation, so `filter()` on it
+    needs `.distinct()`. `exclude()` compiles to a subquery and does not.
+    """
+    scope = Booking.objects.filter(company_id=company_id) if company_id else Booking.objects.none()
+    dead = _superseded_booking_ids(scope) if company_id else set()
+    cp = Booking.objects.filter(cp_booking_q()).exclude(id__in=dead)
+    is_cp = (Q(bookings__id__in=cp.values('id'))
+             | (Q(bookings__isnull=True) & cp_lead_q(prefix='lead__')))
+    if not company_id:
+        return set(), set(), is_cp
+    booked = {c for c in scope.values_list('closure_id', flat=True) if c}
+    stands = scope.exclude(id__in=dead).filter(status='sold')
+    # accounts_status defaults to 'approved' and everything booked before the
+    # Accounts gate existed carries that, so a blank reads as approved too.
+    done = {c for c in stands.filter(Q(accounts_status='approved') | Q(accounts_status=''))
+            .values_list('closure_id', flat=True) if c}
+    waiting = {c for c in stands.filter(accounts_status='pending')
+               .values_list('closure_id', flat=True) if c}
+    return booked - done, waiting - done, is_cp
 
 
 def _revision_groups(scope):
@@ -5296,6 +5750,20 @@ class BookingAllView(APIView):
         qs = qs.annotate(cp_sourced_ann=Case(
             When(cp_booking_q(), then=Value(True)),
             default=Value(False), output_field=BooleanField()))
+        # The module dashboard's four tiles, without shipping a thousand bookings to
+        # count them — and without the cap below quietly capping the figures too.
+        # Only a deal Sales or CP has approved reaches the Accounts gate, so these
+        # count those and nothing else: a draft carries accounts_status 'approved'
+        # by default and would otherwise read as signed off. Approved here is
+        # therefore the Sales and CP dashboards' closures added together.
+        if request.query_params.get('counts_only') == 'true':
+            sold = qs.filter(status='sold')
+            return Response({
+                'pending':  sold.filter(accounts_status='pending').count(),
+                'approved': sold.filter(Q(accounts_status='approved') | Q(accounts_status='')).count(),
+                'rejected': sold.filter(accounts_status='rejected').count(),
+                'total':    sold.count(),
+            })
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
 
@@ -6218,6 +6686,11 @@ class BookingLOIUrlView(APIView):
 MEDIA_UPLOAD_MAX_MB = 100
 
 
+def _media_prefix(user):
+    """The bucket folder a company's uploads live under."""
+    return f'c{getattr(user, "company_id", None) or 0}'
+
+
 class MediaUploadView(APIView):
     """Authenticated media upload to the public erp-media bucket via the service-role
     key. Lets the frontend stop using the anon key for writes (so anon INSERT can be
@@ -6232,10 +6705,13 @@ class MediaUploadView(APIView):
             return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
         if f.size and f.size > MEDIA_UPLOAD_MAX_MB * 1024 * 1024:
             return Response({'detail': f'File too large (max {MEDIA_UPLOAD_MAX_MB} MB).'}, status=status.HTTP_400_BAD_REQUEST)
-        folder = (request.data.get('folder') or 'erp/media').strip('/')
+        # The folder is client-supplied, so keep it inside this company's own
+        # prefix: it is what lets a delete tell whose file it is. Traversal out
+        # of it ('..') would defeat that.
+        folder = (request.data.get('folder') or 'erp/media').strip('/').replace('..', '')
         ext = (f.name.rsplit('.', 1)[-1].lower() if '.' in (f.name or '') else 'bin')[:10]
         rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        path = f'{folder}/{int(time.time() * 1000)}_{rand}.{ext}'
+        path = f'{_media_prefix(request.user)}/{folder}/{int(time.time() * 1000)}_{rand}.{ext}'
         try:
             url = upload_public(f.read(), path, f.content_type or 'application/octet-stream')
         except Exception as e:
@@ -6251,9 +6727,18 @@ class MediaDeleteView(APIView):
 
     def post(self, request):
         from sales.supabase_storage import delete_object
-        path = request.data.get('path')
+        path = (request.data.get('path') or '').strip()
         if not path:
             return Response({'detail': 'path required.'}, status=status.HTTP_400_BAD_REQUEST)
+        # The path decided what got deleted, with nothing checking whose it was —
+        # any user could wipe another company's floor plans and site maps. New
+        # uploads sit under the company's own prefix, so ownership is readable
+        # from the path. Files predating that have no prefix to check, so only an
+        # admin may remove one.
+        if not path.startswith(f'{_media_prefix(request.user)}/'):
+            if not (is_platform_admin(request.user) or getattr(request.user, 'role', '') == 'Admin'):
+                return Response({'detail': 'That file belongs to another company.'},
+                                status=status.HTTP_403_FORBIDDEN)
         delete_object(path)
         return Response({'ok': True})
 
@@ -6764,6 +7249,14 @@ class MetaFormMappingView(APIView):
             project = Project.objects.filter(company=company).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
+        # form_id is unique platform-wide, so this lookup would happily overwrite
+        # another company's mapping — re-pointing their lead form at this
+        # company's project and taking their inbound leads with it. A form
+        # belongs to whoever claimed it.
+        existing = MetaFormMapping.objects.filter(form_id=form_id).first()
+        if existing and existing.company_id and existing.company_id != company.id:
+            return Response({'detail': 'That form is already mapped by another company.'},
+                            status=status.HTTP_403_FORBIDDEN)
         mapping, created = MetaFormMapping.objects.update_or_create(
             form_id=form_id,
             defaults={'form_name': form_name, 'project': project, 'company': project.company},
@@ -7038,66 +7531,415 @@ class SalesDataResetView(APIView):
         return Response({'detail': 'Trial data cleared.', 'deleted': deleted, 'targets': sorted(effective)})
 
 
-class BackupSettingsView(APIView):
-    """Platform-super-user-only: view/update the automatic backup schedule."""
+def _may_back_up(user):
+    """Who can take or restore a backup: a platform admin, or a company's own
+    full Admin. Not a module-scoped admin — a Sales-only admin has no business
+    pulling the company's HR, AR and Club 1000 records out in one file."""
+    if is_platform_admin(user):
+        return True
+    return bool(getattr(user, 'role', '') == 'Admin' and not is_module_admin(user)
+                and getattr(user, 'company_id', None))
+
+
+def _backup_company(request):
+    """The company a backup is for.
+
+    A platform admin names the company and may name any of them. Everyone else
+    gets their own, whatever they asked for — naming someone else's is refused
+    rather than quietly ignored, so a mistake is visible instead of handing back
+    the wrong company's file.
+    """
+    from companies.models import Company as Co
+    cid = request.query_params.get('company_id') or request.data.get('company_id')
+
+    if not is_platform_admin(request.user):
+        own = getattr(request.user, 'company', None)
+        if not own:
+            return None, Response({'detail': 'Your account is not attached to a company.'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        if cid and str(cid) != str(own.pk):
+            return None, Response({'detail': 'You can only back up your own company.'},
+                                  status=status.HTTP_403_FORBIDDEN)
+        return own, None
+
+    if not cid:
+        return None, Response({'detail': 'Choose a company first.'}, status=status.HTTP_400_BAD_REQUEST)
+    company = Co.objects.filter(pk=cid).first()
+    if not company:
+        return None, Response({'detail': 'No such company.'}, status=status.HTTP_404_NOT_FOUND)
+    return company, None
+
+
+class BackupExcelView(APIView):
+    """One company's data as a readable workbook.
+
+    A company's own Admin can take their own; a platform admin can take any.
+    Built and streamed in the moment — unlike the scheduled JSON dump this is
+    never stored, so the figures are whatever is true when the button is tapped.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
-        return Response(BackupSettingsSerializer(settings_row).data)
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_excel import MODULES, build_workbook, reset_counts
+        # Always the whole company. The modules reference each other — users in
+        # HR own Sales follow-ups, AR accounts hold Sales bookings — so a partial
+        # workbook could not be restored on its own, and offering the choice only
+        # invited one that cannot be put back.
+        modules = list(MODULES)
+        buf = BytesIO()
+        build_workbook(company).save(buf)
+        # Record what this backup actually covered. A reset asks for one of
+        # these, and only the server can honestly say the workbook was built —
+        # or which modules went into it.
+        from .models import BackupStamp
+        BackupStamp.objects.create(company=company, taken_by=request.user, modules=modules,
+                                   rows=sum(reset_counts(company).values()))
+        safe = re.sub(r'[^A-Za-z0-9]+', '-', company.name).strip('-') or 'company'
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = (
+            f'attachment; filename="{safe}-backup-{timezone.localdate().isoformat()}.xlsx"')
+        return resp
+
+
+class BackupScheduleView(APIView):
+    """Per company: whether to take an Excel backup on a schedule, and the ones
+    already taken. The list is stored backups only — the on-demand ones stream
+    to the browser and are never kept."""
+    permission_classes = [IsAuthenticated]
+
+    def _payload(self, company):
+        from .backup_excel import MODULES
+        from .models import BackupSchedule, BackupStamp
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        stored = (BackupStamp.objects.filter(company=company).exclude(file_path='')
+                  .select_related('taken_by').order_by('-taken_at')[:20])
+        return {
+            'modules': MODULES,
+            'is_enabled': sched.is_enabled,
+            'frequency': sched.frequency,
+            'selected_modules': list(sched.modules or []),
+            'keep_last': sched.keep_last,
+            'updated_by': getattr(sched.updated_by, 'name', None),
+            'updated_at': sched.updated_at,
+            'history': [{
+                'id': b.id,
+                'taken_at': b.taken_at,
+                'rows': b.rows,
+                'size': b.file_size,
+                'modules': list(b.modules or []),
+                'by': 'Automatic' if b.automatic and not b.taken_by else getattr(b.taken_by, 'name', None),
+            } for b in stored],
+        }
+
+    def get(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        return Response(self._payload(company))
 
     def patch(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        settings_row, _ = BackupSettings.objects.get_or_create(pk=1)
-        ser = BackupSettingsSerializer(settings_row, data=request.data, partial=True)
-        if not ser.is_valid():
-            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        ser.save(updated_by=request.user)
-        return Response(ser.data)
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .models import BackupSchedule
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        if 'is_enabled' in request.data:
+            sched.is_enabled = bool(request.data['is_enabled'])
+        if request.data.get('frequency') in dict(BackupSchedule.FREQUENCY_CHOICES):
+            sched.frequency = request.data['frequency']
+        if str(request.data.get('keep_last') or '').isdigit():
+            sched.keep_last = max(1, min(50, int(request.data['keep_last'])))
+        sched.updated_by = request.user
+        sched.save()
+        return Response(self._payload(company))
+
+    def post(self, request):
+        """Take a stored backup now, on the schedule's terms."""
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_schedule import take
+        from .models import BackupSchedule
+        sched, _ = BackupSchedule.objects.get_or_create(company=company)
+        stamp = take(sched, triggered_by=request.user)
+        if not stamp:
+            return Response({'detail': 'Could not store the backup. Check the storage settings.'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response(self._payload(company), status=status.HTTP_201_CREATED)
 
 
-class BackupListView(APIView):
-    """Platform-super-user-only: recent backup history."""
+class BackupStoredDownloadView(APIView):
+    """A short-lived signed URL for one stored backup. The bucket is private, so
+    this is the only way to open it."""
     permission_classes = [IsAuthenticated]
 
+    def get(self, request, pk):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .models import BackupStamp
+        # Scoped to the company: an id from someone else's list is a 404, not a file.
+        stamp = BackupStamp.objects.filter(pk=pk, company=company).exclude(file_path='').first()
+        if not stamp:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from .backup_storage import signed_backup_url
+        # Name it on the way out. Files stored before the content-type fix are
+        # still labelled gzip in the bucket, and without this the browser saves a
+        # perfectly good workbook as "…-1641.gz", which Excel will not open and
+        # the Restore panel will not take.
+        name = stamp.file_path.rsplit('/', 1)[-1]
+        if not name.lower().endswith('.xlsx'):
+            name = name.rsplit('.', 1)[0] + '.xlsx'
+        url = signed_backup_url(stamp.file_path, download_as=name)
+        if not url:
+            return Response({'detail': 'Could not generate a download link.'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response({'url': url})
+
+
+class CompanyResetView(APIView):
+    """Wipe a company back to nothing, once its backup is safely in hand.
+
+    Three gates, because this is the most destructive thing in the product:
+    a recent backup, the reset key from the server environment, and typing
+    DELETE. GET reports what would go and whether a backup is recent enough.
+    """
+    permission_classes = [IsAuthenticated]
+
+    # How fresh a backup has to be. Long enough to download a big company's
+    # workbook and read it, short enough that it is this data, not last week's.
+    BACKUP_MAX_AGE = timedelta(hours=2)
+
+    def _covering_backup(self, company):
+        """A recent backup of this company. A reset empties all of it, so the
+        backup has to be all of it too — which every backup now is."""
+        from .backup_excel import MODULES
+        from .models import BackupStamp
+        cutoff = timezone.now() - self.BACKUP_MAX_AGE
+        want = set(MODULES)
+        for stamp in BackupStamp.objects.filter(company=company, taken_at__gte=cutoff):
+            # Older partial backups, from when modules could be chosen, do not count.
+            if want <= set(stamp.modules or []):
+                return stamp
+        return None
+
     def get(self, request):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        records = BackupRecord.objects.select_related('triggered_by')[:50]
-        return Response(BackupRecordSerializer(records, many=True).data)
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_excel import reset_counts
+        stamp = self._covering_backup(company)
+        counts = reset_counts(company)
+        return Response({
+            'company': company.name,
+            'counts': {k: v for k, v in counts.items() if v},
+            'total': sum(counts.values()),
+            'backup_taken_at': stamp.taken_at if stamp else None,
+            'can_reset': bool(stamp),
+            'key_configured': bool((os.getenv('DATA_RESET_KEY') or '').strip()),
+        })
+
+    def post(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+
+        # `check_only` asks "would the key and confirmation be accepted?" and
+        # changes nothing — so the page can refuse a wrong key before it spends
+        # minutes taking a backup. It skips only the backup gate, which the page
+        # is about to satisfy.
+        check_only = str(request.data.get('check_only') or '').lower() in ('1', 'true')
+
+        # 1. A backup has to exist, and be this company's, and be recent. The
+        #    server records it when the workbook is built — a click in the
+        #    browser is not evidence that anything was downloaded.
+        stamp = None if check_only else self._covering_backup(company)
+        if not check_only and not stamp:
+            return Response(
+                {'detail': "Download this company's Excel backup first. A reset is only "
+                           'allowed within 2 hours of taking one.'},
+                status=status.HTTP_409_CONFLICT)
+
+        # 2. The reset key lives in the server environment, so a signed-in admin
+        #    — or anyone who takes over an admin session — still cannot wipe a
+        #    company without it. Fails closed: no key configured means no reset,
+        #    never "no protection".
+        expected = (os.getenv('DATA_RESET_KEY') or '').strip()
+        if not expected:
+            return Response(
+                {'detail': 'Reset is disabled: no DATA_RESET_KEY is configured on the server.'},
+                status=status.HTTP_403_FORBIDDEN)
+        supplied = str(request.data.get('reset_key') or '').strip()
+        if not hmac.compare_digest(supplied, expected):
+            logger.warning('Company reset refused: bad key from user %s for company %s',
+                           request.user.id, company.id)
+            return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # 3. And say it out loud.
+        if str(request.data.get('confirm') or '').strip() != 'DELETE':
+            return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        if check_only:
+            return Response({'ok': True})
+
+        from .backup_excel import reset_company
+        deleted = reset_company(company, keep_user_id=request.user.id)
+        logger.warning('Company %s reset by user %s: %s rows deleted',
+                       company.id, request.user.id, sum(deleted.values()))
+        return Response({
+            'detail': f'{company.name} has been reset. Your own account was kept so you can '
+                      f'sign back in and restore.',
+            'deleted': {k: v for k, v in deleted.items() if v},
+            'total': sum(deleted.values()),
+        })
 
 
-class BackupRunNowView(APIView):
-    """Platform-super-user-only: trigger a backup immediately, outside the schedule."""
+class BackupRestoreView(APIView):
+    """Put a backup workbook's Sales rows back, into one company.
+
+    The counterpart to Data Reset: clear a company's trial data, then upload the
+    workbook taken before it to get those rows back with their original ids.
+    Without `commit` it only reports what it would do, which is what the page
+    shows before anyone presses the real button. Same access as taking one — a
+    company's own Admin, or a platform admin for any company.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Attach the backup workbook.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .backup_excel import parse_workbook, restore
+        try:
+            parsed = parse_workbook(upload)
+        except Exception:
+            return Response({'detail': 'That file could not be read as a backup workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not any(parsed.values()):
+            return Response({'detail': 'No restorable rows found in that workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        commit = str(request.data.get('commit', '')).strip() in ('1', 'true', 'True')
+        try:
+            result = restore(company, parsed, commit=commit)
+        except Exception as exc:
+            logger.exception('Excel restore failed')
+            return Response({'detail': f'Restore failed, nothing was written: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not result['ok']:
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        return Response(result)
+
+
+class BackupReviveView(APIView):
+    """Bring a deleted company back from its backup workbook.
+
+    A restore only ever goes into the company the workbook came from, matched by
+    id — so once a company is deleted its backups have nowhere to go, and a new
+    company with the same name is a different company. This recreates it under
+    its original id (and code and details, when the workbook carries its Company
+    sheet), then runs the ordinary restore into it: every row comes back with its
+    own id, so everything still points where it did.
+
+    Platform admins only. Without `commit` it reports what would happen and
+    writes nothing. Refuses if that company still exists (use Restore) or if its
+    code has since been taken by another company.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        from .backup_service import run_backup
-        record = run_backup(triggered_by=request.user)
-        return Response(BackupRecordSerializer(record).data,
-                         status=status.HTTP_201_CREATED if record.status == 'success' else status.HTTP_502_BAD_GATEWAY)
+            return Response({'detail': 'Only a platform admin can bring a company back.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Attach the backup workbook.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        from companies.models import Company as Co
+        from .backup_excel import parse_workbook, read_company_info, company_ids_in, restore
+        try:
+            parsed = parse_workbook(upload)
+            upload.seek(0)
+            info = read_company_info(upload)
+        except Exception:
+            return Response({'detail': 'That file could not be read as a backup workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not any(parsed.values()):
+            return Response({'detail': 'No restorable rows found in that workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-class BackupDownloadView(APIView):
-    """Platform-super-user-only: a short-lived signed URL for one backup file."""
-    permission_classes = [IsAuthenticated]
+        # Which company it came from: its own record if the file has one, else the
+        # one id every row agrees on.
+        ids = {int(info['id'])} if str(info.get('id') or '').isdigit() else company_ids_in(parsed)
+        if len(ids) != 1:
+            return Response({'detail': 'This workbook does not belong to exactly one company, '
+                                       'so it cannot be used to bring one back.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        cid = ids.pop()
+        if Co.objects.filter(pk=cid).exists():
+            return Response({'detail': 'That company still exists. Restore into it with '
+                                       '"Put a backup back" instead.'},
+                            status=status.HTTP_409_CONFLICT)
 
-    def get(self, request, pk):
-        if not is_platform_admin(request.user):
-            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
-        record = BackupRecord.objects.filter(pk=pk, status='success').first()
-        if not record or not record.file_path:
-            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        from .backup_storage import signed_backup_url
-        url = signed_backup_url(record.file_path)
-        if not url:
-            return Response({'detail': 'Could not generate a download link.'}, status=status.HTTP_502_BAD_GATEWAY)
-        return Response({'url': url})
+        file_code = str(info.get('code') or '').strip().upper()
+        code = file_code or str(request.data.get('code') or '').strip().upper()
+        name = str(info.get('name') or '').strip() or code
+        summary = {'company': {'id': cid, 'code': code, 'name': name}, 'needs_code': not file_code}
+        if code and Co.objects.filter(code__iexact=code).exists():
+            return Response({**summary, 'detail': f'The code {code} now belongs to another company. '
+                                                  'Rename that company first.'},
+                            status=status.HTTP_409_CONFLICT)
+
+        commit = str(request.data.get('commit', '')).strip() in ('1', 'true', 'True')
+        if commit and not code:
+            return Response({**summary, 'detail': "This backup is older and does not record the "
+                                                  "company's code. Type it to continue."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            with transaction.atomic():
+                co = Co.objects.create(
+                    pk=cid, code=code or f'REVIVE{cid}', name=name or f'Company {cid}',
+                    email=info.get('email') or '', phone=info.get('phone') or '',
+                    address=info.get('address') or '', logo_url=info.get('logo_url') or '',
+                    loi_enabled=bool(info.get('loi_enabled')), is_active=True)
+                result = restore(co, parsed, commit=commit)
+                # A preview, or a refused restore, must leave no company behind.
+                if not commit or not result['ok']:
+                    transaction.set_rollback(True)
+        except Exception as exc:
+            logger.exception('Company revive failed')
+            return Response({'detail': f'Could not bring the company back, nothing was written: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not result['ok']:
+            return Response({**result, **summary}, status=status.HTTP_409_CONFLICT)
+        if commit:
+            logger.warning('Company %s (%s) brought back by user %s: %s rows',
+                           cid, code, request.user.id, result.get('total'))
+        return Response({**result, **summary})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

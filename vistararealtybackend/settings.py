@@ -23,7 +23,6 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 # Local-dev convenience only: accept a fixed "000000" OTP so login works when
 # outbound email isn't configured. Must never be set in Railway/production env vars.
 DEV_OTP_BYPASS = os.getenv('DEV_OTP_BYPASS', 'False') == 'True'
-
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -43,6 +42,7 @@ INSTALLED_APPS = [
     'club1000',
     'receivables',
     'activity',
+    'tasks',
 ]
 
 MIDDLEWARE = [

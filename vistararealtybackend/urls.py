@@ -17,6 +17,7 @@ urlpatterns = [
     path('api/club1000/', include('club1000.urls')),
     path('api/ar/', include('receivables.urls')),
     path('api/activity/', include('activity.urls')),
+    path('api/tasks/', include('tasks.urls')),
 ]
 
 # Serve uploaded media (signed LOIs) in development.

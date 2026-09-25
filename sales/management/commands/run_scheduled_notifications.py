@@ -70,6 +70,11 @@ class Command(BaseCommand):
             c.update(ar_reminders.run(now, opts['escalate_hours'], dry))
         except Exception:
             c.update({'ar_fu_reminder': 0, 'ar_fu_escalate': 0, 'ar_digest': 0, 'ar_due_soon': 0})
+        try:
+            from tasks import reminders as task_reminders
+            c.update(task_reminders.run(now, dry))
+        except Exception:
+            c.update({'task_due_soon': 0})
         tag = '[dry-run] ' if dry else ''
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
@@ -77,6 +82,7 @@ class Command(BaseCommand):
             f'availability: {c["availability"]} reminded'
             f' · AR follow-ups: {c["ar_fu_reminder"]} nudged / {c["ar_fu_escalate"]} escalated'
             f' · AR digest: {c["ar_digest"]} sent · AR due soon: {c["ar_due_soon"]}'
+            f' · Task due soon: {c["task_due_soon"]}'
         ))
 
     # ── One-time backfill (suppress the existing backlog) ─────────────────

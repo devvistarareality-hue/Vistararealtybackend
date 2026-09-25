@@ -22,7 +22,7 @@ SKIP = re.compile(
     r'|.*/(search|preview)/?$)')
 MODULES = {
     'sales': 'Sales', 'ar': 'AR', 'club1000': 'Club 1000', 'attendance': 'HR',
-    'auth': 'Admin', 'company': 'Admin', 'activity': 'Admin',
+    'auth': 'Admin', 'company': 'Admin', 'activity': 'Admin', 'tasks': 'Task Allocation',
 }
 VERBS = {
     'approve': 'Approved', 'reject': 'Rejected', 'cancel': 'Cancelled', 'withdraw': 'Withdrew',
@@ -283,6 +283,16 @@ class ActivityLogMiddleware:
                     if primary['changes']:
                         summary += ' · ' + change_text(primary['changes'])
         from .models import ActivityLog
+        # Done while a platform admin was viewing the app as this user: the row
+        # would otherwise read as the user having done it themselves.
+        final_summary = extra.get('summary') or summary
+        admin_id = getattr(user, 'impersonator_id', None)
+        if admin_id:
+            from accounts.models import User as _U
+            admin = _U.objects.filter(pk=admin_id).only('id', 'name', 'user_code').first()
+            who = (admin.name or admin.user_code) if admin else f'#{admin_id}'
+            final_summary = f'{final_summary} · done by {who}, signed in as this user'
+            details['impersonated_by'] = {'id': admin_id, 'name': who}
         ActivityLog.objects.create(
             company_id=getattr(user, 'company_id', None),
             actor=user,
@@ -291,7 +301,7 @@ class ActivityLogMiddleware:
             action=(extra.get('action') or action)[:30],
             target_type=(extra.get('target_type') or ttype)[:40],
             target_id=str(extra.get('target_id') or tid)[:40],
-            summary=extra.get('summary') or summary,
+            summary=final_summary,
             details=json.dumps(details, default=str) if details else '',
             method=request.method,
             path=request.path[:255],

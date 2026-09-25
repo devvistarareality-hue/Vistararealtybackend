@@ -832,38 +832,6 @@ class MetaWebhookConfig(models.Model):
         return f'MetaWebhookConfig (active={self.is_active})'
 
 
-class BackupSettings(models.Model):
-    """Singleton (always pk=1) — a platform-wide schedule, not per-company. Controls
-    when the automatic full-database backup cron actually produces a new backup."""
-    FREQUENCY_CHOICES = [('weekly', 'Weekly'), ('monthly', 'Monthly'), ('yearly', 'Yearly')]
-    frequency  = models.CharField(max_length=10, choices=FREQUENCY_CHOICES, default='weekly')
-    is_enabled = models.BooleanField(default=True)
-    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return f'BackupSettings ({self.frequency}, enabled={self.is_enabled})'
-
-
-class BackupRecord(models.Model):
-    """One row per backup attempt (automatic or manually triggered by a super user)."""
-    STATUS_CHOICES = [('running', 'Running'), ('success', 'Success'), ('failed', 'Failed')]
-    status          = models.CharField(max_length=10, choices=STATUS_CHOICES, default='running')
-    file_path       = models.CharField(max_length=300, blank=True)  # Supabase object path
-    file_size_bytes = models.BigIntegerField(null=True, blank=True)
-    # null = automatic (cron-triggered)
-    triggered_by    = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-    error_message   = models.TextField(blank=True)
-    started_at      = models.DateTimeField(auto_now_add=True)
-    completed_at    = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ['-started_at']
-
-    def __str__(self):
-        return f'Backup #{self.id} ({self.status})'
-
-
 TRANSFER_STATUS = [
     ('pending', 'Pending Approval'),
     ('approved', 'Approved'),
@@ -919,3 +887,56 @@ class LeadTransfer(models.Model):
 
     def __str__(self):
         return 'Transfer lead %s -> %s (%s)' % (self.lead_id, self.to_stm_id, self.status)
+
+
+class BackupStamp(models.Model):
+    """Proof that a company's Excel backup was actually taken, and when.
+
+    A full reset is refused without a recent one. The check has to be the
+    server's, not the browser's: "I clicked Download" is not evidence, and the
+    whole point of the gate is that nobody wipes a company on the strength of a
+    backup they only meant to take.
+    """
+    company  = models.ForeignKey('companies.Company', on_delete=models.CASCADE,
+                                 related_name='backup_stamps')
+    taken_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    taken_at = models.DateTimeField(auto_now_add=True)
+    rows     = models.IntegerField(default=0)
+    # Which modules the workbook actually covered. A reset is only allowed for
+    # modules that are in here: you may delete what you hold a backup of.
+    modules  = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ['-taken_at']
+        indexes = [models.Index(fields=['company', '-taken_at'])]
+
+    # Set when the workbook was kept rather than just streamed to the browser —
+    # the scheduled backups. Downloaded again through a signed URL.
+    file_path = models.CharField(max_length=300, blank=True)
+    file_size = models.BigIntegerField(null=True, blank=True)
+    # null for the nightly job; a user when someone pressed the button.
+    automatic = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f'Backup of {self.company_id} at {self.taken_at:%d %b %Y %H:%M}'
+
+
+class BackupSchedule(models.Model):
+    """Per company: take an Excel backup on a schedule and keep it.
+
+    Per company rather than platform-wide, because a backup is of one company —
+    the file, the restore and the reset gate all are.
+    """
+    FREQUENCY_CHOICES = [('daily', 'Daily'), ('weekly', 'Weekly'), ('monthly', 'Monthly')]
+    company    = models.OneToOneField('companies.Company', on_delete=models.CASCADE,
+                                      related_name='backup_schedule')
+    is_enabled = models.BooleanField(default=False)
+    frequency  = models.CharField(max_length=10, choices=FREQUENCY_CHOICES, default='weekly')
+    # Empty means every module.
+    modules    = models.JSONField(default=list, blank=True)
+    keep_last  = models.IntegerField(default=10)
+    updated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.company_id}: {self.frequency} ({"on" if self.is_enabled else "off"})'

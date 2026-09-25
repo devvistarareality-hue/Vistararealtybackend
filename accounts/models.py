@@ -42,6 +42,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     department   = models.CharField(max_length=100, blank=True)
     designation  = models.CharField(max_length=100, blank=True)
     avatar_url      = models.URLField(blank=True)
+    # Exceptions for one person, on top of their designation's capabilities.
+    extra_capabilities  = models.JSONField(default=list, blank=True)
+    denied_capabilities = models.JSONField(default=list, blank=True)
     modules            = models.JSONField(default=list, blank=True)
     manager_modules    = models.JSONField(default=list, blank=True)
     admin_modules      = models.JSONField(default=list, blank=True)
@@ -57,6 +60,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     date_joined       = models.DateTimeField(auto_now_add=True)
     session_token_app = models.UUIDField(default=uuid.uuid4)
     session_token_web = models.UUIDField(default=uuid.uuid4)
+
+    # Not a column: set per-request by SessionJWTAuthentication to the id of the
+    # platform admin viewing the app as this user, or left None. Declared here so
+    # `user.impersonator_id` reads the same whether the instance came from a
+    # request or a query.
+    impersonator_id = None
 
     objects = UserManager()
 
@@ -114,10 +123,48 @@ class OtpCode(models.Model):
         ordering = ['-created_at']
 
 
+class RoleDashboard(models.Model):
+    """Which dashboard a role opens in a module, per company.
+
+    Written by the Copy button on a module's Dashboard — "give this dashboard to
+    the General Manager too". It decides which view opens; the figures on it are
+    still the signed-in person's own, scoped by role and the reporting tree.
+    """
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='role_dashboards')
+    module  = models.CharField(max_length=100)
+    role    = models.CharField(max_length=40)
+    view    = models.CharField(max_length=40)
+
+    class Meta:
+        unique_together = ('company', 'module', 'role')
+        ordering = ['module', 'role']
+
+    def __str__(self):
+        return f'{self.module} · {self.role} → {self.view}'
+
+
 class Designation(models.Model):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='designations')
     name    = models.CharField(max_length=100)
     module  = models.CharField(max_length=100)
+    # What this designation may do, per company (see accounts/capabilities.py).
+    # capabilities_set says the company has configured it — an empty tick list is a
+    # real answer ("this designation may do nothing"), not "not set up yet".
+    capabilities     = models.JSONField(default=list, blank=True)
+    capabilities_set = models.BooleanField(default=False)
+    data_scope       = models.CharField(max_length=20, blank=True, default='')
+    # Which menu items this designation sees. screens_set False keeps the old
+    # role-based menu, so a company that never opens the screen sees no change.
+    screens          = models.JSONField(default=list, blank=True)
+    screens_set      = models.BooleanField(default=False)
+    # Which modules that menu speaks for. A designation belongs to one module but
+    # its people may be granted others — a CFO with Sales and Land, say — and the
+    # menu saved here would otherwise empty those too. A module named here is
+    # governed by `screens` (so unticking all of its tabs really does hide them);
+    # a module not named keeps its default menu.
+    screens_modules  = models.JSONField(default=list, blank=True)
+    # Which dashboard opens; '' decides from their permissions, as before.
+    dashboard        = models.CharField(max_length=20, blank=True, default='')
 
     class Meta:
         unique_together = ('company', 'name', 'module')

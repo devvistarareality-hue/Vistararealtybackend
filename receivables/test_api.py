@@ -236,7 +236,7 @@ class ARScheduleAndReportsTests(TestCase):
         self.assertEqual(d['top_overdue'][0]['id'], self.id)
         self.assertEqual(d['top_over_180'][0]['amount'], 2150000)
         self.assertEqual(d['projects'], [{'id': self.project.id, 'name': 'Pratishtha'}])
-        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0})
+        self.assertEqual(d['issues'], {'no_schedule': 0, 'plan_mismatch': 0, 'bad_dates': 0})
 
     def test_statement_is_print_ready_html(self):
         self.api.post(f'/api/ar/accounts/{self.id}/receipts/', {'paid_on': '2026-01-05', 'amount': '1234567', 'mode': 'cheque',

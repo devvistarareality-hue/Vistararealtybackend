@@ -23,6 +23,43 @@ class UserSerializer(serializers.ModelSerializer):
     company_name      = serializers.SerializerMethodField()
     reporting_manager = ReportingManagerSerializer(read_only=True)
     is_approver       = serializers.SerializerMethodField()
+    # What this person may do, resolved from their company's designation settings.
+    capabilities      = serializers.SerializerMethodField()
+
+    def get_capabilities(self, obj):
+        from .capabilities import capabilities_for
+        return sorted(capabilities_for(obj))
+
+    # The menu this person sees (null keeps the old role-based menu) and which
+    # dashboard opens for them.
+    screens = serializers.SerializerMethodField()
+    dashboard = serializers.SerializerMethodField()
+
+    def get_screens(self, obj):
+        from .capabilities import screens_for
+        allowed = screens_for(obj)
+        return None if allowed is None else sorted(allowed)
+
+    # The modules that saved menu speaks for. The browser filters its own sidebar
+    # too, so it needs the same rule: a module not named here keeps its defaults.
+    screen_modules = serializers.SerializerMethodField()
+
+    def get_screen_modules(self, obj):
+        from .capabilities import screen_modules_for
+        named = screen_modules_for(obj)
+        return None if named is None else sorted(named)
+
+    def get_dashboard(self, obj):
+        from .capabilities import dashboard_for
+        return dashboard_for(obj)
+
+    # What their ROLE opens in each module (Copy to role, on a module's
+    # Dashboard). The designation's own pin, above, still wins.
+    role_dashboards = serializers.SerializerMethodField()
+
+    def get_role_dashboards(self, obj):
+        from .capabilities import role_dashboards
+        return role_dashboards(obj)
 
     def get_company_code(self, obj):
         return obj.company.code if obj.company else ''
@@ -45,16 +82,46 @@ class UserSerializer(serializers.ModelSerializer):
             'modules', 'manager_modules', 'admin_modules',
             'company_code', 'company_name', 'is_staff',
             'reporting_manager', 'is_approver', 'can_export_bookings',
+            'capabilities', 'screens', 'screen_modules', 'dashboard', 'role_dashboards',
         ]
 
 
 class DesignationSerializer(serializers.ModelSerializer):
     company_code = serializers.CharField(source='company.code', read_only=True)
     company_name = serializers.CharField(source='company.name', read_only=True)
+    # What this designation grants right now: its ticks, or — when a company has
+    # never opened the screen — what the title already implied.
+    effective_capabilities = serializers.SerializerMethodField()
+
+    def get_effective_capabilities(self, obj):
+        from .capabilities import legacy_capabilities
+        return sorted(obj.capabilities or []) if obj.capabilities_set else sorted(legacy_capabilities(obj.name, obj.module))
+
+    # Which menu the editor should show ticked before anyone configures it.
+    effective_screens = serializers.SerializerMethodField()
+
+    def get_effective_screens(self, obj):
+        from .capabilities import preset_screens
+        return sorted(obj.screens or []) if obj.screens_set else preset_screens(obj.name, obj.module)
+
+    # Which modules that menu speaks for. Older rows say nothing, so they read as
+    # the module the designation was configured in — see screen_modules_for.
+    effective_screen_modules = serializers.SerializerMethodField()
+
+    def get_effective_screen_modules(self, obj):
+        from .capabilities import SCREEN_MODULE, modules_of
+        named = sorted(obj.screens_modules or [])
+        if named or not obj.screens_set:
+            return named
+        return sorted({SCREEN_MODULE[k] for k in (obj.screens or []) if k in SCREEN_MODULE}
+                      | set(modules_of(obj.module)))
 
     class Meta:
         model  = Designation
-        fields = ['id', 'name', 'module', 'company_code', 'company_name']
+        fields = ['id', 'name', 'module', 'company_code', 'company_name',
+                  'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope',
+                  'screens', 'screens_set', 'effective_screens',
+                  'screens_modules', 'effective_screen_modules', 'dashboard']
 
 
 class UserListSerializer(serializers.ModelSerializer):
@@ -89,6 +156,22 @@ _NO_MANAGER = (
     'at this level with no manager is invisible to every manager in the company — '
     'their leads and bookings appear in nobody\'s list.'
 )
+
+
+def _check_manager_company(reporting_manager_id, company):
+    """A manager has to be in the same company as the person reporting to them.
+
+    Nothing checked this, so a user could be pointed at a manager in another
+    company — and that manager's team views (Team Leave Requests reads
+    `user__reporting_manager`) would then list this company's people and their
+    leave. The tree is what most visibility rules walk, so a cross-company edge
+    in it leaks through all of them.
+    """
+    if not company:
+        return
+    if not User.objects.filter(pk=reporting_manager_id, company=company).exists():
+        raise serializers.ValidationError(
+            {'reporting_manager_id': 'That manager is in a different company.'})
 
 
 def validate_reporting_manager(role, reporting_manager_id, is_active=True):
@@ -160,6 +243,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
             user = User(company=company, user_code=user_code, **validated_data)
             if reporting_manager_id:
+                _check_manager_company(reporting_manager_id, company)
                 user.reporting_manager_id = reporting_manager_id
             user.set_password(password)
             user.save()
@@ -201,7 +285,10 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         if 'reporting_manager_id' in validated_data:
-            instance.reporting_manager_id = validated_data.pop('reporting_manager_id')
+            manager_id = validated_data.pop('reporting_manager_id')
+            if manager_id:
+                _check_manager_company(manager_id, instance.company)
+            instance.reporting_manager_id = manager_id
         password = validated_data.pop('password', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

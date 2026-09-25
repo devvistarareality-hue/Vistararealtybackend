@@ -2,7 +2,7 @@ from django.db.models import Q
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
-    BackupSettings, BackupRecord, LeadTransfer, ChannelPartner,
+    LeadTransfer, ChannelPartner,
 )
 
 
@@ -524,21 +524,6 @@ class LeadStatusHistorySerializer(serializers.ModelSerializer):
         fields = ['id', 'field_changed', 'old_value', 'new_value', 'remarks', 'changed_by_name', 'created_at']
 
 
-class BackupSettingsSerializer(serializers.ModelSerializer):
-    updated_by_name = serializers.CharField(source='updated_by.name', read_only=True, default=None)
-
-    class Meta:
-        model = BackupSettings
-        fields = ['frequency', 'is_enabled', 'updated_by_name', 'updated_at']
-
-
-class BackupRecordSerializer(serializers.ModelSerializer):
-    triggered_by_name = serializers.CharField(source='triggered_by.name', read_only=True, default=None)
-
-    class Meta:
-        model = BackupRecord
-        fields = ['id', 'status', 'file_size_bytes', 'triggered_by_name', 'error_message',
-                  'started_at', 'completed_at']
 
 
 class LeadTransferSerializer(serializers.ModelSerializer):

@@ -4,7 +4,7 @@
     "builder": "RAILPACK"
   },
   "deploy": {
-    "startCommand": "python manage.py backup_database",
+    "startCommand": "python manage.py backup_companies",
     "cronSchedule": "30 20 * * *",
     "restartPolicyType": "NEVER"
   }
