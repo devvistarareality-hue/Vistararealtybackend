@@ -1,13 +1,18 @@
 """What "My Bookings" shows, in each module.
 
 Two screens ask two different questions, and conflating them is what made this
-drift. My Bookings is "what I and my people have sold" — own work plus the
-reporting tree, and in the CP module the partner-sourced pool as well. Approvals
-is "what am I named to decide", and is covered by test_can_approve_flag.
+drift. Approvals is "what am I named to decide" (covered by test_can_approve_flag);
+My Bookings is "what I and my people have sold".
 
-A CP Cluster Head's own bookings had been vanishing from his own module: of
-Kunal's 107, only 56 survived, the rest sitting in projects he does not approve or
-simply not being Channel-Partner-sourced.
+In the CP module My Bookings is the partner book this person answers for, plus their
+own bookings from any source:
+  - A CP head (a CP-designation manager, or anyone who sees the whole company) gets
+    every partner-sourced deal in the company — so a CP Cluster Head and the CMO
+    above him read the same figure — plus their own non-partner bookings.
+  - Anyone else gets partner-sourced deals by themselves and their reporting tree,
+    plus their own non-partner bookings.
+
+In Sales My Bookings is own work and the team's, whatever the source.
 """
 from django.core.cache import cache
 from rest_framework.test import APITestCase
@@ -53,6 +58,8 @@ class MyBookingsScopeTests(APITestCase):
                                   client_name='Others Elsewhere', phone='9000000044')
         cls.reportee_walkin = mk(project=cls.elsewhere, stm=cls.reportee, source='walk-in',
                                  client_name='Reportee Walk-in', phone='9000000045')
+        cls.reportee_cp = mk(project=cls.elsewhere, stm=cls.reportee, source='Channel Partner',
+                             client_name='Reportee CP', phone='9000000046')
 
     def setUp(self):
         cache.clear()
@@ -63,43 +70,55 @@ class MyBookingsScopeTests(APITestCase):
         self.assertEqual(r.status_code, 200)
         return sorted(b['client_name'] for b in r.data)
 
-    def test_every_booking_of_mine_is_listed(self):
-        """Whatever its project and whatever its Source."""
+    def test_a_cp_head_lists_the_whole_partner_book_plus_own_work(self):
+        """Every partner-sourced deal in the company, whoever booked it, plus my own
+        bookings from any other source."""
+        self.assertEqual(self._names(), [
+            'Others CP Here', 'Own CP Here', 'Own Elsewhere', 'Own Walk-in Here',
+            'Reportee CP'])
+
+    def test_my_own_bookings_show_whatever_the_source(self):
+        """My work is listed wherever I look for it — walk-ins included."""
         names = self._names()
         for n in ('Own CP Here', 'Own Walk-in Here', 'Own Elsewhere'):
             self.assertIn(n, names)
 
-    def test_a_walk_in_i_sold_in_a_project_i_do_not_approve_still_shows(self):
-        """The exact shape of the ones that went missing."""
-        self.assertIn('Own Elsewhere', self._names())
-
-    def test_the_cp_pool_is_listed_in_the_cp_module(self):
-        """The module tracks partner business, so the pool belongs here too."""
+    def test_a_cp_head_sees_the_companys_partner_pool(self):
+        """A CP head answers for the whole partner book, so someone else's partner
+        deal is listed too."""
         self.assertIn('Others CP Here', self._names())
+
+    def test_a_teams_non_partner_work_stays_out_of_the_cp_module(self):
+        """A reportee's partner deal shows (whole book), but their walk-in does not —
+        only my own non-partner work follows me here."""
+        names = self._names()
+        self.assertIn('Reportee CP', names)
+        self.assertNotIn('Reportee Walk-in', names)
+
+    def test_a_non_head_cp_user_sees_own_and_tree_only(self):
+        """A CP Executive is not a head: partner deals by self and the tree, plus own
+        work from any source, but not the company's partner pool."""
+        auth(self.client, self.reportee)
+        names = self._names()
+        self.assertEqual(names, ['Reportee CP', 'Reportee Walk-in'])
+        self.assertNotIn('Others CP Here', names)
 
     def test_the_cp_pool_is_not_listed_in_sales(self):
         """Same screen in Sales is own work and the team's, nothing more."""
         self.assertNotIn('Others CP Here',
                          self._names('/api/sales/bookings/?status=sold&mine=1'))
 
-    def test_someone_elses_work_outside_my_remit_is_not(self):
-        """The exemption is stm=self — it must not widen into a company-wide list."""
-        self.assertNotIn('Others Elsewhere', self._names())
-
     def test_sales_my_bookings_is_own_work_and_the_team(self):
         self.assertEqual(
             self._names('/api/sales/bookings/?status=sold&mine=1'),
-            ['Own CP Here', 'Own Elsewhere', 'Own Walk-in Here', 'Reportee Walk-in'])
-
-    def test_a_reportees_booking_is_listed_whatever_its_source(self):
-        """A CP manager sees what the people reporting to them have sold, not only
-        what came through a channel partner."""
-        self.assertIn('Reportee Walk-in', self._names())
+            ['Own CP Here', 'Own Elsewhere', 'Own Walk-in Here', 'Reportee CP',
+             'Reportee Walk-in'])
 
     def test_someone_outside_the_tree_is_never_returned(self):
         """The rule is own work plus the reporting tree — not the whole company."""
         self.assertNotIn('Others Elsewhere',
                          self._names('/api/sales/bookings/?status=sold&mine=1'))
+        self.assertNotIn('Others Elsewhere', self._names())
 
 
 class NoDuplicateRowsTests(APITestCase):
