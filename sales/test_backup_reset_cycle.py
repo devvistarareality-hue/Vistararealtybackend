@@ -8,6 +8,8 @@ import os
 from datetime import date, timedelta
 from io import BytesIO
 
+import openpyxl
+
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -68,6 +70,11 @@ def _seed():
     return co, boss, rep, proj, other, bk
 
 
+# In the reset, out of the workbook — so a restore is not expected to bring
+# these back. Mirrors NOT_BACKED_UP in test_backup_coverage.py.
+NOT_RESTORED = {'Notifications'}
+
+
 def _census(company):
     return {t.label: t.cls.objects.filter(**{t.scope: company}).count()
             for t in restore_order()}
@@ -98,7 +105,34 @@ class BackupResetRestoreCycle(APITestCase):
 
         after = _census(self.co)
         for label, want in self.before.items():
+            if label in NOT_RESTORED:
+                continue
             self.assertEqual(after[label], want, f'{label}: {after[label]} back, expected {want}')
+
+    def test_notifications_are_wiped_by_the_reset_and_do_not_come_back(self):
+        """Asked for directly: a reset clears the bell, and a restore leaves it
+        clear. Re-delivering a month of "new lead assigned" for leads that were
+        assigned long ago would be worse than losing the rows."""
+        self.assertEqual(self.before['Notifications'], 1, 'seed should have made one')
+
+        reset_company(self.co, keep_user_id=self.boss.id)
+        self.assertEqual(Notification.objects.filter(recipient__company=self.co).count(), 0,
+                         'the reset must still clear notifications')
+
+        restore(self.co, parse_workbook(self.workbook), commit=True)
+        self.assertEqual(Notification.objects.filter(recipient__company=self.co).count(), 0,
+                         'notifications came back from the workbook')
+
+    def test_the_workbook_has_no_notifications_sheet_section(self):
+        """Not just unrestored — not written at all, so the file never carries
+        who was told what."""
+        self.workbook.seek(0)
+        wb = openpyxl.load_workbook(self.workbook, read_only=True, data_only=True)
+        labels = {str(row[0]).strip() for ws in wb.worksheets
+                  for row in ws.iter_rows(values_only=True)
+                  if row and isinstance(row[0], str)}
+        self.assertNotIn('Notifications', labels)
+        self.assertIn('Leads', labels)        # the scan itself works
 
     def test_the_project_mapping_comes_back(self):
         reset_company(self.co, keep_user_id=self.boss.id)
