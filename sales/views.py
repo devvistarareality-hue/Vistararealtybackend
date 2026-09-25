@@ -653,6 +653,54 @@ def _project_in_scope(request, project_id):
     return scope_to_company(Project.objects.filter(pk=project_id), request.user).exists()
 
 
+def _refs_error(request, data, fields):
+    """The first id named in `data` that is not in the requester's company.
+
+    Several serializers here take fields='__all__' or plain ModelSerializer
+    foreign keys, which accept any primary key in the table. The create paths
+    check ownership; the update paths did not — so a PATCH could move a record
+    onto another company's lead, project or user, pulling their record into this
+    company's screens (or pushing this one into theirs).
+
+    `fields` maps a payload key to (model, ORM path from it to Company).
+    """
+    for name, (model, path) in fields.items():
+        if name not in data:
+            continue
+        value = data.get(name)
+        if value in (None, '', 0):
+            continue
+        if not scope_to_company(model.objects.filter(pk=value), request.user, path).exists():
+            return f'That {name.replace("_", " ")} belongs to another company.'
+    return None
+
+
+def _booking_refs_error(company, data):
+    """The first lead/project/plot named here that is not `company`'s, as a message.
+
+    A booking's own company is resolved server-side, but the ids hung off it were
+    taken as given — so a booking could be bound to another company's lead, and
+    their units flipped to 'hold', removing them from that company's bookable
+    pool. PlotHoldView already scopes the identical operation; these paths just
+    skipped it. `company` comes from _resolve_company, which only honours
+    ?company_id for platform admins, so this stays correct for them too.
+    """
+    lead_id = data.get('lead')
+    if lead_id and not Lead.objects.filter(pk=lead_id, company=company).exists():
+        return 'That lead belongs to another company.'
+
+    project_id = data.get('project')
+    if project_id and not Project.objects.filter(pk=project_id, company=company).exists():
+        return 'That project belongs to another company.'
+
+    pids = [int(x) for x in (data.get('plot_ids') or []) if str(x).isdigit()]
+    if str(data.get('plot') or '').isdigit():
+        pids.append(int(data['plot']))
+    if pids and Plot.objects.filter(pk__in=pids).exclude(project__company=company).exists():
+        return 'Those units belong to another company.'
+    return None
+
+
 class StatsView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1702,6 +1750,14 @@ class LeadDetailView(APIView):
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        refs_err = _refs_error(request, request.data, {
+            'project': (Project, 'company'), 'source': (LeadSource, 'company'),
+            'channel_partner': (ChannelPartner, 'company'),
+            'telecaller': (User, 'company'), 'stm': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+
         old_status       = lead.status
         old_tc_status    = lead.telecaller_status
         old_stm_status   = lead.stm_status
@@ -2590,6 +2646,11 @@ class FollowUpDetailView(APIView):
             followup = scope_to_company(FollowUp.objects.all(), request.user, 'lead__company').get(pk=pk)
         except FollowUp.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        refs_err = _refs_error(request, request.data, {
+            'lead': (Lead, 'company'), 'assigned_to': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
         ser = FollowUpSerializer(followup, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2680,6 +2741,12 @@ class SiteVisitDetailView(APIView):
             sv = scope_to_company(SiteVisit.objects.all(), request.user, 'lead__company').get(pk=pk)
         except SiteVisit.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        refs_err = _refs_error(request, request.data, {
+            'lead': (Lead, 'company'), 'project': (Project, 'company'),
+            'stm': (User, 'company'), 'referred_by_telecaller': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
         old_status = sv.status
         # Marking a visit Done must record what came of it — an outcome and remarks,
         # not just a status flip — so the pipeline can tell an interested walk-in
@@ -4875,6 +4942,10 @@ class BookingListCreateView(APIView):
         company = _resolve_company(request)
         data = request.data
 
+        refs_err = _booking_refs_error(company, data)
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+
         # Reject an oversized signed LOI before any booking/lead/plot side effects run —
         # base64 inflates the raw file by ~1/3, so compare against the encoded length.
         lf_check = data.get('loi_file')
@@ -5271,6 +5342,10 @@ class BookingDraftView(APIView):
     def post(self, request):
         company = _resolve_company(request)
         data = request.data
+
+        refs_err = _booking_refs_error(company, data)
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
 
         draft = None
         if data.get('id'):
@@ -6578,6 +6653,11 @@ class BookingLOIUrlView(APIView):
 MEDIA_UPLOAD_MAX_MB = 100
 
 
+def _media_prefix(user):
+    """The bucket folder a company's uploads live under."""
+    return f'c{getattr(user, "company_id", None) or 0}'
+
+
 class MediaUploadView(APIView):
     """Authenticated media upload to the public erp-media bucket via the service-role
     key. Lets the frontend stop using the anon key for writes (so anon INSERT can be
@@ -6592,10 +6672,13 @@ class MediaUploadView(APIView):
             return Response({'detail': 'No file provided.'}, status=status.HTTP_400_BAD_REQUEST)
         if f.size and f.size > MEDIA_UPLOAD_MAX_MB * 1024 * 1024:
             return Response({'detail': f'File too large (max {MEDIA_UPLOAD_MAX_MB} MB).'}, status=status.HTTP_400_BAD_REQUEST)
-        folder = (request.data.get('folder') or 'erp/media').strip('/')
+        # The folder is client-supplied, so keep it inside this company's own
+        # prefix: it is what lets a delete tell whose file it is. Traversal out
+        # of it ('..') would defeat that.
+        folder = (request.data.get('folder') or 'erp/media').strip('/').replace('..', '')
         ext = (f.name.rsplit('.', 1)[-1].lower() if '.' in (f.name or '') else 'bin')[:10]
         rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        path = f'{folder}/{int(time.time() * 1000)}_{rand}.{ext}'
+        path = f'{_media_prefix(request.user)}/{folder}/{int(time.time() * 1000)}_{rand}.{ext}'
         try:
             url = upload_public(f.read(), path, f.content_type or 'application/octet-stream')
         except Exception as e:
@@ -6611,9 +6694,18 @@ class MediaDeleteView(APIView):
 
     def post(self, request):
         from sales.supabase_storage import delete_object
-        path = request.data.get('path')
+        path = (request.data.get('path') or '').strip()
         if not path:
             return Response({'detail': 'path required.'}, status=status.HTTP_400_BAD_REQUEST)
+        # The path decided what got deleted, with nothing checking whose it was —
+        # any user could wipe another company's floor plans and site maps. New
+        # uploads sit under the company's own prefix, so ownership is readable
+        # from the path. Files predating that have no prefix to check, so only an
+        # admin may remove one.
+        if not path.startswith(f'{_media_prefix(request.user)}/'):
+            if not (is_platform_admin(request.user) or getattr(request.user, 'role', '') == 'Admin'):
+                return Response({'detail': 'That file belongs to another company.'},
+                                status=status.HTTP_403_FORBIDDEN)
         delete_object(path)
         return Response({'ok': True})
 
@@ -7124,6 +7216,14 @@ class MetaFormMappingView(APIView):
             project = Project.objects.filter(company=company).get(pk=project_id)
         except Project.DoesNotExist:
             return Response({'detail': 'Project not found.'}, status=404)
+        # form_id is unique platform-wide, so this lookup would happily overwrite
+        # another company's mapping — re-pointing their lead form at this
+        # company's project and taking their inbound leads with it. A form
+        # belongs to whoever claimed it.
+        existing = MetaFormMapping.objects.filter(form_id=form_id).first()
+        if existing and existing.company_id and existing.company_id != company.id:
+            return Response({'detail': 'That form is already mapped by another company.'},
+                            status=status.HTTP_403_FORBIDDEN)
         mapping, created = MetaFormMapping.objects.update_or_create(
             form_id=form_id,
             defaults={'form_name': form_name, 'project': project, 'company': project.company},

@@ -83,25 +83,6 @@ class LoginView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # ── TEMPORARY MASTER PASSWORD ─────────────────────────────────────────
-        # A single shared password that logs into ANY user with no OTP. Requested
-        # for temporary access on the live site; remove this whole block (and the
-        # MASTER_LOGIN_PASSWORD setting) when it is no longer needed. This is an
-        # intentional bypass of both the per-user password and the email OTP.
-        _master = getattr(settings, 'MASTER_LOGIN_PASSWORD', '') or ''
-        if _master and password == _master:
-            platform = serializer.validated_data.get('platform', 'app')
-            if platform == 'web':
-                user.session_token_web = uuid.uuid4()
-                user.save(update_fields=['session_token_web'])
-            else:
-                user.session_token_app = uuid.uuid4()
-                user.save(update_fields=['session_token_app'])
-            tokens = get_tokens_for_user(user, platform=platform)
-            return Response({'tokens': tokens, 'user': UserSerializer(user).data},
-                            status=status.HTTP_200_OK)
-        # ── END TEMPORARY MASTER PASSWORD ─────────────────────────────────────
-
         if not user.check_password(password):
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -168,6 +149,21 @@ class ChangePasswordView(APIView):
         return Response({'detail': 'Password changed successfully.'})
 
 
+def _may_manage_users(user):
+    """Who may create, edit or delete a user account.
+
+    Reading the list is company-scoped and harmless, but writing is not: `role`,
+    `modules` and `password` are all editable here, so without this any employee
+    could promote themselves to Admin or reset a colleague's password. Inside
+    the VRL company that promotion also satisfies is_platform_admin, which opens
+    every other company's data — so this gate is what keeps company scoping
+    meaning anything. Both clients only offer these screens to admins already.
+    """
+    return bool(
+        user and getattr(user, 'is_authenticated', False)
+        and (is_platform_admin(user) or getattr(user, 'role', '') == 'Admin'))
+
+
 class UserListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -186,6 +182,8 @@ class UserListCreateView(APIView):
         return Response(UserListSerializer(users, many=True).data)
 
     def post(self, request):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         serializer = UserCreateSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.save()
@@ -211,6 +209,8 @@ class UserDetailView(APIView):
         return Response(UserListSerializer(user).data)
 
     def patch(self, request, pk):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         user = self._get_user(pk, request)
         if not user:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -221,6 +221,8 @@ class UserDetailView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
+        if not _may_manage_users(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
         user = self._get_user(pk, request)
         if not user:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)

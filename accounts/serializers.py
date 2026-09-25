@@ -158,6 +158,22 @@ _NO_MANAGER = (
 )
 
 
+def _check_manager_company(reporting_manager_id, company):
+    """A manager has to be in the same company as the person reporting to them.
+
+    Nothing checked this, so a user could be pointed at a manager in another
+    company — and that manager's team views (Team Leave Requests reads
+    `user__reporting_manager`) would then list this company's people and their
+    leave. The tree is what most visibility rules walk, so a cross-company edge
+    in it leaks through all of them.
+    """
+    if not company:
+        return
+    if not User.objects.filter(pk=reporting_manager_id, company=company).exists():
+        raise serializers.ValidationError(
+            {'reporting_manager_id': 'That manager is in a different company.'})
+
+
 def validate_reporting_manager(role, reporting_manager_id, is_active=True):
     """A non-leadership user with no manager is a hole in the org tree, not a
     preference. It cost us an STM with 78 bookings that no manager could see: his
@@ -227,6 +243,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
             user = User(company=company, user_code=user_code, **validated_data)
             if reporting_manager_id:
+                _check_manager_company(reporting_manager_id, company)
                 user.reporting_manager_id = reporting_manager_id
             user.set_password(password)
             user.save()
@@ -268,7 +285,10 @@ class UserUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         if 'reporting_manager_id' in validated_data:
-            instance.reporting_manager_id = validated_data.pop('reporting_manager_id')
+            manager_id = validated_data.pop('reporting_manager_id')
+            if manager_id:
+                _check_manager_company(manager_id, instance.company)
+            instance.reporting_manager_id = manager_id
         password = validated_data.pop('password', None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)

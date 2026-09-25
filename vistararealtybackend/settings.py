@@ -23,12 +23,6 @@ ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 # Local-dev convenience only: accept a fixed "000000" OTP so login works when
 # outbound email isn't configured. Must never be set in Railway/production env vars.
 DEV_OTP_BYPASS = os.getenv('DEV_OTP_BYPASS', 'False') == 'True'
-# TEMPORARY: a shared master password that logs into any user with no OTP (see
-# accounts/views.py LoginView). Defaults on so it works on the live site without
-# extra config; set MASTER_LOGIN_PASSWORD='' in the env to disable, or delete this
-# line and the block in LoginView to remove it entirely.
-MASTER_LOGIN_PASSWORD = os.getenv('MASTER_LOGIN_PASSWORD', '67186718')
-
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
