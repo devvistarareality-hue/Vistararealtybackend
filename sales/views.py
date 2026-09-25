@@ -1065,6 +1065,10 @@ class StatsTrendView(APIView):
         company_id = request.query_params.get('company_id')
         date_from  = request.query_params.get('date_from')
         date_to    = request.query_params.get('date_to')
+        # Which book the closures chart draws — the same rule the Stats tiles use.
+        # It was referenced below without ever being set, so every request 500'd
+        # and every Sales dashboard's charts sat empty.
+        cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
 
         today = timezone.localdate()
         if not date_from:
