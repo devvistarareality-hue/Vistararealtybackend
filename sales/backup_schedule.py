@@ -35,15 +35,16 @@ def due(schedule, now=None):
 
 def take(schedule, triggered_by=None):
     """Build this company's workbook, store it, and record the stamp."""
-    from .backup_excel import build_workbook, pick_modules, reset_counts
+    from .backup_excel import MODULES, build_workbook, reset_counts
     from .backup_storage import ensure_backup_bucket, upload_backup
     from .models import BackupStamp
 
     company = schedule.company
-    modules = pick_modules(schedule.modules)
+    # Always the whole company: a partial workbook could not be restored alone.
+    modules = list(MODULES)
 
     buf = BytesIO()
-    build_workbook(company, modules).save(buf)
+    build_workbook(company).save(buf)
     payload = buf.getvalue()
 
     safe = re.sub(r'[^A-Za-z0-9]+', '-', company.name).strip('-') or 'company'
@@ -57,7 +58,7 @@ def take(schedule, triggered_by=None):
 
     stamp = BackupStamp.objects.create(
         company=company, taken_by=triggered_by, modules=modules, automatic=True,
-        rows=sum(reset_counts(company, modules).values()),
+        rows=sum(reset_counts(company).values()),
         file_path=path, file_size=len(payload))
     prune(schedule)
     return stamp

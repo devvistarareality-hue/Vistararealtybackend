@@ -194,60 +194,30 @@ class ResetIsGated(APITestCase):
         self.assertEqual(r.status_code, 403)
 
 
-class ModuleScopedBackupAndReset(APITestCase):
-    """You may delete what you hold a backup of — and only that."""
+class APartialBackupCannotAuthoriseAReset(APITestCase):
+    """Backups cover the whole company now, but stamps from before that could be
+    partial — and a reset empties everything, so a partial one must not unlock it."""
 
     def setUp(self):
-        self.co, self.boss, self.rep, self.proj, self.other, self.bk = _seed()
+        self.co, self.boss, *_ = _seed()
         self.client.force_authenticate(self.boss)
         os.environ['DATA_RESET_KEY'] = RESET_KEY
 
-    def _backup(self, modules=None):
-        q = f'?company_id={self.co.id}' + (f'&modules={",".join(modules)}' if modules else '')
-        r = self.client.get(f'/api/sales/backups/excel/{q}')
-        self.assertEqual(r.status_code, 200)
-
-    def _reset(self, modules=None):
+    def _reset(self):
         return self.client.post(f'/api/sales/backups/reset/?company_id={self.co.id}',
-                                {'reset_key': RESET_KEY, 'confirm': 'DELETE',
-                                 'modules': ','.join(modules) if modules else ''}, format='json')
+                                {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
 
-    def test_a_module_backup_covers_only_that_module(self):
-        self._backup(['AR'])
-        r = self._reset(['Sales'])
-        self.assertEqual(r.status_code, 409, 'an AR backup must not authorise wiping Sales')
+    def test_an_old_partial_stamp_is_not_enough(self):
+        from sales.models import BackupStamp
+        BackupStamp.objects.create(company=self.co, modules=['AR'], taken_by=self.boss)
+        self.assertEqual(self._reset().status_code, 409)
         self.assertTrue(Lead.objects.filter(company=self.co).exists())
 
-    def test_a_module_backup_authorises_that_modules_reset(self):
-        self._backup(['Task Allocation'])
-        self.assertEqual(self._reset(['Task Allocation']).status_code, 200)
-        self.assertFalse(Task.objects.filter(company=self.co).exists())
-        # ...and left every other module alone.
-        self.assertTrue(Lead.objects.filter(company=self.co).exists())
-        self.assertTrue(Booking.objects.filter(company=self.co).exists())
-
-    def test_resetting_hr_needs_the_modules_it_cascades_into(self):
-        """Users live in HR, and losing a user takes their Sales follow-ups too."""
-        self._backup(['HR'])
-        r = self._reset(['HR'])
-        self.assertEqual(r.status_code, 409)
-        self.assertIn('Sales', r.json()['destroys'])
-        self.assertTrue(User.objects.filter(company=self.co).exists())
-
-        self._backup(['HR', 'Sales', 'AR', 'Club 1000'])
-        self.assertEqual(self._reset(['HR']).status_code, 200)
-
-    def test_a_full_backup_authorises_anything(self):
-        self._backup()
-        self.assertEqual(self._reset(['Sales']).status_code, 200)
-
-    def test_the_preview_reports_what_a_selection_would_destroy(self):
-        r = self.client.get(f'/api/sales/backups/reset/?company_id={self.co.id}&modules=HR')
+    def test_a_full_backup_unlocks_it(self):
+        r = self.client.get(f'/api/sales/backups/excel/?company_id={self.co.id}')
         self.assertEqual(r.status_code, 200)
-        body = r.json()
-        self.assertEqual(body['selected'], ['HR'])
-        self.assertIn('Sales', body['destroys'])
-        self.assertFalse(body['can_reset'], 'no covering backup yet')
+        self.assertEqual(self._reset().status_code, 200)
+        self.assertFalse(Lead.objects.filter(company=self.co).exists())
 
 
 class ScheduledBackups(APITestCase):
@@ -265,13 +235,11 @@ class ScheduledBackups(APITestCase):
 
     def test_the_schedule_can_be_set(self):
         r = self.client.patch(self.url, {'is_enabled': True, 'frequency': 'daily',
-                                         'modules': ['Sales', 'AR'], 'keep_last': 3},
-                              format='json')
+                                         'keep_last': 3}, format='json')
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertTrue(body['is_enabled'])
         self.assertEqual(body['frequency'], 'daily')
-        self.assertEqual(body['selected_modules'], ['Sales', 'AR'])
         self.assertEqual(body['keep_last'], 3)
 
     def test_an_employee_cannot_touch_the_schedule(self):
