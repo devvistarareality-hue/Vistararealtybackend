@@ -33,10 +33,16 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 NAVY = 'FF0F1838'
 
-# Never written to a sheet. Password hashes and session tokens would be a
-# liability sitting in a downloaded file, and the email blind index is a
-# derived lookup key nobody reading a backup needs.
-SENSITIVE = {'password', 'session_token_app', 'session_token_web', 'email_key'}
+# Never written to a sheet. Session tokens are live credentials and rotate
+# anyway; the email blind index is derived, and restore recomputes it from the
+# email rather than carrying a copy that could fall out of step.
+#
+# Password hashes ARE included, deliberately. They are what lets a restored
+# account be signed into: without them a restore hands back a company nobody
+# can log in to. It does mean the workbook holds credential material — bcrypt
+# hashes, not readable passwords, but still worth treating the file as
+# sensitive and not mailing it around.
+SENSITIVE = {'session_token_app', 'session_token_web', 'email_key'}
 
 # Marks the readable half of a foreign key pair. Restore skips these columns —
 # the id column next to it is the real value.
@@ -630,10 +636,15 @@ def restore(company, parsed, commit=False):
                         kwargs[f.name] = _to_python(f, raw)
                 obj = model(**kwargs)
                 if model is User:
-                    # Password hashes are deliberately kept out of the file, so a
-                    # restored account cannot be signed into until an admin sets
-                    # a password. Better than shipping credentials in a workbook.
-                    obj.set_unusable_password()
+                    # bulk_create skips save(), where the blind index is normally
+                    # derived — so an email lookup would miss a restored user.
+                    from sales.fields import text_blind_index
+                    obj.email_key = text_blind_index(obj.email) or None
+                    if not obj.password:
+                        # A backup taken before hashes were included, or a row
+                        # that never had one: unusable beats a blank that some
+                        # hasher might accept.
+                        obj.set_unusable_password()
                 objs.append(obj)
             if objs:
                 model.objects.bulk_create(objs, batch_size=500)

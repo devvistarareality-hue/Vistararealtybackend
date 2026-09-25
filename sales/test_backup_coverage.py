@@ -102,8 +102,11 @@ class EverythingCanBeRestored(SimpleTestCase):
                             f'{table.label}.{f.name} points at {target}, which is '
                             f'restored later.')
 
-    def test_password_hashes_never_reach_the_file(self):
-        """A backup is downloadable; credential material must not ride along."""
+    def test_live_session_tokens_never_reach_the_file(self):
+        """Password hashes are in, by choice — a restored account has to be
+        signable-into. Session tokens are not: they are live credentials, they
+        rotate, and nothing about a restore needs them."""
         user_cols = [h for h, _, _ in _columns(apps.get_model('accounts.User'))]
-        for leaked in ('password', 'session_token_web', 'session_token_app'):
+        self.assertIn('password', user_cols)
+        for leaked in ('session_token_web', 'session_token_app', 'email_key'):
             self.assertNotIn(leaked, user_cols)

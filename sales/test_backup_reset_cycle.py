@@ -337,15 +337,28 @@ class SomebodyCanAlwaysSignBackIn(APITestCase):
         self.assertEqual(self._login('CYC', 'CYC001', 'x'), 200,
                          'the surviving account must not be overwritten by the restore')
 
-    def test_restored_colleagues_need_a_new_password(self):
+    def test_restored_colleagues_can_sign_in_with_their_old_password(self):
+        """Hashes are in the workbook, so a restore hands people their logins
+        back rather than a company of accounts nobody can use."""
+        buf = BytesIO()
+        build_workbook(self.co).save(buf)
+        reset_company(self.co, keep_user_id=self.admin.id)
+        buf.seek(0)
+        self.assertEqual(self._login('CYC', 'CYC002', 'x'), 401, 'deleted, so no login')
+        restore(self.co, parse_workbook(buf), commit=True)
+        rep = User.objects.get(company=self.co, user_code='CYC002')
+        self.assertTrue(rep.has_usable_password())
+        self.assertEqual(self._login('CYC', 'CYC002', 'x'), 200)
+
+    def test_a_restored_user_is_still_findable_by_email(self):
+        """The blind index is derived in save(), which bulk_create skips."""
         buf = BytesIO()
         build_workbook(self.co).save(buf)
         reset_company(self.co, keep_user_id=self.admin.id)
         buf.seek(0)
         restore(self.co, parse_workbook(buf), commit=True)
         rep = User.objects.get(company=self.co, user_code='CYC002')
-        self.assertFalse(rep.has_usable_password())
-        self.assertEqual(self._login('CYC', 'CYC002', 'x'), 401)
+        self.assertTrue(rep.email_key, 'email lookups would miss this user')
 
     def test_a_platform_admin_resetting_elsewhere_leaves_that_company_a_way_in(self):
         """keep_user_id is in another company, so keeping it would keep nobody here."""
