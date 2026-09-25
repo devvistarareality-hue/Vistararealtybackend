@@ -13,7 +13,7 @@ where to put it.
 from django.apps import apps
 from django.test import SimpleTestCase
 
-from sales.backup_excel import ALL_TABLES, RESTORABLE
+from sales.backup_excel import ALL_TABLES, RESTORABLE, _columns, restore_order
 
 # The apps that hold a company's own records.
 LOCAL_APPS = {'sales', 'club1000', 'receivables', 'tasks', 'attendance',
@@ -71,38 +71,26 @@ class EveryModelIsAccountedFor(SimpleTestCase):
                                  f'{table.label}: scope {path!r} ends at {model._meta.label}')
 
 
-class NothingWipedIsUnrestorable(SimpleTestCase):
-    """Anything Data Reset destroys has to be restorable, or a reset is one-way.
+class EverythingCanBeRestored(SimpleTestCase):
+    """The workbook has to rebuild a company from nothing, not just undo a reset."""
 
-    The catch is cascade: SalesDataResetView names nine tables, but deleting a
-    Lead takes every CASCADE child with it. LeadTransfer was exactly that —
-    wiped by a reset, absent from the restore, gone for good.
-    """
+    def test_every_exported_table_is_also_restorable(self):
+        missing = [t.label for t in ALL_TABLES if t not in RESTORABLE]
+        self.assertEqual(missing, [], (
+            'Exported but never written back, so a wiped company could not be '
+            'rebuilt from its own backup: ' + ', '.join(missing)))
 
-    WIPED = {'sales.Lead', 'sales.Closure', 'sales.Booking'}
+    def test_restore_order_puts_parents_first(self):
+        """Restore follows restore_order(); a parent must come before its child.
 
-    def test_cascade_children_of_wiped_tables_are_restorable(self):
-        restorable = {t.model for t in RESTORABLE}
-        lost = []
-        for model in _company_models():
-            for f in model._meta.fields:
-                if not (f.is_relation and f.related_model):
-                    continue
-                if f.related_model._meta.label not in self.WIPED:
-                    continue
-                on_delete = getattr(getattr(f, 'remote_field', None), 'on_delete', None)
-                if getattr(on_delete, '__name__', '') == 'CASCADE' \
-                        and model._meta.label not in restorable:
-                    lost.append(f'{model._meta.label}.{f.name}')
-        self.assertEqual(lost, [], (
-            'These are CASCADE-deleted when Data Reset wipes leads/closures/bookings '
-            'but are not restorable, so a reset would destroy them permanently: '
-            + ', '.join(lost) + '. Mark their table restorable=True in SHEETS.'))
-
-    def test_restorable_tables_come_after_what_they_point_at(self):
-        """Restore writes in SHEETS order, so a parent must be listed first."""
-        order = {t.model: i for i, t in enumerate(RESTORABLE)}
-        for table in RESTORABLE:
+        Worked out from the models rather than the order the sheets happen to be
+        in — one wrong position is an insert that fails part-way through a
+        restore. Closure.site_visit was exactly that: closures were written
+        before the site visits they name.
+        """
+        order = {t.model: i for i, t in enumerate(restore_order())}
+        self.assertEqual(len(order), len(ALL_TABLES), 'restore_order() dropped a table')
+        for table in ALL_TABLES:
             for f in table.cls._meta.fields:
                 if not (f.is_relation and f.related_model):
                     continue
@@ -112,4 +100,10 @@ class NothingWipedIsUnrestorable(SimpleTestCase):
                         self.assertLess(
                             order[target], order[table.model],
                             f'{table.label}.{f.name} points at {target}, which is '
-                            f'restored later — move it earlier in SHEETS.')
+                            f'restored later.')
+
+    def test_password_hashes_never_reach_the_file(self):
+        """A backup is downloadable; credential material must not ride along."""
+        user_cols = [h for h, _, _ in _columns(apps.get_model('accounts.User'))]
+        for leaked in ('password', 'session_token_web', 'session_token_app'):
+            self.assertNotIn(leaked, user_cols)

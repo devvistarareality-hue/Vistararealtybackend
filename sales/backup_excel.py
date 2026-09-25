@@ -128,7 +128,9 @@ SHEETS = [
 ]
 
 ALL_TABLES = [t for _, tables in SHEETS for t in tables]
-RESTORABLE = [t for t in ALL_TABLES if t.restorable]
+# Everything is restorable: the workbook has to be able to rebuild a company
+# from nothing, not just undo a Data Reset.
+RESTORABLE = ALL_TABLES
 ALL_LABELS = {t.label for t in ALL_TABLES}
 
 
@@ -413,6 +415,8 @@ def _keep_original_timestamps(model_classes):
             f.auto_now, f.auto_now_add = auto_now, auto_now_add
 
 
+
+
 def _as_int(value):
     try:
         return int(value)
@@ -420,109 +424,164 @@ def _as_int(value):
         return None
 
 
-def _foreign_rows(company, parsed):
-    """Rows in the file that are not this company's.
+def restore_order():
+    """Every table, ordered so nothing is written before what it points at.
 
-    A workbook is restored into the company it was taken from. Without this the
-    rows would be written with whatever company the *file* names, so one
-    company's admin uploading another's backup would put that company's records
-    into the database — the request being scoped to their own company would not
-    stop it, because the scope is only used to choose the file, not the rows.
+    Worked out from the models rather than the order the sheets happen to be
+    written in, because one wrong hand-maintained position is an insert that
+    fails halfway through a restore. There are no cycles among these tables; a
+    self-reference (Lead.duplicate_of) is not an ordering problem.
     """
-    from django.apps import apps as _apps
-    Lead = _apps.get_model('sales.Lead')
-    User = _apps.get_model('accounts.User')
+    covered = {t.model: t for t in ALL_TABLES}
+    deps = {}
+    for label, table in covered.items():
+        needs = set()
+        for f in table.cls._meta.fields:
+            if f.is_relation and f.related_model:
+                target = f.related_model._meta.label
+                if target in covered and target != label:
+                    needs.add(target)
+        deps[label] = needs
 
-    lead_rows = parsed.get('Leads') or []
-    mine = {_as_int(r.get('id')) for r in lead_rows
-            if str(r.get('company_id') or '') == str(company.pk)}
-    # Children may also point at leads this company already has (a partial reset).
-    valid_leads = mine | set(Lead.objects.filter(company=company).values_list('pk', flat=True))
-    valid_users = set(User.objects.filter(company=company).values_list('pk', flat=True))
+    order, done, visiting = [], set(), set()
 
-    problems = []
-    for table in RESTORABLE:
+    def visit(label):
+        if label in done or label in visiting:
+            return
+        visiting.add(label)
+        for parent in sorted(deps[label]):
+            visit(parent)
+        visiting.discard(label)
+        done.add(label)
+        order.append(covered[label])
+
+    for label in sorted(deps):
+        visit(label)
+    return order
+
+
+def _parent_field(table):
+    """The foreign key a table's scope path hangs off, e.g. 'lead' for
+    'lead__company'. None when the table has its own company column."""
+    return None if table.scope == 'company' else table.scope.split('__')[0]
+
+
+def _ownership(company, parsed):
+    """({table label: set of ids that are this company's}, [rows that are not]).
+
+    A workbook only goes back into the company it came from, and the request
+    being scoped to one company decides which file you get, not which rows get
+    written — so the rows are checked themselves.
+
+    A row belongs here if its own company column says so, or if the parent it
+    hangs off does. The parent may be in this same workbook (a full restore
+    writes both) or already in the database (restoring after a partial wipe),
+    so both count. Walking in dependency order means a parent is always settled
+    before anything pointing at it is judged.
+    """
+    valid, problems = {}, []
+    for table in restore_order():
         rows = parsed.get(table.label) or []
-        bad = 0
-        for r in rows:
-            if table.scope == 'company':
-                own = str(r.get('company_id') or '') == str(company.pk)
+        field = _parent_field(table)
+        parent_ids = None
+        if field:
+            parent_label = table.cls._meta.get_field(field).related_model._meta.label
+            parent_ids = valid.get(parent_label, set())
+
+        mine, bad = set(), 0
+        for row in rows:
+            row_id = _as_int(row.get('id'))
+            if field is None:
+                own = str(row.get('company_id') or '') == str(company.pk)
                 # Booking.company is nullable; fall back to the lead it belongs to.
-                if not own and not r.get('company_id'):
-                    own = _as_int(r.get('lead_id')) in valid_leads
-            elif table.scope.startswith('lead__'):
-                own = _as_int(r.get('lead_id')) in valid_leads
-            elif table.scope.startswith('user__'):
-                own = _as_int(r.get('user_id')) in valid_users
-            elif table.scope.startswith('recipient__'):
-                own = _as_int(r.get('recipient_id')) in valid_users
+                if not own and not row.get('company_id'):
+                    own = _as_int(row.get('lead_id')) in valid.get('sales.Lead', set())
             else:
-                own = True
-            if not own:
+                own = _as_int(row.get(f'{field}_id')) in parent_ids
+            if own:
+                mine.add(row_id)
+            else:
                 bad += 1
         if bad:
             problems.append({'table': table.label, 'rows': bad})
-    return problems
+
+        # Rows already in the database count as this company's too, so a child
+        # pointing at something that survived the wipe is not called foreign.
+        existing = set(table.cls.objects.filter(**{table.scope: company})
+                       .values_list('pk', flat=True))
+        valid[table.model] = mine | existing
+    return valid, problems
 
 
 def restore(company, parsed, commit=False):
-    """Put the rows in `parsed` back, or report what would happen.
+    """Write back everything in the workbook that is missing, or report what would be.
 
-    Refuses outright if any row already exists: a restore is only ever meant to
-    run into the empty slate Data Reset leaves behind, so an id that is already
-    taken means this is not that situation and writing anything would be
-    guesswork. Refuses too if the file holds another company's rows.
+    Rows whose id is already taken are skipped, never overwritten: a restore
+    fills gaps, it does not decide that the file is more current than the
+    database. That is what lets one workbook serve both jobs — putting back a
+    company wiped to the ground, and undoing a Data Reset that cleared only the
+    sales tables and left users, projects and plots in place.
+
+    Refuses outright if the file holds another company's rows.
     """
-    foreign = _foreign_rows(company, parsed)
+    order = restore_order()
+    valid, foreign = _ownership(company, parsed)
+
+    plan, total_new, total_skip = [], 0, 0
+    for table in order:
+        rows = parsed.get(table.label) or []
+        ids = [i for i in (_as_int(r.get('id')) for r in rows) if i is not None]
+        existing = set(table.cls.objects.filter(pk__in=ids).values_list('pk', flat=True)) if ids else set()
+        new = len(ids) - len(existing)
+        if rows:
+            plan.append({'table': table.label, 'rows': len(rows),
+                         'restore': new, 'already_there': len(existing)})
+        total_new += new
+        total_skip += len(existing)
+
     if foreign:
-        plan = [{'table': t.label, 'rows': len(parsed.get(t.label) or [])} for t in RESTORABLE]
-        return {'ok': False, 'committed': False, 'plan': plan,
-                'total': sum(p['rows'] for p in plan), 'conflicts': [], 'foreign': foreign,
+        return {'ok': False, 'committed': False, 'plan': plan, 'total': total_new,
+                'already_there': total_skip, 'conflicts': [], 'foreign': foreign,
                 'detail': f'This workbook holds records belonging to another company, so it '
                           f'cannot be restored into {company.name}. Nothing was written.'}
-
-    plan, conflicts = [], []
-    for table in RESTORABLE:
-        rows = parsed.get(table.label) or []
-        ids = [r.get('id') for r in rows if r.get('id') not in (None, '')]
-        ids = [int(i) for i in ids]
-        taken = list(table.cls.objects.filter(pk__in=ids).values_list('pk', flat=True)[:20]) if ids else []
-        if taken:
-            conflicts.append({'table': table.label, 'existing_ids': taken})
-        plan.append({'table': table.label, 'rows': len(rows)})
-
-    total = sum(p['rows'] for p in plan)
-    if conflicts:
-        return {'ok': False, 'committed': False, 'plan': plan, 'total': total,
-                'conflicts': conflicts, 'foreign': [],
-                'detail': 'Some of these records already exist. Restore only runs into '
-                          'data that has been cleared — nothing was written.'}
     if not commit:
-        return {'ok': True, 'committed': False, 'plan': plan, 'total': total,
-                'conflicts': [], 'foreign': []}
+        return {'ok': True, 'committed': False, 'plan': plan, 'total': total_new,
+                'already_there': total_skip, 'conflicts': [], 'foreign': []}
 
-    classes = [t.cls for t in RESTORABLE]
-    with _keep_original_timestamps(classes), transaction.atomic():
-        for table in RESTORABLE:
+    User = apps.get_model('accounts.User')
+    with _keep_original_timestamps([t.cls for t in order]), transaction.atomic():
+        for table in order:
             rows = parsed.get(table.label) or []
             if not rows:
                 continue
             model = table.cls
+            ids = [i for i in (_as_int(r.get('id')) for r in rows) if i is not None]
+            taken = set(model.objects.filter(pk__in=ids).values_list('pk', flat=True))
             by_header = {h: (f, kind) for h, f, kind in _columns(model) if kind != 'label'}
+
             objs = []
             for row in rows:
+                if _as_int(row.get('id')) in taken:
+                    continue
                 kwargs = {}
                 for header, raw in row.items():
                     spec = by_header.get(header)
                     if spec is None:
-                        continue            # label column, or a column we don't write
+                        continue            # a label column, or one we do not write
                     f, kind = spec
                     if kind == 'id':
                         kwargs[f.attname] = _to_python(f.target_field, raw)
                     else:
                         kwargs[f.name] = _to_python(f, raw)
-                objs.append(model(**kwargs))
-            model.objects.bulk_create(objs, batch_size=500)
+                obj = model(**kwargs)
+                if model is User:
+                    # Password hashes are deliberately kept out of the file, so a
+                    # restored account cannot be signed into until an admin sets
+                    # a password. Better than shipping credentials in a workbook.
+                    obj.set_unusable_password()
+                objs.append(obj)
+            if objs:
+                model.objects.bulk_create(objs, batch_size=500)
 
-    return {'ok': True, 'committed': True, 'plan': plan, 'total': total,
-            'conflicts': [], 'foreign': []}
+    return {'ok': True, 'committed': True, 'plan': plan, 'total': total_new,
+            'already_there': total_skip, 'conflicts': [], 'foreign': []}
