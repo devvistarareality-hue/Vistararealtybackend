@@ -127,5 +127,41 @@ class CompanyDetailView(APIView):
             company = Company.objects.get(pk=pk)
         except Company.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Deleting a company takes every module's data with it (all of it cascades)
+        # and, unlike a reset, leaves nothing to restore into — so it gets at least
+        # the same gates as Data Reset, plus two of its own.
+        import hmac, os, logging
+        from sales.views import CompanyResetView
+
+        # 1. Never the company you are signed in under: that locks you out.
+        if company.id == getattr(request.user, 'company_id', None):
+            return Response({'detail': 'You cannot delete the company you are signed in under.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # 2. A recent full backup, the same rule a reset uses.
+        if not CompanyResetView()._covering_backup(company):
+            return Response(
+                {'detail': "Take this company's backup first. Deleting is only allowed within "
+                           '2 hours of a full backup.'},
+                status=status.HTTP_409_CONFLICT)
+        # 3. The reset key from the server environment. No key configured, no delete.
+        expected = (os.getenv('DATA_RESET_KEY') or '').strip()
+        if not expected:
+            return Response({'detail': 'Deleting companies is disabled: no DATA_RESET_KEY is '
+                                       'configured on the server.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        supplied = str(request.data.get('reset_key') or '').strip()
+        if not hmac.compare_digest(supplied, expected):
+            logging.getLogger(__name__).warning(
+                'Company delete refused: bad key from user %s for company %s',
+                request.user.id, company.id)
+            return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
+        # 4. Type the company's own code, so the wrong row cannot be deleted by a slip.
+        if str(request.data.get('confirm') or '').strip().upper() != company.code.upper():
+            return Response({'detail': f'Type the company code ({company.code}) to confirm.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        logging.getLogger(__name__).warning('Company %s (%s) deleted by user %s',
+                                            company.id, company.code, request.user.id)
         company.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
