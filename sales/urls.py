@@ -67,6 +67,8 @@ urlpatterns = [
     path('admin/reset-trial-data/',    views.SalesDataResetView.as_view()),
     path('backups/settings/',          views.BackupSettingsView.as_view()),
     path('backups/run/',               views.BackupRunNowView.as_view()),
+    path('backups/excel/',             views.BackupExcelView.as_view()),
+    path('backups/restore/',           views.BackupRestoreView.as_view()),
     path('backups/<int:pk>/download/', views.BackupDownloadView.as_view()),
     path('backups/',                   views.BackupListView.as_view()),
 ]

@@ -7460,6 +7460,87 @@ class BackupDownloadView(APIView):
         return Response({'url': url})
 
 
+def _backup_company(request):
+    """The company a backup is for. Explicit — a backup of "whichever company
+    happened to be selected" is not something to guess at."""
+    from companies.models import Company as Co
+    cid = request.query_params.get('company_id') or request.data.get('company_id')
+    if not cid:
+        return None, Response({'detail': 'Choose a company first.'}, status=status.HTTP_400_BAD_REQUEST)
+    company = Co.objects.filter(pk=cid).first()
+    if not company:
+        return None, Response({'detail': 'No such company.'}, status=status.HTTP_404_NOT_FOUND)
+    return company, None
+
+
+class BackupExcelView(APIView):
+    """Platform-super-user-only: one company's data as a readable workbook.
+
+    Built and streamed in the moment — unlike the scheduled JSON dump this is
+    never stored, so the figures are whatever is true when the button is tapped.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_excel import build_workbook
+        buf = BytesIO()
+        build_workbook(company).save(buf)
+        safe = re.sub(r'[^A-Za-z0-9]+', '-', company.name).strip('-') or 'company'
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = (
+            f'attachment; filename="{safe}-backup-{timezone.localdate().isoformat()}.xlsx"')
+        return resp
+
+
+class BackupRestoreView(APIView):
+    """Platform-super-user-only: put a backup workbook's Sales rows back.
+
+    The counterpart to Data Reset: clear a company's trial data, then upload the
+    workbook taken before it to get those rows back with their original ids.
+    Without `commit` it only reports what it would do, which is what the page
+    shows before anyone presses the real button.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not is_platform_admin(request.user):
+            return Response({'detail': 'Super admin only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        upload = request.FILES.get('file')
+        if not upload:
+            return Response({'detail': 'Attach the backup workbook.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .backup_excel import parse_workbook, restore
+        try:
+            parsed = parse_workbook(upload)
+        except Exception:
+            return Response({'detail': 'That file could not be read as a backup workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not any(parsed.values()):
+            return Response({'detail': 'No restorable rows found in that workbook.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        commit = str(request.data.get('commit', '')).strip() in ('1', 'true', 'True')
+        try:
+            result = restore(company, parsed, commit=commit)
+        except Exception as exc:
+            logger.exception('Excel restore failed')
+            return Response({'detail': f'Restore failed, nothing was written: {exc}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not result['ok']:
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        return Response(result)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Lead transfer: one STM hands a lead to another, held for approval
 # ─────────────────────────────────────────────────────────────────────────────
