@@ -306,3 +306,54 @@ class ScheduledBackups(APITestCase):
         theirs = BackupStamp.objects.create(company=other, file_path='theirs.xlsx')
         r = self.client.get(f'/api/sales/backups/stored/{theirs.id}/?company_id={self.co.id}')
         self.assertEqual(r.status_code, 404, "another company's backup is not downloadable")
+
+
+class SomebodyCanAlwaysSignBackIn(APITestCase):
+    """A reset must never leave a company nobody can log into.
+
+    Restoring needs a login, and every account the workbook brings back has no
+    password — hashes are deliberately kept out of the file. So at least one
+    working account has to survive the reset itself.
+    """
+
+    def setUp(self):
+        self.co, self.admin, self.rep, *_ = _seed()
+
+    def _login(self, code, user_code, password):
+        return self.client.post('/api/auth/login/', {
+            'company_code': code, 'user_code': user_code,
+            'password': password, 'platform': 'web'}, format='json').status_code
+
+    def test_the_admin_who_resets_keeps_their_password(self):
+        reset_company(self.co, keep_user_id=self.admin.id)
+        self.assertEqual(self._login('CYC', 'CYC001', 'x'), 200)
+
+    def test_restoring_does_not_clobber_that_password(self):
+        buf = BytesIO()
+        build_workbook(self.co).save(buf)
+        reset_company(self.co, keep_user_id=self.admin.id)
+        buf.seek(0)
+        restore(self.co, parse_workbook(buf), commit=True)
+        self.assertEqual(self._login('CYC', 'CYC001', 'x'), 200,
+                         'the surviving account must not be overwritten by the restore')
+
+    def test_restored_colleagues_need_a_new_password(self):
+        buf = BytesIO()
+        build_workbook(self.co).save(buf)
+        reset_company(self.co, keep_user_id=self.admin.id)
+        buf.seek(0)
+        restore(self.co, parse_workbook(buf), commit=True)
+        rep = User.objects.get(company=self.co, user_code='CYC002')
+        self.assertFalse(rep.has_usable_password())
+        self.assertEqual(self._login('CYC', 'CYC002', 'x'), 401)
+
+    def test_a_platform_admin_resetting_elsewhere_leaves_that_company_a_way_in(self):
+        """keep_user_id is in another company, so keeping it would keep nobody here."""
+        vrl = Company.objects.create(code='VRL', name='Vistara', is_active=True)
+        root = User.objects.create_user('root@vrl.com', company=vrl, user_code='VRL1',
+                                        password='x', name='Root', role='Admin',
+                                        modules=['Sales'])
+        reset_company(self.co, keep_user_id=root.id)
+        self.assertTrue(User.objects.filter(company=self.co, role='Admin').exists(),
+                        "the company's own admin must survive or nobody can restore it")
+        self.assertEqual(self._login('CYC', 'CYC001', 'x'), 200)

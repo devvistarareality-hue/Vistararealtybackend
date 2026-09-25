@@ -663,11 +663,20 @@ def reset_company(company, modules=None, keep_user_id=None):
     the two to one registry is what makes "reset, then restore that workbook"
     land back where it started instead of part-way.
 
-    `keep_user_id` survives: whoever ran the reset still needs an account to log
-    back in with and restore from, or the company is unreachable. The restore
-    re-creates everyone else and skips that one.
+    Somebody able to sign in always survives, or the company is unreachable:
+    restoring needs a login, and every other account comes back from the
+    workbook without a password. Normally that is `keep_user_id`, whoever ran
+    the reset. When they belong to a different company — a platform admin
+    resetting someone else's — keeping their row would keep nobody here, so
+    this company's own admins are kept instead.
     """
     User = apps.get_model('accounts.User')
+    keep = set()
+    if keep_user_id and User.objects.filter(pk=keep_user_id, company=company).exists():
+        keep.add(keep_user_id)
+    if not keep:
+        keep = set(User.objects.filter(company=company, role='Admin')
+                   .values_list('pk', flat=True))
     doomed = {t.model for m in cascade_modules(modules) for t in TABLES_BY_MODULE[m]}
     deleted = {}
     with transaction.atomic():
@@ -675,8 +684,8 @@ def reset_company(company, modules=None, keep_user_id=None):
             if table.model not in doomed:
                 continue
             qs = table.cls.objects.filter(**{table.scope: company})
-            if table.cls is User and keep_user_id:
-                qs = qs.exclude(pk=keep_user_id)
+            if table.cls is User and keep:
+                qs = qs.exclude(pk__in=keep)
             count = qs.count()
             if count:
                 qs.delete()
