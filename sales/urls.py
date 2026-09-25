@@ -67,4 +67,5 @@ urlpatterns = [
     path('admin/reset-trial-data/',    views.SalesDataResetView.as_view()),
     path('backups/excel/',             views.BackupExcelView.as_view()),
     path('backups/restore/',           views.BackupRestoreView.as_view()),
+    path('backups/reset/',             views.CompanyResetView.as_view()),
 ]

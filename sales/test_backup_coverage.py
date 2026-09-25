@@ -23,6 +23,7 @@ LOCAL_APPS = {'sales', 'club1000', 'receivables', 'tasks', 'attendance',
 EXCLUDED = {
     'companies.Company':    'the backup is OF a company — this row is the container, not content',
     'accounts.OtpCode':     'short-lived login codes: a liability in a downloaded file, no value in a backup',
+    'sales.BackupStamp':    'proof a backup was taken, used to gate a reset — about the backup, not in it',
 }
 
 

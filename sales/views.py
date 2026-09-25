@@ -7557,9 +7557,14 @@ class BackupExcelView(APIView):
         company, err = _backup_company(request)
         if err:
             return err
-        from .backup_excel import build_workbook
+        from .backup_excel import build_workbook, reset_counts
         buf = BytesIO()
         build_workbook(company).save(buf)
+        # Record that this company's backup was taken. A reset asks for one of
+        # these, and only the server can honestly say the workbook was built.
+        from .models import BackupStamp
+        BackupStamp.objects.create(company=company, taken_by=request.user,
+                                   rows=sum(reset_counts(company).values()))
         safe = re.sub(r'[^A-Za-z0-9]+', '-', company.name).strip('-') or 'company'
         resp = HttpResponse(
             buf.getvalue(),
@@ -7567,6 +7572,90 @@ class BackupExcelView(APIView):
         resp['Content-Disposition'] = (
             f'attachment; filename="{safe}-backup-{timezone.localdate().isoformat()}.xlsx"')
         return resp
+
+
+class CompanyResetView(APIView):
+    """Wipe a company back to nothing, once its backup is safely in hand.
+
+    Three gates, because this is the most destructive thing in the product:
+    a recent backup, the reset key from the server environment, and typing
+    DELETE. GET reports what would go and whether a backup is recent enough.
+    """
+    permission_classes = [IsAuthenticated]
+
+    # How fresh a backup has to be. Long enough to download a big company's
+    # workbook and read it, short enough that it is this data, not last week's.
+    BACKUP_MAX_AGE = timedelta(hours=2)
+
+    def _recent_backup(self, company):
+        from .models import BackupStamp
+        cutoff = timezone.now() - self.BACKUP_MAX_AGE
+        return BackupStamp.objects.filter(company=company, taken_at__gte=cutoff).first()
+
+    def get(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+        from .backup_excel import reset_counts
+        stamp = self._recent_backup(company)
+        counts = reset_counts(company)
+        return Response({
+            'company': company.name,
+            'counts': {k: v for k, v in counts.items() if v},
+            'total': sum(counts.values()),
+            'backup_taken_at': stamp.taken_at if stamp else None,
+            'can_reset': bool(stamp),
+            'key_configured': bool((os.getenv('DATA_RESET_KEY') or '').strip()),
+        })
+
+    def post(self, request):
+        if not _may_back_up(request.user):
+            return Response({'detail': 'Admins only.'}, status=status.HTTP_403_FORBIDDEN)
+        company, err = _backup_company(request)
+        if err:
+            return err
+
+        # 1. A backup has to exist, and be this company's, and be recent. The
+        #    server records it when the workbook is built — a click in the
+        #    browser is not evidence that anything was downloaded.
+        stamp = self._recent_backup(company)
+        if not stamp:
+            return Response(
+                {'detail': 'Download this company\'s Excel backup first. A reset is only '
+                           'allowed within 2 hours of taking one.'},
+                status=status.HTTP_409_CONFLICT)
+
+        # 2. The reset key lives in the server environment, so a signed-in admin
+        #    — or anyone who takes over an admin session — still cannot wipe a
+        #    company without it. Fails closed: no key configured means no reset,
+        #    never "no protection".
+        expected = (os.getenv('DATA_RESET_KEY') or '').strip()
+        if not expected:
+            return Response(
+                {'detail': 'Reset is disabled: no DATA_RESET_KEY is configured on the server.'},
+                status=status.HTTP_403_FORBIDDEN)
+        supplied = str(request.data.get('reset_key') or '').strip()
+        if not hmac.compare_digest(supplied, expected):
+            logger.warning('Company reset refused: bad key from user %s for company %s',
+                           request.user.id, company.id)
+            return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
+
+        # 3. And say it out loud.
+        if str(request.data.get('confirm') or '').strip() != 'DELETE':
+            return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .backup_excel import reset_company
+        deleted = reset_company(company, keep_user_id=request.user.id)
+        logger.warning('Company %s reset by user %s: %s rows deleted',
+                       company.id, request.user.id, sum(deleted.values()))
+        return Response({
+            'detail': f'{company.name} has been reset. Your own account was kept so you can '
+                      f'sign back in and restore.',
+            'deleted': {k: v for k, v in deleted.items() if v},
+            'total': sum(deleted.values()),
+        })
 
 
 class BackupRestoreView(APIView):

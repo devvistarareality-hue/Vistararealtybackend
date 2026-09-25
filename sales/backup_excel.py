@@ -585,3 +585,37 @@ def restore(company, parsed, commit=False):
 
     return {'ok': True, 'committed': True, 'plan': plan, 'total': total_new,
             'already_there': total_skip, 'conflicts': [], 'foreign': []}
+
+
+# ── Reset ────────────────────────────────────────────────────────────────────
+def reset_counts(company):
+    """What a full reset would delete, table by table."""
+    return {t.label: t.cls.objects.filter(**{t.scope: company}).count()
+            for t in restore_order()}
+
+
+def reset_company(company, keep_user_id=None):
+    """Delete everything this company owns, leaving it at zero.
+
+    Deliberately the exact set of tables the backup covers, walked in reverse
+    dependency order — children before the rows they hang off, which is also
+    what PROTECT foreign keys (AR accounts guard their bookings) require. Tying
+    the two to one registry is what makes "reset, then restore that workbook"
+    land back where it started instead of part-way.
+
+    `keep_user_id` survives: whoever ran the reset still needs an account to log
+    back in with and restore from, or the company is unreachable. The restore
+    re-creates everyone else and skips that one.
+    """
+    User = apps.get_model('accounts.User')
+    deleted = {}
+    with transaction.atomic():
+        for table in reversed(restore_order()):
+            qs = table.cls.objects.filter(**{table.scope: company})
+            if table.cls is User and keep_user_id:
+                qs = qs.exclude(pk=keep_user_id)
+            count = qs.count()
+            if count:
+                qs.delete()
+            deleted[table.label] = count
+    return deleted

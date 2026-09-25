@@ -887,3 +887,25 @@ class LeadTransfer(models.Model):
 
     def __str__(self):
         return 'Transfer lead %s -> %s (%s)' % (self.lead_id, self.to_stm_id, self.status)
+
+
+class BackupStamp(models.Model):
+    """Proof that a company's Excel backup was actually taken, and when.
+
+    A full reset is refused without a recent one. The check has to be the
+    server's, not the browser's: "I clicked Download" is not evidence, and the
+    whole point of the gate is that nobody wipes a company on the strength of a
+    backup they only meant to take.
+    """
+    company  = models.ForeignKey('companies.Company', on_delete=models.CASCADE,
+                                 related_name='backup_stamps')
+    taken_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    taken_at = models.DateTimeField(auto_now_add=True)
+    rows     = models.IntegerField(default=0)
+
+    class Meta:
+        ordering = ['-taken_at']
+        indexes = [models.Index(fields=['company', '-taken_at'])]
+
+    def __str__(self):
+        return f'Backup of {self.company_id} at {self.taken_at:%d %b %Y %H:%M}'
