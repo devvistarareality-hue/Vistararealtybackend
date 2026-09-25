@@ -13,7 +13,8 @@ where to put it.
 from django.apps import apps
 from django.test import SimpleTestCase
 
-from sales.backup_excel import ALL_TABLES, RESTORABLE, _columns, restore_order
+from sales.backup_excel import (ALL_TABLES, BACKUP_TABLES, RESTORABLE, _columns,
+                                restore_order)
 
 # The apps that hold a company's own records.
 LOCAL_APPS = {'sales', 'club1000', 'receivables', 'tasks', 'attendance',
@@ -71,11 +72,46 @@ class EveryModelIsAccountedFor(SimpleTestCase):
                                  f'{table.label}: scope {path!r} ends at {model._meta.label}')
 
 
+# Cleared by a reset but deliberately absent from the workbook. Each needs a
+# reason: the default is that anything a reset destroys must be restorable, and
+# leaving a table out silently is how a restore quietly comes back incomplete.
+NOT_BACKED_UP = {
+    'accounts.Notification': "only meaningful when it arrives — restoring stale "
+                             "alerts would hand everyone a bell full of things "
+                             "that already happened",
+}
+
+
+class DeliberatelyNotInTheWorkbook(SimpleTestCase):
+
+    def test_only_the_listed_tables_are_left_out(self):
+        left_out = {t.model for t in ALL_TABLES if not t.backed_up}
+        self.assertEqual(left_out, set(NOT_BACKED_UP), (
+            'A table stopped being backed up without a reason recorded here. A '
+            'reset still destroys it, so leaving it out means that data is gone '
+            'for good — add it to NOT_BACKED_UP with why, or back it up.'))
+
+    def test_what_is_left_out_is_still_wiped_by_a_reset(self):
+        """The whole point of the split: out of the backup, still in the reset."""
+        reset_scope = {t.model for t in ALL_TABLES}
+        for label in NOT_BACKED_UP:
+            with self.subTest(model=label):
+                self.assertIn(label, reset_scope)
+
+    def test_what_is_left_out_is_not_restorable_either(self):
+        # Belt and braces: `restorable` is ANDed with `backed_up` in Table, so a
+        # future edit cannot mark one restorable without also backing it up.
+        for t in ALL_TABLES:
+            if not t.backed_up:
+                with self.subTest(table=t.label):
+                    self.assertFalse(t.restorable)
+
+
 class EverythingCanBeRestored(SimpleTestCase):
     """The workbook has to rebuild a company from nothing, not just undo a reset."""
 
     def test_every_exported_table_is_also_restorable(self):
-        missing = [t.label for t in ALL_TABLES if t not in RESTORABLE]
+        missing = [t.label for t in BACKUP_TABLES if t not in RESTORABLE]
         self.assertEqual(missing, [], (
             'Exported but never written back, so a wiped company could not be '
             'rebuilt from its own backup: ' + ', '.join(missing)))

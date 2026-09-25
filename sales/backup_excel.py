@@ -50,13 +50,19 @@ LABEL_SUFFIX = ' (name)'
 
 
 class Table:
-    """One stacked table inside a module sheet."""
+    """One stacked table inside a module sheet.
 
-    def __init__(self, label, model, scope, restorable=False):
+    `backed_up=False` means the reset still clears it but the workbook never
+    carries it. That split exists for rows whose value is entirely in the
+    moment: bringing them back would be worse than losing them.
+    """
+
+    def __init__(self, label, model, scope, restorable=False, backed_up=True):
         self.label = label
         self.model = model        # 'app_label.ModelName'
         self.scope = scope        # ORM path from this model to companies.Company
-        self.restorable = restorable
+        self.restorable = restorable and backed_up
+        self.backed_up = backed_up
 
     @property
     def cls(self):
@@ -79,7 +85,11 @@ SHEETS = [
         Table('Lead History', 'sales.LeadStatusHistory', 'lead__company', restorable=True),
         Table('Distribution Log', 'sales.DistributionLog', 'company', restorable=True),
         Table('Availability', 'sales.UserAvailability', 'user__company', restorable=True),
-        Table('Notifications', 'accounts.Notification', 'recipient__company', restorable=True),
+        # Deleted by a reset, never carried in the workbook. A notification is
+        # only meaningful when it arrives — restoring a month of stale "new lead
+        # assigned" alerts would hand everyone a full bell of things that already
+        # happened, and the records they point at come back anyway.
+        Table('Notifications', 'accounts.Notification', 'recipient__company', backed_up=False),
         # Data Reset never names lead transfers, but LeadTransfer.lead is CASCADE,
         # so wiping leads takes them with it — restorable or they are lost for good.
         Table('Lead Transfers', 'sales.LeadTransfer', 'company', restorable=True),
@@ -138,11 +148,14 @@ MODULES = [name for name, _ in SHEETS]
 TABLES_BY_MODULE = {name: list(tables) for name, tables in SHEETS}
 MODULE_OF = {t.model: name for name, tables in SHEETS for t in tables}
 
+# Every table a reset touches. The reset works off this, so a table stays in
+# scope for the wipe whether or not the workbook carries it.
 ALL_TABLES = [t for _, tables in SHEETS for t in tables]
-# Everything is restorable: the workbook has to be able to rebuild a company
-# from nothing, not just undo a Data Reset.
-RESTORABLE = ALL_TABLES
-ALL_LABELS = {t.label for t in ALL_TABLES}
+# What the workbook holds. Everything in it is restorable: the file has to be
+# able to rebuild a company from nothing, not just undo a Data Reset.
+BACKUP_TABLES = [t for t in ALL_TABLES if t.backed_up]
+RESTORABLE = BACKUP_TABLES
+ALL_LABELS = {t.label for t in BACKUP_TABLES}
 
 
 def pick_modules(modules):
@@ -323,6 +336,8 @@ def build_workbook(company, modules=None):
                           Font(italic=True, size=9, color='FF6B7280')))
         ws.append([])
         for table in tables:
+            if not table.backed_up:
+                continue
             _append_table(ws, table, company, cache)
     return wb
 
