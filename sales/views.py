@@ -7670,7 +7670,14 @@ class BackupStoredDownloadView(APIView):
         if not stamp:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         from .backup_storage import signed_backup_url
-        url = signed_backup_url(stamp.file_path)
+        # Name it on the way out. Files stored before the content-type fix are
+        # still labelled gzip in the bucket, and without this the browser saves a
+        # perfectly good workbook as "…-1641.gz", which Excel will not open and
+        # the Restore panel will not take.
+        name = stamp.file_path.rsplit('/', 1)[-1]
+        if not name.lower().endswith('.xlsx'):
+            name = name.rsplit('.', 1)[0] + '.xlsx'
+        url = signed_backup_url(stamp.file_path, download_as=name)
         if not url:
             return Response({'detail': 'Could not generate a download link.'},
                             status=status.HTTP_502_BAD_GATEWAY)
