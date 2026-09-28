@@ -62,11 +62,26 @@ class DeleteCompanyGuardTests(APITestCase):
         self.assertEqual(r.status_code, 403)
 
     def test_all_gates_met_deletes_it_and_its_data(self):
+        # The rows whose PROTECT foreign keys made a plain delete 500 on a real company:
+        # an AR account guarding its booking, an investor guarding its scheme.
+        from datetime import date
+        from decimal import Decimal
+        from sales.models import Booking
+        from receivables.models import ARAccount
+        from club1000.models import Scheme, Investor
+        b = Booking.objects.create(company=self.target, status='sold', client_name='C')
+        ARAccount.objects.create(company=self.target, root_booking=b, booking=b)
+        sch = Scheme.objects.create(company=self.target, name='S', tenure_months=12,
+                                    min_ticket_size=Decimal('1'), interest_payout_options=['maturity'])
+        Investor.objects.create(company=self.target, scheme=sch, name='I', phone='9000000009',
+                                amount_invested=Decimal('100'), maturity_date=date(2030, 1, 1))
         self._backup(self.target)
         r = self._delete(self.target, reset_key='the-key', confirm='gone')   # code is case-insensitive
         self.assertEqual(r.status_code, 204)
         self.assertFalse(Company.objects.filter(pk=self.target.pk).exists())
         self.assertFalse(Lead.objects.filter(name='A lead').exists())
+        self.assertFalse(Booking.objects.filter(client_name='C').exists())
+        self.assertFalse(Investor.objects.filter(name='I').exists())
 
     def test_check_only_validates_without_a_backup_and_deletes_nothing(self):
         bad = self._delete(self.target, reset_key='nope', confirm='GONE', check_only=True)

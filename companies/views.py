@@ -166,7 +166,16 @@ class CompanyDetailView(APIView):
         if check_only:
             return Response({'ok': True})
 
+        # A plain company.delete() is refused by the database's own guards: an AR
+        # account PROTECTs its booking and an investor its scheme, and PROTECT holds
+        # even when both sides are going. So empty the company first the way a reset
+        # does — children before the rows they hang off — then remove what is left.
+        # One transaction: if anything fails, nothing is gone.
+        from django.db import transaction
+        from sales.backup_excel import reset_company
+        with transaction.atomic():
+            reset_company(company)
+            company.delete()
         logging.getLogger(__name__).warning('Company %s (%s) deleted by user %s',
                                             company.id, company.code, request.user.id)
-        company.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
