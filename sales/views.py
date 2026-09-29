@@ -307,13 +307,18 @@ def _visible_projects(qs, user):
 
 
 def _locked_project_error(request, project_id):
-    """403 if this project is locked to this user, else None.
+    """403 if this project is locked, else None.
 
     Guards the write paths. Without it a locked project is merely hidden, and a
     hidden project is still bookable by anyone who kept the id in a tab or typed
     it into the URL.
+
+    No admin exemption: seeing is not selling. An admin sees a locked project so
+    they can finish setting it up and release it — booking into one before it is
+    released is exactly what the lock is there to stop, and an admin doing it by
+    accident is the likeliest way it happens.
     """
-    if not project_id or _may_see_locked(request.user):
+    if not project_id:
         return None
     if Project.objects.filter(pk=project_id, is_locked=True).exists():
         return Response({'detail': 'This project is locked and cannot be used yet.'},
@@ -322,8 +327,11 @@ def _locked_project_error(request, project_id):
 
 
 def _locked_units_error(request, project_id, unit_numbers):
-    """403 if any of these units sits in a locked block, else None."""
-    if not project_id or not unit_numbers or _may_see_locked(request.user):
+    """403 if any of these units sits in a locked block, else None.
+
+    No admin exemption, for the same reason as _locked_project_error.
+    """
+    if not project_id or not unit_numbers:
         return None
     project = Project.objects.filter(pk=project_id).only('id', 'locked_blocks').first()
     if not project:
@@ -2302,10 +2310,15 @@ class PlotListView(APIView):
         _reclaim_units_with_a_live_sale(Plot.objects.filter(project_id=project_id))
         plots = (Plot.objects.filter(project_id=project_id)
                  .select_related('project').defer(*PROJECT_BLOBS))
-        # Units in a locked block come off the map entirely for everyone but an
-        # admin. Filtered in Python because a unit carries its block in the prefix
-        # of its number rather than in a column of its own.
-        if not _may_see_locked(request.user):
+        # Units in a locked block come off the map for everyone, admins included —
+        # the map is where units get picked for a booking, and a locked block is
+        # not for sale. Manage Plots and the project editor pass include_locked=1
+        # so an admin can still build the block out while it is held back.
+        # Filtered in Python because a unit carries its block in the prefix of its
+        # number rather than in a column of its own.
+        want_locked = (request.query_params.get('include_locked') == '1'
+                       and _may_see_locked(request.user))
+        if not want_locked:
             proj = Project.objects.filter(pk=project_id).only('id', 'locked_blocks').first()
             if proj and proj.locked_block_set():
                 plots = [p for p in plots if not proj.blocks_unit_locked(p.number)]
