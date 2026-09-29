@@ -5163,16 +5163,14 @@ class BookingListCreateView(APIView):
             # looking at Sales My Bookings still sees their own and their team's work
             # there.
             if request.query_params.get('cp_only') == 'true':
-                # Plus everything this person and their reporting tree sold, whatever
-                # the source: My Bookings answers "what have I and my people sold",
-                # and a CP Cluster Head's team does not stop being their team the
-                # moment a deal comes in as a walk-in. Without the tree half, a
-                # reportee's non-partner booking appeared on no screen this manager
-                # could reach. One filter, so a booking that qualifies both ways is
-                # listed once.
+                # Plus this person's OWN bookings from any source — but not their
+                # reportees' non-partner ones: the CP module is the partner book, and
+                # a team member's walk-in belongs on Sales My Bookings, not here
+                # (the owner's rule, 2026-09-29, over the team-wide version of 09-25).
+                # One filter, so a booking that qualifies both ways is listed once.
                 _desk = _cp_desk_ids(request.user)
                 cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
-                mine_q = cp_part | Q(stm_id__in=own_and_team)
+                mine_q = cp_part | Q(stm_id=request.user.id)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:
