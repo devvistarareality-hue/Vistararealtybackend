@@ -1,0 +1,124 @@
+"""A client the STM has already booked is not someone to ring.
+
+An STM who books a walk-in straight from the booking form has no lead yet, so
+one is created for them. It used to be created at status 'new' with an empty
+stm_status — which is exactly the shape of "assigned to me, not yet called", so
+the client landed in that STM's To Call queue and sat there until somebody got
+round to approving the booking. Reported from production: a queue full of
+people who had already bought.
+
+The To Call / Called split is keyed off stm_status for an STM
+(LeadListView: work=pending -> stm_status='', work=called -> exclude that), so
+these tests assert on stm_status rather than on the tab.
+"""
+from django.core.cache import cache
+from django.test import TestCase
+from rest_framework.test import APIClient
+
+from accounts.models import User
+from companies.models import Company
+from sales.models import Booking, Lead, LeadSource, Plot, Project
+
+
+class DirectBookingClosesItsLead(TestCase):
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='DBK', name='Direct Book Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@dbk.com', company=cls.co, user_code='DBK001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.stm = User.objects.create_user(
+            'stm@dbk.com', company=cls.co, user_code='DBK002', password='p',
+            name='STM', role='Employee', designation='STM', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.project = Project.objects.create(company=cls.co, name='Kalrav 2')
+        LeadSource.objects.create(company=cls.co, name='Walk-In')
+        cls.plot = Plot.objects.create(project=cls.project, number='K-1')
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+        self.api.force_authenticate(user=self.stm)
+
+    def _payload(self, name, **over):
+        body = {
+            'client_name': name, 'phone': '+919800000001', 'source': 'Walk-In',
+            'project': self.project.id, 'plot': self.plot.id,
+            'final_amount': '1000000', 'land_rate': '3500', 'area': '100',
+        }
+        body.update(over)
+        return body
+
+    def _lead_for(self, booking_id):
+        return Lead.objects.get(id=Booking.objects.get(id=booking_id).lead_id)
+
+    # ── a submitted booking ──────────────────────────────────────────────────
+    def test_a_submitted_booking_closes_the_lead_it_created(self):
+        r = self.api.post('/api/sales/bookings/', self._payload('Walk-in Buyer'), format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        lead = self._lead_for(r.data['id'])
+        self.assertEqual(lead.stm_status, 'closed')
+        self.assertEqual(lead.status, 'closed')
+
+    def test_so_it_is_out_of_the_stms_to_call_queue(self):
+        """The reported symptom, asserted through the endpoint the tab uses."""
+        r = self.api.post('/api/sales/bookings/', self._payload('Sold Already'), format='json')
+        lead_id = Booking.objects.get(id=r.data['id']).lead_id
+
+        pending = self.api.get('/api/sales/leads/?work=pending')
+        self.assertNotIn(lead_id, [l['id'] for l in pending.data['results']])
+
+        called = self.api.get('/api/sales/leads/?work=called')
+        self.assertIn(lead_id, [l['id'] for l in called.data['results']])
+
+    def test_it_does_not_wait_for_approval(self):
+        """The booking is still pending — the lead is closed regardless. That gap
+        was the bug: approval could be days later, or never come."""
+        r = self.api.post('/api/sales/bookings/', self._payload('Awaiting Nod'), format='json')
+        self.assertEqual(Booking.objects.get(id=r.data['id']).status, 'pending')
+        self.assertEqual(self._lead_for(r.data['id']).stm_status, 'closed')
+
+    def test_the_lead_stays_with_the_stm_who_booked_it(self):
+        r = self.api.post('/api/sales/bookings/', self._payload('Mine'), format='json')
+        self.assertEqual(self._lead_for(r.data['id']).stm_id, self.stm.id)
+
+    def test_an_existing_lead_is_closed_too_not_just_a_new_one(self):
+        """Booking a lead that came through the pipeline closes it the same way."""
+        lead = Lead.objects.create(company=self.co, name='From Pipeline',
+                                   phone='+919800000077', project=self.project,
+                                   stm=self.stm, status='sv_done', stm_status='sv_done')
+        r = self.api.post('/api/sales/bookings/',
+                          self._payload('From Pipeline', lead=lead.id), format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        lead.refresh_from_db()
+        self.assertEqual(lead.stm_status, 'closed')
+
+    # ── a draft ──────────────────────────────────────────────────────────────
+    def test_a_draft_marks_the_lead_hot_not_closed(self):
+        """A draft is not a booking, so 'closed' would be a lie — but nobody needs
+        to ring a client the STM is writing up right now."""
+        r = self.api.post('/api/sales/bookings/draft/',
+                          self._payload('Half Typed'), format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        lead = Lead.objects.get(id=Booking.objects.get(id=r.data['id']).lead_id)
+        self.assertEqual(lead.stm_status, 'hot')
+        self.assertEqual(lead.status, 'hot')
+
+    def test_a_draft_lead_is_also_out_of_the_to_call_queue(self):
+        r = self.api.post('/api/sales/bookings/draft/',
+                          self._payload('Half Typed Two'), format='json')
+        lead_id = Booking.objects.get(id=r.data['id']).lead_id
+        pending = self.api.get('/api/sales/leads/?work=pending')
+        self.assertNotIn(lead_id, [l['id'] for l in pending.data['results']])
+
+    def test_submitting_that_draft_then_closes_it(self):
+        d = self.api.post('/api/sales/bookings/draft/',
+                          self._payload('Draft Then Real'), format='json')
+        lead_id = Booking.objects.get(id=d.data['id']).lead_id
+        self.assertEqual(Lead.objects.get(id=lead_id).stm_status, 'hot')
+
+        r = self.api.post('/api/sales/bookings/',
+                          self._payload('Draft Then Real', lead=lead_id), format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.get(id=lead_id).stm_status, 'closed')

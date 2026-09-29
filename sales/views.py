@@ -5375,6 +5375,16 @@ class BookingListCreateView(APIView):
                     status='hold', held_by=None, held_at=None,
                 )
 
+        # A submitted booking means this client is done being chased. Leaving the
+        # lead at 'new'/'' parked it in the STM's To Call queue until someone
+        # approved the booking — so a client the STM had already sold to sat in
+        # the list of people to ring. The approval path sets the same two fields;
+        # this just stops the gap between submission and approval, and covers a
+        # booking that is never approved at all.
+        if booking.lead_id:
+            Lead.objects.filter(id=booking.lead_id).update(
+                stm=booking.stm or request.user, stm_status='closed', status='closed')
+
         # Notify the admin-selected approvers (managers) via push.
         _notify_booking_approvers(company, booking, request.user)
         # The rep gets a receipt, and Accounts & Finance follow the money from the
@@ -5521,7 +5531,13 @@ class BookingDraftView(APIView):
                 src = LeadSource.objects.filter(company=company, name__iexact=sname).first()
             lead = Lead.objects.create(
                 company=company, name=data.get('client_name', '').strip(),
-                phone=(data.get('phone') or '').strip(), status='new',
+                phone=(data.get('phone') or '').strip(),
+                # A draft is not a booking, so 'closed' would be a lie — but this
+                # client is being written up right now and nobody needs to ring
+                # them, which is what 'new'/'' meant. Hot is the truth: the STM is
+                # mid-deal. It also lifts the lead out of the To Call queue, which
+                # is where these were piling up.
+                status='hot', stm_status='hot',
                 project_id=data.get('project') or None, source=src,
                 # STM self-sourced this client straight into a booking — no
                 # telecaller ever touched it. stm must be set (same value the
