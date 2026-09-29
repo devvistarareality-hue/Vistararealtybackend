@@ -196,3 +196,114 @@ class ARejectedSubmissionLeavesNoOrphan(TestCase):
         self.assertEqual(Lead.objects.count(), before,
                          'the revision minted a lead it then threw away')
         self.assertEqual(Booking.objects.get(id=rev.data['id']).lead_id, b.lead_id)
+
+
+class ABookingReusesTheLeadAlreadyOnFile(TestCase):
+    """Seven of one STM's clients had two leads each.
+
+    Entered around 09:15 one morning as ordinary leads, booked the same
+    afternoon through the booking form — which minted a second lead rather than
+    matching the first. The booking closed its own copy; the original sat in the
+    To Call queue at 'new' forever, which is what showed up as "these are already
+    booked, why are they in my calling list".
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='DUP', name='Dup Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@dup.com', company=cls.co, user_code='DUP001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.stm = User.objects.create_user(
+            'stm@dup.com', company=cls.co, user_code='DUP002', password='p',
+            name='STM', role='Employee', designation='STM', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.project = Project.objects.create(company=cls.co, name='Tower One')
+        cls.other = Project.objects.create(company=cls.co, name='Tower Two')
+        cls.plot = Plot.objects.create(project=cls.project, number='T-1')
+        cls.plot2 = Plot.objects.create(project=cls.other, number='U-1')
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+        self.api.force_authenticate(user=self.stm)
+
+    def _book(self, phone, project, plot, name='Viral Soni'):
+        return self.api.post('/api/sales/bookings/', {
+            'client_name': name, 'phone': phone, 'project': project.id, 'plot': plot.id,
+            'final_amount': '1000000', 'land_rate': '3500', 'area': '100',
+        }, format='json')
+
+    def test_it_reuses_the_existing_lead_instead_of_making_a_second(self):
+        first = Lead.objects.create(company=self.co, name='Viral Soni',
+                                    phone='+919812345600', project=self.project,
+                                    stm=self.stm, status='new')
+        before = Lead.objects.count()
+
+        r = self._book('+919812345600', self.project, self.plot)
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before, 'a duplicate lead was created')
+        self.assertEqual(Booking.objects.get(id=r.data['id']).lead_id, first.id)
+
+    def test_and_that_lead_is_closed_so_it_leaves_the_calling_queue(self):
+        first = Lead.objects.create(company=self.co, name='Viral Soni',
+                                    phone='+919812345601', project=self.project,
+                                    stm=self.stm, status='new')
+        self._book('+919812345601', self.project, self.plot)
+        first.refresh_from_db()
+        self.assertEqual((first.status, first.stm_status), ('closed', 'closed'))
+
+    def test_the_match_ignores_the_country_code(self):
+        """The stored number and the typed one rarely agree on +91."""
+        first = Lead.objects.create(company=self.co, name='Viral Soni',
+                                    phone='9812345602', project=self.project,
+                                    stm=self.stm, status='new')
+        before = Lead.objects.count()
+        r = self._book('+91 98123 45602', self.project, self.plot)
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before)
+        self.assertEqual(Booking.objects.get(id=r.data['id']).lead_id, first.id)
+
+    def test_a_different_project_is_a_separate_inquiry_and_gets_its_own_lead(self):
+        """Same person, different project, is a genuinely different deal — the
+        same rule the Add Lead form applies."""
+        Lead.objects.create(company=self.co, name='Viral Soni',
+                            phone='+919812345603', project=self.project,
+                            stm=self.stm, status='new')
+        before = Lead.objects.count()
+        r = self._book('+919812345603', self.other, self.plot2)
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before + 1)
+
+    def test_a_repeat_buyer_on_the_same_project_reuses_their_closed_lead(self):
+        """A second unit is still the same client — minting a duplicate for them
+        is the thing being fixed."""
+        first = Lead.objects.create(company=self.co, name='Viral Soni',
+                                    phone='+919812345604', project=self.project,
+                                    stm=self.stm, status='closed', stm_status='closed')
+        before = Lead.objects.count()
+        plot_b = Plot.objects.create(project=self.project, number='T-2')
+        r = self._book('+919812345604', self.project, plot_b)
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before)
+        self.assertEqual(Booking.objects.get(id=r.data['id']).lead_id, first.id)
+
+    def test_a_draft_reuses_it_too_and_lifts_it_out_of_to_call(self):
+        first = Lead.objects.create(company=self.co, name='Viral Soni',
+                                    phone='+919812345605', project=self.project,
+                                    stm=self.stm, status='new')
+        before = Lead.objects.count()
+        r = self.api.post('/api/sales/bookings/draft/', {
+            'client_name': 'Viral Soni', 'phone': '+919812345605',
+            'project': self.project.id, 'plot': self.plot.id,
+        }, format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before, 'the draft created a duplicate')
+        first.refresh_from_db()
+        self.assertEqual(first.stm_status, 'hot')
+
+    def test_a_brand_new_client_still_gets_a_lead(self):
+        before = Lead.objects.count()
+        r = self._book('+919812345699', self.project, self.plot, name='Nobody Yet')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Lead.objects.count(), before + 1)

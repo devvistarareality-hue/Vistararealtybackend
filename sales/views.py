@@ -329,6 +329,31 @@ def _visible_projects(qs, user):
     return qs if _may_see_locked(user) else qs.filter(is_locked=False)
 
 
+def _existing_lead_for_booking(company, project_id, phone):
+    """A lead already on file for this client on this project, or None.
+
+    A direct booking used to mint a lead unconditionally, so a client who was
+    already in the pipeline ended up with two: the original left sitting in the
+    STM's To Call queue at 'new', and a second one the booking closed. Seven of
+    Nikhil's clients were in exactly that state — entered around 09:15 one
+    morning, booked the same afternoon, two rows each with the same phone.
+
+    Same rule the Add Lead form already applies (see the phone_key + project
+    lookup in LeadListCreateView): same person, same project, same inquiry.
+    A different project is a genuinely separate deal and gets its own lead.
+
+    Unlike that form this does not exclude closed/lost leads — a repeat buyer
+    taking a second unit on the same project is still the same client, and
+    minting a duplicate for them is the very thing being fixed.
+    """
+    digits = ''.join(c for c in str(phone or '') if c.isdigit())[-10:]
+    if not (digits and project_id):
+        return None
+    return (Lead.objects
+            .filter(company=company, project_id=project_id, phone_key=phone_blind_index(digits))
+            .order_by('-created_at').first())
+
+
 def _locked_project_error(request, project_id):
     """403 if this project is locked, else None.
 
@@ -5497,6 +5522,10 @@ class BookingListCreateView(APIView):
         # someone to ring, and 'new' with an empty stm_status is precisely the
         # shape the To Call queue selects on.
         if not lead_id and (data.get('client_name') or '').strip():
+            already = _existing_lead_for_booking(company, data.get('project'), data.get('phone'))
+            if already:
+                lead_id = already.id                  # closed by the update below
+        if not lead_id and (data.get('client_name') or '').strip():
             src = None
             sname = (data.get('source') or '').strip()
             if sname:
@@ -5793,6 +5822,14 @@ class BookingDraftView(APIView):
         # Resolve or create the lead — reuse the draft's existing lead on repeat
         # Saves instead of minting a new one every time the rep clicks Save.
         lead_id = data.get('lead') or (draft.lead_id if draft else None)
+        if not lead_id and (data.get('client_name') or '').strip():
+            already = _existing_lead_for_booking(company, data.get('project'), data.get('phone'))
+            if already:
+                # Already on file — move it out of the calling queue rather than
+                # adding a second row for the same person.
+                Lead.objects.filter(id=already.id).update(
+                    stm=request.user, status='hot', stm_status='hot')
+                lead_id = already.id
         if not lead_id and (data.get('client_name') or '').strip():
             src = None
             sname = (data.get('source') or '').strip()
