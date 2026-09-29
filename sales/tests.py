@@ -1445,3 +1445,84 @@ class AvailabilityHistoryExportTests(APITestCase):
         hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
         body = [r for r in ws.iter_rows(min_row=hdr[0].row + 1) if r[0].value != 'TOTAL']
         self.assertEqual(len(body), 2)   # yesterday's record is outside the range
+
+
+class SvDoneNeedsVisitTests(APITestCase):
+    """A lead is SV Done only with its visit on record, and a completed visit
+    never leaves the lead's STM status blank."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from sales.models import SiteVisit  # noqa: F401  (model used below)
+        cls.co = Company.objects.create(code='SVD', name='SvDone Co')
+        cls.mgr = User.objects.create(email='svd_mgr@x.com', company=cls.co, role='Admin', user_code='SV1')
+        cls.stm = User.objects.create(email='svd_stm@x.com', company=cls.co, role='Employee', user_code='SV2')
+        cls.stm2 = User.objects.create(email='svd_stm2@x.com', company=cls.co, role='Employee', user_code='SV3')
+        cls.proj = Project.objects.create(company=cls.co, name='Visit Tower')
+
+    def setUp(self):
+        self.lead = Lead.objects.create(company=self.co, name='L', phone='+919100000001', project=self.proj, stm=self.stm)
+        auth(self.client, self.mgr)
+
+    def visits(self):
+        from sales.models import SiteVisit
+        return SiteVisit.objects.filter(lead=self.lead)
+
+    def test_sv_done_without_visit_is_refused(self):
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'sv_done', 'stm_remarks': 'x'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.stm_status, '')
+
+    def test_sv_done_with_visit_records_it(self):
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'Liked it',
+            'sv_outcome': 'hot', 'sv_visited_at': '2026-09-20',
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        v = self.visits().get()
+        self.assertEqual((v.status, v.outcome, v.remarks), ('completed', 'hot', 'Liked it'))
+        from django.utils import timezone
+        self.assertEqual(timezone.localtime(v.visited_at).date().isoformat(), '2026-09-20')
+
+    def test_scheduled_visit_is_completed_not_duplicated(self):
+        from sales.models import SiteVisit
+        from django.utils import timezone
+        SiteVisit.objects.create(lead=self.lead, project=self.proj, scheduled_at=timezone.now(), status='scheduled', stm=self.stm)
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'ok', 'sv_outcome': 'warm', 'sv_visited_at': '2026-09-21',
+        }, format='json')
+        self.assertEqual(list(self.visits().values_list('status', flat=True)), ['completed'])
+
+    def test_completing_a_visit_moves_the_lead_on(self):
+        from sales.models import SiteVisit
+        from django.utils import timezone
+        sv = SiteVisit.objects.create(lead=self.lead, project=self.proj, scheduled_at=timezone.now(), status='scheduled', stm=self.stm)
+        res = self.client.patch(f'/api/sales/site-visits/{sv.id}/', {
+            'status': 'completed', 'outcome': 'cold', 'remarks': 'Came', 'visited_at': timezone.now().isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.stm_status, self.lead.status), ('sv_done', 'sv_done'))
+        # …and with a visit on record, a later plain save at SV Done is fine.
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'hot'}, format='json')
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'sv_done'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_reassigning_a_visited_lead_keeps_its_status(self):
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'ok', 'sv_outcome': 'hot', 'sv_visited_at': '2026-09-20',
+        }, format='json')
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm': self.stm2.id}, format='json')
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.stm_id, self.lead.stm_status), (self.stm2.id, 'sv_done'))
+
+    def test_new_lead_at_sv_done_needs_the_visit(self):
+        body = {'name': 'N', 'phone': '+919100000002', 'project': self.proj.id, 'stm': self.stm.id,
+                'stm_status': 'sv_done', 'stm_remarks': 'walk-in'}
+        self.assertEqual(self.client.post('/api/sales/leads/', body, format='json').status_code, 400)
+        body.update(sv_outcome='warm', sv_visited_at='2026-09-22')
+        res = self.client.post('/api/sales/leads/', body, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        lead = Lead.objects.get(id=res.json()['id'])
+        self.assertEqual(lead.site_visits.filter(status='completed').count(), 1)
