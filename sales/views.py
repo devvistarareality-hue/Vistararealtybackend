@@ -7847,6 +7847,10 @@ class SalesDataResetView(APIView):
             logger.warning('Data reset refused: bad key from user %s', getattr(request.user, 'id', None))
             return Response({'detail': 'Incorrect reset key.'}, status=status.HTTP_403_FORBIDDEN)
         co = _resolve_company(request)
+        # And name the company being wiped (see _company_code_error).
+        code_err = _company_code_error(co, request.data)
+        if code_err:
+            return code_err
         before = self._counts(co)
         with_attendance = bool(request.data.get('with_attendance'))
         with_loi        = bool(request.data.get('with_loi_files'))
@@ -8092,6 +8096,18 @@ class BackupStoredDownloadView(APIView):
         return Response({'url': url})
 
 
+def _company_code_error(company, data):
+    """Resets also ask for the company's own code, typed out — the same check that
+    deleting a company makes — so the key and DELETE alone, entered against the
+    wrong company in the picker, cannot wipe it."""
+    typed = str(data.get('company_code') or '').strip().upper()
+    code = (getattr(company, 'code', '') or '').strip().upper()
+    if not code or typed != code:
+        return Response({'detail': f'Type the company code ({company.code}) to confirm.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 class CompanyResetView(APIView):
     """Wipe a company back to nothing, once its backup is safely in hand.
 
@@ -8177,6 +8193,10 @@ class CompanyResetView(APIView):
         # 3. And say it out loud.
         if str(request.data.get('confirm') or '').strip() != 'DELETE':
             return Response({'detail': 'Type DELETE to confirm.'}, status=status.HTTP_400_BAD_REQUEST)
+        # 4. And name the company being wiped.
+        code_err = _company_code_error(company, request.data)
+        if code_err:
+            return code_err
         if check_only:
             return Response({'ok': True})
 
