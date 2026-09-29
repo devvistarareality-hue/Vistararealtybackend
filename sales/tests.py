@@ -1644,3 +1644,41 @@ class DuplicateIsPerProjectTests(APITestCase):
         res = self.client.post('/api/sales/leads/', {'name': 'A', 'phone': '9400000001', 'project': p1.id, 'source': src.id}, format='json')
         again = Lead.objects.get(id=res.json()['id'])
         self.assertEqual((again.is_duplicate, again.duplicate_of_id), (True, first.id))
+
+
+class MetaReEnquiryTests(APITestCase):
+    """A repeat Meta enquiry on a live lead lands on that lead, not a new one."""
+
+    def setUp(self):
+        from sales.models import MetaWebhookConfig
+        self.co = Company.objects.create(code='MRE', name='ReEnq Co')
+        self.stm = User.objects.create(email='mre_stm@x.com', company=self.co, role='Employee', user_code='MR1')
+        self.proj = Project.objects.create(company=self.co, name='Tundav')
+        self.cfg = MetaWebhookConfig.objects.create(company=self.co, default_project=self.proj)
+        self.fields = [{'name': 'full_name', 'values': ['Malav']}, {'name': 'phone_number', 'values': ['+919824490529']}]
+
+    def test_repeat_on_a_live_lead_updates_it(self):
+        from unittest import mock
+        from sales.views import _create_lead_from_meta
+        from sales.models import LeadStatusHistory
+        first = Lead.objects.create(company=self.co, name='Malav', phone='+919824490529', project=self.proj,
+                                    stm=self.stm, status='assigned')
+        with mock.patch('notifications.notify') as notify:
+            got = _create_lead_from_meta(self.fields, self.cfg, 'VIP_Lead_Gen_September_2026')
+        self.assertEqual(got.id, first.id)
+        self.assertEqual(Lead.objects.filter(company=self.co).count(), 1)
+        first.refresh_from_db()
+        self.assertEqual((first.duplicate_count, first.stm_id, first.status), (1, self.stm.id, 'assigned'))
+        h = LeadStatusHistory.objects.get(lead=first, field_changed='re_enquiry')
+        self.assertIn('VIP_Lead_Gen_September_2026', h.new_value)
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args[0][0], self.stm)
+
+    def test_repeat_on_a_closed_lead_is_a_new_lead(self):
+        from unittest import mock
+        from sales.views import _create_lead_from_meta
+        first = Lead.objects.create(company=self.co, name='Malav', phone='+919824490529', project=self.proj, status='lost')
+        with mock.patch('notifications.notify'), mock.patch('sales.views._run_distribution'):
+            got = _create_lead_from_meta(self.fields, self.cfg, 'Oct campaign')
+        self.assertNotEqual(got.id, first.id)
+        self.assertEqual((got.is_duplicate, got.duplicate_of_id), (True, first.id))
