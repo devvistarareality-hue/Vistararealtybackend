@@ -1544,3 +1544,27 @@ class ManualHoldTests(APITestCase):
         self.assertEqual((counts['pending'], counts['hold']), (1, 0))
         res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'status': 'available'}, format='json')
         self.assertEqual((res.json()['status'], res.json()['manual_hold']), ('available', False))
+
+
+class LeadHistoryFollowUpTests(APITestCase):
+    """Follow-ups appear on the lead's History timeline."""
+
+    def test_follow_ups_are_in_the_history(self):
+        from django.utils import timezone
+        from sales.models import FollowUp
+        co = Company.objects.create(code='LHF', name='Hist Co')
+        admin = User.objects.create(email='lh_admin@x.com', company=co, role='Admin', user_code='LH1')
+        lead = Lead.objects.create(company=co, name='H', phone='+919200000001')
+        FollowUp.objects.create(lead=lead, assigned_to=admin, role_context='stm', created_by=admin,
+                                scheduled_at=timezone.now(), status='completed',
+                                completed_at=timezone.now(), outcome='Will visit Sunday')
+        FollowUp.objects.create(lead=lead, assigned_to=admin, role_context='telecaller',
+                                scheduled_at=timezone.now(), status='missed')
+        auth(self.client, admin)
+        hist = self.client.get(f'/api/sales/leads/{lead.id}/').json()['history']
+        kinds = [h['field_changed'] for h in hist]
+        self.assertEqual(kinds.count('follow_up'), 2)
+        self.assertIn('follow_up_done', kinds)
+        self.assertIn('follow_up_missed', kinds)
+        done = next(h for h in hist if h['field_changed'] == 'follow_up_done')
+        self.assertEqual(done['new_value'], 'Will visit Sunday')

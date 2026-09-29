@@ -1974,6 +1974,40 @@ class LeadListView(APIView):
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
 
 
+def _follow_up_events(lead):
+    """Timeline entries for a lead's follow-ups, shaped like LeadStatusHistory rows
+    (field_changed follow_up / follow_up_done / follow_up_missed)."""
+    def when(dt):
+        return timezone.localtime(dt).strftime('%d %b %Y, %I:%M %p') if dt else ''
+    def iso(dt):
+        return timezone.localtime(dt).isoformat() if dt else None
+    out = []
+    for fu in lead.follow_ups.select_related('assigned_to', 'created_by').all():
+        who = fu.assigned_to.name if fu.assigned_to_id else ''
+        role = 'STM' if fu.role_context == 'stm' else 'TC' if fu.role_context == 'telecaller' else ''
+        out.append({
+            'id': f'fu-{fu.id}', 'field_changed': 'follow_up', 'old_value': '',
+            'new_value': f"For {when(fu.scheduled_at)}" + (f" · {who}" if who else '') + (f" ({role})" if role else ''),
+            'remarks': fu.remarks or '',
+            'changed_by_name': fu.created_by.name if fu.created_by_id else (who or None),
+            'created_at': iso(fu.created_at),
+        })
+        if fu.status == 'completed':
+            out.append({
+                'id': f'fu-{fu.id}-done', 'field_changed': 'follow_up_done', 'old_value': '',
+                'new_value': fu.outcome or 'Done', 'remarks': fu.outcome or '',
+                'changed_by_name': who or None,
+                'created_at': iso(fu.completed_at or fu.updated_at),
+            })
+        elif fu.status == 'missed':
+            out.append({
+                'id': f'fu-{fu.id}-missed', 'field_changed': 'follow_up_missed', 'old_value': '',
+                'new_value': f"Due {when(fu.scheduled_at)}", 'remarks': '',
+                'changed_by_name': None, 'created_at': iso(fu.scheduled_at),
+            })
+    return out
+
+
 class LeadDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1999,7 +2033,15 @@ class LeadDetailView(APIView):
         # (e.g. status change → warm transfer → STM assigned).
         recent = list(lead.history.order_by('-created_at', '-id')[:30])
         recent.reverse()
-        data['history'] = LeadStatusHistorySerializer(recent, many=True).data
+        events = list(LeadStatusHistorySerializer(recent, many=True).data)
+        # Follow-ups write no history rows of their own, so the timeline never showed
+        # them. Read them off the follow-ups themselves (past ones included): when one
+        # was scheduled, and when it was done or missed.
+        events += _follow_up_events(lead)
+        from django.utils.dateparse import parse_datetime
+        _epoch = timezone.make_aware(datetime(2000, 1, 1))
+        events.sort(key=lambda e: parse_datetime(str(e['created_at'])) if e['created_at'] else _epoch)
+        data['history'] = events[-40:]
         data['follow_ups'] = FollowUpSerializer(lead.follow_ups.all(), many=True).data
         data['site_visits'] = SiteVisitSerializer(lead.site_visits.all(), many=True).data
         return Response(data)
