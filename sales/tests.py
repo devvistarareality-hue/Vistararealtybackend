@@ -801,7 +801,7 @@ class DataResetTests(APITestCase):
         # missing confirm -> 400
         self.assertEqual(self.client.post('/api/sales/admin/reset-trial-data/', {}, format='json').status_code, 400)
         # do it
-        res = self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE', 'reset_key': RESET_KEY}, format='json')
+        res = self.client.post('/api/sales/admin/reset-trial-data/', {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'company_code': a_co.code}, format='json')
         self.assertEqual(res.status_code, 200)
 
         # company A wiped + plot reset
@@ -824,7 +824,7 @@ class DataResetTests(APITestCase):
 
         auth(self.client, admin)
         res = self.client.post('/api/sales/admin/reset-trial-data/',
-                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'targets': ['leads']}, format='json')
+                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'company_code': co.code, 'targets': ['leads']}, format='json')
         self.assertEqual(res.status_code, 200)
 
         self.assertFalse(Lead.objects.filter(company=co).exists())
@@ -846,7 +846,7 @@ class DataResetTests(APITestCase):
 
         auth(self.client, admin)
         res = self.client.post('/api/sales/admin/reset-trial-data/',
-                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'targets': ['bookings']}, format='json')
+                               {'confirm': 'DELETE', 'reset_key': RESET_KEY, 'company_code': co.code, 'targets': ['bookings']}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertFalse(Booking.objects.filter(company=co).exists())
         self.assertFalse(Closure.objects.filter(pk=c.pk).exists())
