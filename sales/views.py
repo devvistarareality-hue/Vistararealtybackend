@@ -7325,6 +7325,30 @@ def _fetch_ad_campaign_info(ad_id, page_access_token):
     return '', ''
 
 
+def _record_meta_reenquiry(lead, email='', campaign_name='', adset_name='', ad_name=''):
+    """A repeat Meta enquiry on a live lead: count it, log it (with the campaign,
+    so marketing still sees which ad brought them back) and tell whoever owns it —
+    someone asking again is warm, and worth a call now."""
+    fields = ['duplicate_count']
+    lead.duplicate_count = (lead.duplicate_count or 0) + 1
+    if email and not lead.email:
+        lead.email = email
+        fields.append('email')
+    lead.save(update_fields=fields)
+    via = ' · '.join(x for x in (campaign_name, adset_name, ad_name) if x)
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=None, field_changed='re_enquiry',
+        new_value=(f'Meta · {campaign_name}' if campaign_name else 'Meta')[:100],
+        remarks=f'Enquired again via Meta{f" — {via}" if via else ""}',
+    )
+    from notifications import notify
+    project = lead.project.name if lead.project_id else 'their project'
+    for who in {u for u in (lead.stm, lead.telecaller) if u}:
+        notify(who, 're_enquiry', 'Enquired again',
+               f'{lead.name} enquired again about {project} (Meta) — a good time to call.',
+               {'lead_id': lead.id})
+
+
 def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', ad_name='', form_id=''):
     """Parse Meta field_data list and create a Lead."""
     fields = {f['name']: f['values'][0] for f in field_data if f.get('values') and f.get('name')}
@@ -7360,6 +7384,26 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         .order_by('created_at').first()
         if clean else None
     )
+
+    # The same person enquiring again about a project they already have a LIVE lead
+    # in is not a new lead: it lands on the one already being worked — same owner,
+    # same status — with the enquiry logged (campaign kept for attribution) and the
+    # owner told. A new row used to go into distribution and could reach a second
+    # telecaller while the first was still on it. Closed / lost leads are finished:
+    # a new enquiry then is a fresh lead, linked as a duplicate below.
+    live = None
+    if clean:
+        live = (Lead.objects.filter(company=company, phone_key=phone_blind_index(clean),
+                                    **({'project': project} if project else {'project__isnull': True}))
+                .exclude(status__in=('closed', 'lost')).order_by('created_at').first())
+    if live:
+        _record_meta_reenquiry(live, email, campaign_name, adset_name, ad_name)
+        MetaWebhookConfig.objects.filter(pk=config.pk).update(
+            total_leads_received=config.total_leads_received + 1,
+            last_lead_at=timezone.now(), is_active=True,
+        )
+        return live
+
     if existing:
         existing.duplicate_count = (existing.duplicate_count or 0) + 1
         existing.save(update_fields=['duplicate_count'])
