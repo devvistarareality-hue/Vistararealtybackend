@@ -38,7 +38,7 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner,
+    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner, SV_OUTCOME,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -1337,6 +1337,108 @@ def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
     return set(qs.values_list('id', flat=True))
 
 
+# ── A lead is "SV Done" only with the visit on record ────────────────────────
+# The web/app used to save stm_status='sv_done' first and log the visit in a
+# second, best-effort request; when that one failed (or a screen never sent it)
+# the lead sat at SV Done with no visit, invisible to every visit list and count.
+# Now the save that marks SV Done carries the visit (sv_outcome + sv_visited_at,
+# optional sv_remarks) and the server records it in the same transaction — or it
+# is refused unless the lead already has a completed visit.
+SV_DONE_FIELDS = ('sv_outcome', 'sv_visited_at', 'sv_remarks')
+# STM statuses that only describe the run-up to a visit: a completed visit moves
+# them on to sv_done. Later ones (closed, not_interested…) are left alone.
+PRE_VISIT_STM = ('', 'sv_scheduled', 'hot', 'warm', 'cold')
+
+
+def _parse_visited_at(raw):
+    """An ISO datetime, or a plain YYYY-MM-DD dated at the current time of day."""
+    from django.utils.dateparse import parse_datetime, parse_date
+    raw = str(raw or '').strip()
+    if not raw:
+        return None
+    dt = parse_datetime(raw)
+    if dt is None:
+        d = parse_date(raw)
+        if d is None:
+            return None
+        now = timezone.localtime()
+        dt = now.replace(year=d.year, month=d.month, day=d.day)
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt)
+    return dt
+
+
+def _sv_done_visit(lead, data, remarks_fallback=''):
+    """For a save that turns the lead SV Done: (visit_details | None, error | None).
+    visit_details is None when the lead already has a completed visit and the save
+    brings no new one."""
+    outcome = str(data.get('sv_outcome') or '').strip()
+    visited_raw = data.get('sv_visited_at')
+    if outcome or visited_raw:
+        if outcome not in dict(SV_OUTCOME):
+            return None, 'Pick the visit outcome (Hot, Warm, Cold or Not Interested).'
+        visited_at = _parse_visited_at(visited_raw)
+        if not visited_at:
+            return None, 'Pick the date of the visit.'
+        if visited_at > timezone.now() + timedelta(minutes=5):
+            return None, 'The visit date cannot be in the future.'
+        remarks = str(data.get('sv_remarks') or remarks_fallback or '').strip()
+        if not remarks:
+            return None, 'Add remarks about the visit.'
+        return {'outcome': outcome, 'visited_at': visited_at, 'remarks': remarks}, None
+    if lead is not None and lead.pk and lead.site_visits.filter(status='completed').exists():
+        return None, None
+    return None, ('Record the site visit to mark SV Done — pick its outcome and date. '
+                  'A lead cannot be SV Done without a visit on record.')
+
+
+def _record_visit_done(lead, user, visit):
+    """Complete the lead's latest scheduled visit, or log a completed one."""
+    sv = lead.site_visits.filter(status='scheduled').order_by('-scheduled_at', '-id').first()
+    if sv:
+        sv.status = 'completed'
+        sv.visited_at = visit['visited_at']
+        sv.outcome = visit['outcome']
+        sv.remarks = visit['remarks']
+        sv.save(update_fields=['status', 'visited_at', 'outcome', 'remarks'])
+        old = 'scheduled'
+    else:
+        sv = SiteVisit.objects.create(
+            lead=lead, project_id=lead.project_id,
+            scheduled_at=visit['visited_at'], visited_at=visit['visited_at'], status='completed',
+            stm=lead.stm or user, referred_by_telecaller_id=lead.telecaller_id,
+            outcome=visit['outcome'], remarks=visit['remarks'],
+        )
+        old = ''
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=user, field_changed='site_visit', old_value=old,
+        new_value=f'Completed · {sv.get_outcome_display()}', remarks='Site visit completed',
+    )
+    return sv
+
+
+def _sync_lead_to_completed_visit(lead, user):
+    """A completed visit takes a lead still in its run-up to SV Done, so the two
+    never disagree (a lead with a visit on record but a blank STM status)."""
+    if lead.stm_status not in PRE_VISIT_STM:
+        return
+    old_stm, old_status = lead.stm_status, lead.status
+    lead.stm_status = 'sv_done'
+    fields = ['stm_status']
+    if lead.status not in ('closed', 'lost', 'sv_done'):
+        lead.status = 'sv_done'
+        fields.append('status')
+    lead.save(update_fields=fields)
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=user, field_changed='stm_status', old_value=old_stm,
+        new_value='sv_done', remarks='Site visit completed',
+    )
+    if 'status' in fields:
+        LeadStatusHistory.objects.create(
+            lead=lead, changed_by=user, field_changed='status', old_value=old_status, new_value=lead.status,
+        )
+
+
 def _merge_into_existing_lead(existing, validated, user, can_assign):
     """Same phone + same project as an already-live lead: update that lead in
     place instead of inserting a duplicate row, regardless of who's adding it
@@ -1683,6 +1785,13 @@ class LeadListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        # Added straight at SV Done → the visit comes with it (see _sv_done_visit).
+        sv_visit = None
+        if data.get('stm_status') == 'sv_done':
+            sv_visit, sv_err = _sv_done_visit(None, data, data.get('stm_remarks'))
+            if sv_err:
+                return Response({'detail': sv_err}, status=status.HTTP_400_BAD_REQUEST)
+
         company = request.user.company
 
         # If a project is supplied it must belong to the requester's company.
@@ -1707,7 +1816,10 @@ class LeadListView(APIView):
                 .order_by('-created_at').first()
             )
             if same_lead:
-                merged = _merge_into_existing_lead(same_lead, ser.validated_data, request.user, can_assign)
+                with transaction.atomic():
+                    merged = _merge_into_existing_lead(same_lead, ser.validated_data, request.user, can_assign)
+                    if sv_visit:
+                        _record_visit_done(merged, request.user, sv_visit)
                 return Response(LeadDetailSerializer(merged).data, status=status.HTTP_200_OK)
 
         # Duplicate check — match last 10 digits regardless of +91 prefix. Scoped to
@@ -1855,6 +1967,8 @@ class LeadListView(APIView):
         # (admin didn't pick one and it isn't self-sourced / warm-transferred).
         elif not lead.telecaller_id and not lead.stm_id:
             _run_distribution(company, 'telecaller')
+        if sv_visit:
+            _record_visit_done(lead, request.user, sv_visit)
         lead.refresh_from_db()
 
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
@@ -1931,7 +2045,15 @@ class LeadDetailView(APIView):
         ser = LeadUpdateSerializer(lead, data=data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Turning SV Done needs the visit on record (see _sv_done_visit).
+        sv_visit = None
+        if data.get('stm_status') == 'sv_done' and old_stm_status != 'sv_done':
+            sv_visit, sv_err = _sv_done_visit(lead, data, data.get('stm_remarks') or lead.stm_remarks)
+            if sv_err:
+                return Response({'detail': sv_err}, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
+        if sv_visit:
+            _record_visit_done(lead, request.user, sv_visit)
 
         # Handing a lead to a different STM starts their work fresh — the new owner
         # hasn't called them yet, so their own stm_status/remarks can't legitimately
@@ -1945,7 +2067,11 @@ class LeadDetailView(APIView):
         # in the assignee's "To Call" bucket); this brings reassignment via PATCH
         # in line with that. Only fires on an actual change of owner, not every
         # save, and not when stm is being cleared back to nobody.
-        if old_stm_id != lead.stm_id and lead.stm_id:
+        # A lead that has already visited (or booked) keeps where it stands: wiping it
+        # left leads with a completed visit — even closed ones — at a blank STM status.
+        visited = (lead.site_visits.filter(status='completed').exists()
+                   or Closure.objects.filter(lead=lead).exists())
+        if old_stm_id != lead.stm_id and lead.stm_id and not visited:
             lead.stm_status = ''
             lead.stm_remarks = ''
             lead.status = 'assigned'
@@ -2880,6 +3006,8 @@ class SiteVisitListView(APIView):
         if not _lead_in_scope(request, request.data.get('lead')):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
+        if sv.status == 'completed':
+            _sync_lead_to_completed_visit(sv.lead, request.user)
         sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
         # A visit can be created already-completed (the sv_done fallback when no
         # scheduled visit exists yet) — label it as such, with the outcome, rather
@@ -2945,6 +3073,7 @@ class SiteVisitDetailView(APIView):
                 remarks='Site visit updated',
             )
             if sv.status == 'completed':
+                _sync_lead_to_completed_visit(sv.lead, request.user)
                 # Telecaller who referred the lead + the STM both hear that the SV is done.
                 from notifications import notify
                 for who in (sv.referred_by_telecaller, sv.stm):
@@ -4309,6 +4438,16 @@ class BulkImportLeadsView(APIView):
             sv_stat  = sv_stat if sv_stat in SV_ST else ''
             has_sv   = bool(sv_sched or sv_vis or sv_stat or str(row.get('sv_remarks', '')).strip())
             cl_date  = _imp_date(row.get('closure_date'))
+            # Keep the STM status and the visit agreeing, as the app now enforces:
+            # SV Done always has a completed visit on record, and a completed visit
+            # (or a closure) never leaves the STM status blank.
+            if stm_status == 'sv_done' and sv_stat != 'completed':
+                has_sv, sv_stat = True, 'completed'
+                sv_vis = sv_vis or sv_sched or lead_dt or timezone.now()
+            if not stm_status and cl_date:
+                stm_status = 'closed'
+            elif not stm_status and sv_stat == 'completed':
+                stm_status = 'sv_done'
 
             # Overall lead status: explicit wins; otherwise derive from the furthest stage reached.
             overall = str(row.get('overall_status', '')).strip().lower()
