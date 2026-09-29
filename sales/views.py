@@ -290,15 +290,38 @@ def _is_hard_admin(user):
     return is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
 
 
+def _manages_projects(user):
+    """Explicitly granted the Projects screen in Designation Master.
+
+    Deliberately not can_see_screen(): that answers True whenever a designation
+    has no saved menu, which is most of them — using it here would hand the whole
+    company sight of every locked project and the lock would mean nothing. This
+    asks the narrower question, "was Projects actually ticked for this person",
+    and answers False when no menu was ever configured.
+    """
+    from accounts.capabilities import screens_for
+    allowed = screens_for(user)
+    return allowed is not None and 'sales.screen.projects' in allowed
+
+
 def _may_see_locked(user):
     """Who still sees a locked project or block.
 
-    A real company or platform administrator — the same bar as _is_hard_admin.
+    A real company or platform administrator, plus anyone given the Projects
+    screen in Designation Master — they are the people who set projects up, so
+    they are the people who lock and release them. Without them here the feature
+    locks them out of their own work: a Director with Projects access could lock
+    a project and then never see it again to unlock it (VRL's CMO is exactly
+    that shape — Projects screen, role Director, so _is_hard_admin is False).
+
     Someone who merely reaches company-wide visibility through the org tree does
     not qualify: the point of a lock is that the sales floor cannot see the
     project, and a department head is on the sales floor.
+
+    Seeing is still not selling — the booking guards apply to everyone, this
+    list included.
     """
-    return _is_hard_admin(user)
+    return _is_hard_admin(user) or _manages_projects(user)
 
 
 def _visible_projects(qs, user):

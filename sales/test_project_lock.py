@@ -10,7 +10,7 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from accounts.models import User
+from accounts.models import Designation, User
 from companies.models import Company
 from sales.models import Plot, Project
 
@@ -199,3 +199,90 @@ class LockedThingsCannotBeBooked(TestCase):
         r = self._book({'project': self.partial.id, 'plot': self.open_unit.id,
                         'client_name': 'X', 'phone': '+919800000004'})
         self.assertNotEqual(r.status_code, 403, r.data)
+
+
+class WhoManagesLocks(TestCase):
+    """Whoever sets projects up is who locks and releases them.
+
+    The first cut gated this on role=Admin alone, which locked out the very
+    people who use the screen: VRL's CMO holds the Projects screen from
+    Designation Master with role Director, so they could lock a project and then
+    never see it again to unlock it.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='DSG', name='Designation Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@dsg.com', company=cls.co, user_code='DSG001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+
+        # A designation whose saved menu includes Projects — the CMO shape.
+        cls.with_projects = Designation.objects.create(
+            company=cls.co, name='CMO', module='Sales', screens_set=True,
+            screens=['sales.screen.projects', 'sales.screen.dashboard'])
+        # …and one that was configured without it.
+        cls.without_projects = Designation.objects.create(
+            company=cls.co, name='Telecaller', module='Sales', screens_set=True,
+            screens=['sales.screen.dashboard', 'sales.screen.leads'])
+
+        cls.cmo = User.objects.create_user(
+            'cmo@dsg.com', company=cls.co, user_code='DSG002', password='p',
+            name='Dhiraj', role='Director', designation='CMO', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.tc = User.objects.create_user(
+            'tc@dsg.com', company=cls.co, user_code='DSG003', password='p',
+            name='Telecaller', role='Employee', designation='Telecaller',
+            modules=['Sales'], reporting_manager=cls.admin)
+        # Nobody configured a menu for this one at all.
+        cls.unconfigured = User.objects.create_user(
+            'plain@dsg.com', company=cls.co, user_code='DSG004', password='p',
+            name='Plain Rep', role='Employee', designation='Nothing Saved',
+            modules=['Sales'], reporting_manager=cls.admin)
+
+        cls.locked = Project.objects.create(company=cls.co, name='Held Back', is_locked=True)
+        Project.objects.create(company=cls.co, name='Open One')
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+
+    def _names_for(self, user):
+        self.api.force_authenticate(user=user)
+        r = self.api.get('/api/sales/projects/')
+        self.assertEqual(r.status_code, 200, r.data)
+        return {p['name'] for p in r.data}
+
+    def test_the_projects_screen_holder_sees_locked_projects(self):
+        self.assertIn('Held Back', self._names_for(self.cmo))
+
+    def test_they_can_open_it_to_unlock_it(self):
+        self.api.force_authenticate(user=self.cmo)
+        r = self.api.get(f'/api/sales/projects/{self.locked.id}/')
+        self.assertEqual(r.status_code, 200)
+        r = self.api.patch(f'/api/sales/projects/{self.locked.id}/',
+                           {'is_locked': False}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.locked.refresh_from_db()
+        self.assertFalse(self.locked.is_locked)
+
+    def test_a_designation_without_the_projects_screen_does_not(self):
+        names = self._names_for(self.tc)
+        self.assertIn('Open One', names)
+        self.assertNotIn('Held Back', names)
+
+    def test_someone_with_no_saved_menu_does_not_either(self):
+        """The trap: can_see_screen() answers True when no menu was configured,
+        which is most designations. Using it here would hand the whole company
+        sight of every locked project."""
+        names = self._names_for(self.unconfigured)
+        self.assertIn('Open One', names)
+        self.assertNotIn('Held Back', names)
+
+    def test_seeing_it_still_does_not_mean_being_able_to_book_it(self):
+        self.api.force_authenticate(user=self.cmo)
+        r = self.api.post('/api/sales/bookings/',
+                          {'project': self.locked.id, 'client_name': 'X',
+                           'phone': '+919800000009'}, format='json')
+        self.assertEqual(r.status_code, 403)
+        self.assertIn('locked', str(r.data).lower())
