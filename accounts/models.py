@@ -164,7 +164,7 @@ class Designation(models.Model):
     # a module not named keeps its default menu.
     screens_modules  = models.JSONField(default=list, blank=True)
     # Which dashboard opens; '' decides from their permissions, as before.
-    dashboard        = models.CharField(max_length=20, blank=True, default='')
+    dashboard        = models.CharField(max_length=40, blank=True, default='')
 
     class Meta:
         unique_together = ('company', 'name', 'module')
