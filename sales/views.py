@@ -1879,7 +1879,11 @@ class LeadListView(APIView):
             .filter(phone_key=phone_idx)
             if clean else Lead.objects.none()
         )
-        existing = dup_qs.first()
+        # A duplicate is the same number in the SAME project. The same client
+        # asking about another project is a separate, genuine inquiry — not a
+        # duplicate (the owner's rule).
+        dup_qs = dup_qs.filter(project=project) if project else dup_qs.filter(project__isnull=True)
+        existing = dup_qs.order_by('created_at').first()
 
         # Self-sourced (manually added) leads are assigned to their creator so they
         # land in that person's pipeline. Bucket follows whatever status the creator
@@ -2869,7 +2873,7 @@ class BackfillDuplicatesView(APIView):
         # memory at once (prevents OOM on large tenants). Only id/phone are accumulated.
         leads = (
             scope_to_company(Lead.objects.all(), request.user)
-            .only('id', 'phone', 'created_at')
+            .only('id', 'phone', 'project_id', 'created_at')
             .order_by('created_at')
             .iterator(chunk_size=2000)
         )
@@ -2877,7 +2881,8 @@ class BackfillDuplicatesView(APIView):
         for l in leads:
             clean = ''.join(c for c in (l.phone or '') if c.isdigit())[-10:]
             if clean:
-                phone_map[clean].append(l.id)
+                # Same number in the same project only — another project is its own inquiry.
+                phone_map[(clean, l.project_id)].append(l.id)
         marked = 0
         for clean, ids in phone_map.items():
             if len(ids) > 1:
@@ -4479,8 +4484,8 @@ class BulkImportLeadsView(APIView):
         # Build existing dup set (last-10-digits) scoped to this company — O(n) once.
         company_leads = scope_to_company(Lead.objects.all(), request.user)
         # Read the blind index rather than decrypting every stored phone.
-        existing_keys = set(company_leads.values_list('phone_key', flat=True))
-        existing_keys.discard('')
+        # A duplicate is the same number in the same project — keyed on both.
+        existing_keys = {(k, str(p or '')) for k, p in company_leads.values_list('phone_key', 'project_id') if k}
 
         to_create = []   # Lead objects
         meta      = []   # parallel per-row dict carrying lead_date + SV/closure raw data
@@ -4495,9 +4500,8 @@ class BulkImportLeadsView(APIView):
             clean = ''.join(c for c in phone if c.isdigit())[-10:]
             # existing_keys holds blind-index hashes, so hash before comparing.
             clean_key = phone_blind_index(clean) if clean else ''
-            is_dup = bool(clean_key) and clean_key in existing_keys
-
             rproj = proj_by_name.get(str(row.get('project', '')).strip().lower()) or project_id or None
+            is_dup = bool(clean_key) and (clean_key, str(rproj or '')) in existing_keys
             rsrc  = src_by_name.get(str(row.get('source', '')).strip().lower()) or source_id or None
             tc_id  = None if uploader_is_stm else _uid(row.get('telecaller_code'))
             stm_id = _uid(row.get('stm_code'))
@@ -4612,7 +4616,7 @@ class BulkImportLeadsView(APIView):
             else:
                 imported += 1
                 if clean_key:
-                    existing_keys.add(clean_key)  # catch in-batch duplicates too
+                    existing_keys.add((clean_key, str(rproj or '')))  # catch in-batch duplicates too
             # Only a genuinely untouched lead (no telecaller AND no STM) should be swept
             # into telecaller auto-distribution — mirrors the single-lead-create check
             # above (`not lead.telecaller_id and not lead.stm_id`). A row that names an
@@ -7343,8 +7347,11 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
 
     # Duplicate detection using last 10 digits, scoped to this company
     clean = ''.join(c for c in phone if c.isdigit())[-10:]
+    # A duplicate is the same number in the same project (another project is a new inquiry).
     existing = (
-        Lead.objects.filter(company=company, phone_key=phone_blind_index(clean)).first()
+        Lead.objects.filter(company=company, phone_key=phone_blind_index(clean),
+                            **({'project': project} if project else {'project__isnull': True}))
+        .order_by('created_at').first()
         if clean else None
     )
     if existing:
