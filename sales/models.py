@@ -48,6 +48,7 @@ DISQUALIFY_REASON = [
     ('religion', 'Religion'),
     ('caste', 'Caste'),
     ('budget', 'Budget'),
+    ('not_enquired', 'Not Enquired'),
     ('other', 'Other'),
 ]
 
