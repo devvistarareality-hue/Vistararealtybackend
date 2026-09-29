@@ -1648,6 +1648,12 @@ class LeadListView(APIView):
 
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        # Why a lead was disqualified, for the reason dropdown the clients show
+        # beside a Not Qualified status filter. One reason per lead whichever
+        # stage set it (see Lead.disqualify_reason), so this needs no telecaller
+        # /STM split of its own — it narrows whatever the status filters left.
+        if request.query_params.get('disqualify_reason'):
+            qs = qs.filter(disqualify_reason=request.query_params['disqualify_reason'])
         date_from_param = request.query_params.get('date_from')
         date_to_param = request.query_params.get('date_to')
         # A dashboard tile like "Warm/SQL" counts leads that BECAME that status
