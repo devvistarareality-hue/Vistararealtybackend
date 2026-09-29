@@ -36,6 +36,8 @@ class DisqualifyReasonFilter(TestCase):
                               stm_status='not_qualified', disqualify_reason='budget')
         cls.other_stm = lead('STM Other', '+919800000104',
                              stm_status='not_qualified', disqualify_reason='other')
+        cls.not_enq = lead('Never Enquired', '+919800000106',
+                           telecaller_status='not_qualified', disqualify_reason='not_enquired')
         # Qualified leads carry no reason at all.
         cls.warm = lead('Still Warm', '+919800000105', telecaller_status='warm')
 
@@ -60,10 +62,11 @@ class DisqualifyReasonFilter(TestCase):
 
     def test_without_a_reason_every_not_qualified_lead_is_listed(self):
         got = self._ids('telecaller_status=not_qualified')
-        self.assertEqual(got, {self.budget_tc.id, self.caste_tc.id})
+        self.assertEqual(got, {self.budget_tc.id, self.caste_tc.id, self.not_enq.id})
 
     def test_each_reason_selects_only_its_own(self):
-        for lead, reason in ((self.caste_tc, 'caste'), (self.other_stm, 'other')):
+        for lead, reason in ((self.caste_tc, 'caste'), (self.other_stm, 'other'),
+                             (self.not_enq, 'not_enquired')):
             with self.subTest(reason=reason):
                 got = self._ids(f'disqualify_reason={reason}')
                 self.assertEqual(got, {lead.id})
@@ -76,3 +79,28 @@ class DisqualifyReasonFilter(TestCase):
     def test_an_unused_reason_returns_nothing_rather_than_everything(self):
         """An unmatched filter must narrow to empty, not be quietly ignored."""
         self.assertEqual(self._ids('disqualify_reason=religion'), set())
+
+
+class TheReasonListItself(TestCase):
+    """The four original reasons plus Not Enquired, which is its own thing: the
+    client never asked in the first place, as opposed to asking and not fitting
+    on budget."""
+
+    def test_not_enquired_is_offered(self):
+        from sales.models import DISQUALIFY_REASON
+        self.assertIn(('not_enquired', 'Not Enquired'), DISQUALIFY_REASON)
+
+    def test_other_stays_last_because_it_asks_for_a_note(self):
+        from sales.models import DISQUALIFY_REASON
+        self.assertEqual(DISQUALIFY_REASON[-1][0], 'other')
+
+    def test_a_lead_can_be_saved_with_it(self):
+        from companies.models import Company
+        from sales.models import Lead
+        co = Company.objects.create(code='NEQ', name='Not Enq Co', is_active=True)
+        l = Lead.objects.create(company=co, name='X', phone='+919800000200',
+                                telecaller_status='not_qualified',
+                                disqualify_reason='not_enquired')
+        l.full_clean()          # choices are validated here
+        l.refresh_from_db()
+        self.assertEqual(l.disqualify_reason, 'not_enquired')
