@@ -1414,7 +1414,30 @@ def _record_visit_done(lead, user, visit):
         lead=lead, changed_by=user, field_changed='site_visit', old_value=old,
         new_value=f'Completed · {sv.get_outcome_display()}', remarks='Site visit completed',
     )
+    _credit_visit_to_telecaller(sv, user)
     return sv
+
+
+def _credit_visit_to_telecaller(sv, user):
+    """A site visit recorded on a lead a telecaller worked belongs to that telecaller
+    too: the visit is credited to them (referred_by_telecaller — what their
+    conversions and incentive count) and their status becomes Warm, whatever it was
+    (Cold, Not reachable…) — the lead did turn out warm. Called whenever a visit is
+    scheduled or completed."""
+    lead = sv.lead
+    if not lead.telecaller_id:
+        return
+    if not sv.referred_by_telecaller_id:
+        sv.referred_by_telecaller_id = lead.telecaller_id
+        sv.save(update_fields=['referred_by_telecaller'])
+    if lead.telecaller_status != 'warm':
+        old = lead.telecaller_status
+        lead.telecaller_status = 'warm'
+        lead.save(update_fields=['telecaller_status'])
+        LeadStatusHistory.objects.create(
+            lead=lead, changed_by=user, field_changed='telecaller_status', old_value=old,
+            new_value='warm', remarks='Site visit recorded — warm transfer',
+        )
 
 
 def _sync_lead_to_completed_visit(lead, user):
@@ -2797,6 +2820,10 @@ class LeadCompanySearchView(APIView):
                 'project_name': l.project.name if l.project_id else '',
                 'telecaller_name': l.telecaller.name if l.telecaller_id else '',
                 'stm_name': l.stm.name if l.stm_id else '',
+                # Where each side stands — the Add Lead number check lists every lead
+                # on this number with who holds it and how far they got.
+                'telecaller_status': l.telecaller_status,
+                'stm_status': l.stm_status,
                 'created_at': l.created_at,
                 'is_cp': bool(l.channel_partner_id or (l.source_id and l.source.name.lower() == 'channel partner')),
                 'channel_partner_name': l.channel_partner.name if l.channel_partner_id else '',
@@ -3054,6 +3081,8 @@ class SiteVisitListView(APIView):
         sv = ser.save()
         if sv.status == 'completed':
             _sync_lead_to_completed_visit(sv.lead, request.user)
+        if sv.status in ('scheduled', 'completed'):
+            _credit_visit_to_telecaller(sv, request.user)
         sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
         # A visit can be created already-completed (the sv_done fallback when no
         # scheduled visit exists yet) — label it as such, with the outcome, rather
@@ -3120,6 +3149,7 @@ class SiteVisitDetailView(APIView):
             )
             if sv.status == 'completed':
                 _sync_lead_to_completed_visit(sv.lead, request.user)
+                _credit_visit_to_telecaller(sv, request.user)
                 # Telecaller who referred the lead + the STM both hear that the SV is done.
                 from notifications import notify
                 for who in (sv.referred_by_telecaller, sv.stm):

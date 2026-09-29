@@ -1568,3 +1568,39 @@ class LeadHistoryFollowUpTests(APITestCase):
         self.assertIn('follow_up_missed', kinds)
         done = next(h for h in hist if h['field_changed'] == 'follow_up_done')
         self.assertEqual(done['new_value'], 'Will visit Sunday')
+
+
+class VisitCreditsTelecallerTests(APITestCase):
+    """An STM's site visit on a telecaller's lead warms the telecaller and is theirs too."""
+
+    def test_visit_warms_and_credits_the_telecaller(self):
+        from django.utils import timezone
+        from sales.models import SiteVisit
+        co = Company.objects.create(code='VCT', name='Credit Co')
+        admin = User.objects.create(email='vc_admin@x.com', company=co, role='Admin', user_code='VC1')
+        tc = User.objects.create(email='vc_tc@x.com', company=co, role='Employee', user_code='VC2')
+        proj = Project.objects.create(company=co, name='Credit Tower')
+        lead = Lead.objects.create(company=co, name='C', phone='+919300000001', project=proj,
+                                   telecaller=tc, telecaller_status='cold')
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/site-visits/', {
+            'lead': lead.id, 'project': proj.id, 'status': 'scheduled',
+            'scheduled_at': timezone.now().isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        lead.refresh_from_db()
+        self.assertEqual(lead.telecaller_status, 'warm')
+        self.assertEqual(SiteVisit.objects.get(lead=lead).referred_by_telecaller_id, tc.id)
+
+    def test_number_lookup_lists_each_lead_with_its_statuses(self):
+        co = Company.objects.create(code='NLK', name='Lookup Co')
+        admin = User.objects.create(email='nl_admin@x.com', company=co, role='Admin', user_code='NL1')
+        p1 = Project.objects.create(company=co, name='P1')
+        p2 = Project.objects.create(company=co, name='P2')
+        Lead.objects.create(company=co, name='A', phone='+919300000009', project=p1, telecaller_status='cold')
+        Lead.objects.create(company=co, name='A', phone='9300000009', project=p2, stm_status='hot')
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/leads/search/?search=9300000009').json()
+        self.assertEqual(sorted(r['project_name'] for r in rows), ['P1', 'P2'])
+        self.assertEqual({r['project_name']: (r['telecaller_status'], r['stm_status']) for r in rows},
+                         {'P1': ('cold', ''), 'P2': ('', 'hot')})
