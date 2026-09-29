@@ -1475,11 +1475,18 @@ class LeadListView(APIView):
                 ids = _leads_worked_in_range(qs, 'status', 'new', date_from_param, date_to_param)
             qs = qs.filter(id__in=ids)
             skip_created_at_filter = True
-        project_id = request.query_params.get('project_id')
-        if project_id == 'none':
-            qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
-        elif project_id:
-            qs = qs.filter(project_id=project_id)
+        # Project / telecaller / STM filters take one id or several (comma-separated,
+        # from the multi-select): a lead matches any of them. 'none' in the project
+        # list means leads with no project.
+        def _ids(param):
+            raw = request.query_params.get(param) or ''
+            return [x.strip() for x in raw.split(',') if x.strip()]
+        _proj = _ids('project_id')
+        if _proj:
+            _pq = Q(project_id__in=[p for p in _proj if p.isdigit()])
+            if 'none' in _proj:
+                _pq |= Q(project__isnull=True)     # unmapped leads (no project)
+            qs = qs.filter(_pq)
         if request.query_params.get('source_id'):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('channel_partner_id'):
@@ -1489,10 +1496,10 @@ class LeadListView(APIView):
             # by any channel partner, OR added via the regular Sales flow with
             # Source set to "Channel Partner" (see cp_lead_q).
             qs = qs.filter(cp_lead_q())
-        if request.query_params.get('telecaller_id'):
-            qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
-        if request.query_params.get('stm_id'):
-            qs = qs.filter(stm_id=request.query_params['stm_id'])
+        if _ids('telecaller_id'):
+            qs = qs.filter(telecaller_id__in=[x for x in _ids('telecaller_id') if x.isdigit()])
+        if _ids('stm_id'):
+            qs = qs.filter(stm_id__in=[x for x in _ids('stm_id') if x.isdigit()])
         # Drill-through for the dashboard's "Unassigned" tile. `telecaller_id`/
         # `stm_id` above only accept a concrete id, so there is no way to ask for
         # "nobody owns this" without a dedicated flag.
