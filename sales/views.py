@@ -1389,6 +1389,12 @@ class LeadListView(APIView):
         # Telecallers / STMs only see leads assigned to them.
         qs = scope_leads_to_role(qs, request.user, request=request)
 
+        # ?facets=1 — what the filter pickers may offer: only the projects, people,
+        # sources and statuses that actually occur in the leads this person can see,
+        # so a picker never lists a value that would return nothing.
+        if request.query_params.get('facets') == '1':
+            return Response(self._facets(request, qs))
+
         # Filters
         search = request.query_params.get('search', '').strip()
         if search:
@@ -1554,6 +1560,36 @@ class LeadListView(APIView):
             'count': total,
             'results': LeadListSerializer(leads, many=True).data,
         })
+
+    @staticmethod
+    def _facets(request, qs):
+        # Same pool the list pages from: the CP section's own leads, and one
+        # company for a platform admin picking it (mirrors the filters in get()).
+        if request.query_params.get('channel_partner_id'):
+            qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+            qs = qs.filter(cp_lead_q())
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        qs = qs.order_by()
+
+        def distinct(field):
+            return sorted({str(v) for v in qs.values_list(field, flat=True).distinct() if v not in (None, '')})
+
+        # The STM status filter also matches a visit's Hot/Warm/Cold outcome
+        # (a 'sv_done' lead whose last visit was Hot counts as Hot), so those count.
+        stm_statuses = set(distinct('stm_status'))
+        stm_statuses |= {v for v in qs.filter(stm_status='sv_done').values_list('sv_outcome', flat=True).distinct() if v}
+        return {
+            'project_ids': distinct('project_id'),
+            'has_no_project': qs.filter(project__isnull=True).exists(),
+            'telecaller_ids': distinct('telecaller_id'),
+            'stm_ids': distinct('stm_id'),
+            'source_ids': distinct('source_id'),
+            'statuses': distinct('status'),
+            'telecaller_statuses': distinct('telecaller_status'),
+            'stm_statuses': sorted(stm_statuses),
+        }
 
     def post(self, request):
         # Any authenticated Sales user (incl. telecallers) may add a lead.

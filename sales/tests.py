@@ -62,6 +62,23 @@ class TenantIsolationTests(APITestCase):
         names = [l['name'] for l in res.json()['results']]
         self.assertEqual(names, ['Lead A'])
 
+    def test_lead_facets_only_list_what_is_there(self):
+        # Filter pickers offer only values that occur in the viewer's own leads —
+        # never another company's project, and never an empty choice.
+        Project.objects.create(company=self.A, name='Unused Tower')
+        auth(self.client, self.mgr_a)
+        res = self.client.get('/api/sales/leads/?facets=1')
+        self.assertEqual(res.status_code, 200)
+        f = res.json()
+        self.assertEqual(f['project_ids'], [])
+        self.assertTrue(f['has_no_project'])
+        self.assertEqual(f['telecaller_ids'], [str(self.tc_a.id)])
+        self.assertEqual(f['stm_ids'], [])
+        Lead.objects.filter(id=self.lead_a.id).update(project=self.proj_a)
+        f = self.client.get('/api/sales/leads/?facets=1').json()
+        self.assertEqual(f['project_ids'], [str(self.proj_a.id)])
+        self.assertFalse(f['has_no_project'])
+
     def test_cannot_read_other_company_lead(self):
         auth(self.client, self.mgr_a)
         self.assertEqual(self.client.get(f'/api/sales/leads/{self.lead_b.id}/').status_code, 404)
