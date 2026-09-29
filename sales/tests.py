@@ -62,6 +62,23 @@ class TenantIsolationTests(APITestCase):
         names = [l['name'] for l in res.json()['results']]
         self.assertEqual(names, ['Lead A'])
 
+    def test_lead_facets_only_list_what_is_there(self):
+        # Filter pickers offer only values that occur in the viewer's own leads —
+        # never another company's project, and never an empty choice.
+        Project.objects.create(company=self.A, name='Unused Tower')
+        auth(self.client, self.mgr_a)
+        res = self.client.get('/api/sales/leads/?facets=1')
+        self.assertEqual(res.status_code, 200)
+        f = res.json()
+        self.assertEqual(f['project_ids'], [])
+        self.assertTrue(f['has_no_project'])
+        self.assertEqual(f['telecaller_ids'], [str(self.tc_a.id)])
+        self.assertEqual(f['stm_ids'], [])
+        Lead.objects.filter(id=self.lead_a.id).update(project=self.proj_a)
+        f = self.client.get('/api/sales/leads/?facets=1').json()
+        self.assertEqual(f['project_ids'], [str(self.proj_a.id)])
+        self.assertFalse(f['has_no_project'])
+
     def test_cannot_read_other_company_lead(self):
         auth(self.client, self.mgr_a)
         self.assertEqual(self.client.get(f'/api/sales/leads/{self.lead_b.id}/').status_code, 404)
@@ -1428,3 +1445,182 @@ class AvailabilityHistoryExportTests(APITestCase):
         hdr = next(r for r in ws.iter_rows() if r[0].value == 'Date')
         body = [r for r in ws.iter_rows(min_row=hdr[0].row + 1) if r[0].value != 'TOTAL']
         self.assertEqual(len(body), 2)   # yesterday's record is outside the range
+
+
+class SvDoneNeedsVisitTests(APITestCase):
+    """A lead is SV Done only with its visit on record, and a completed visit
+    never leaves the lead's STM status blank."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from sales.models import SiteVisit  # noqa: F401  (model used below)
+        cls.co = Company.objects.create(code='SVD', name='SvDone Co')
+        cls.mgr = User.objects.create(email='svd_mgr@x.com', company=cls.co, role='Admin', user_code='SV1')
+        cls.stm = User.objects.create(email='svd_stm@x.com', company=cls.co, role='Employee', user_code='SV2')
+        cls.stm2 = User.objects.create(email='svd_stm2@x.com', company=cls.co, role='Employee', user_code='SV3')
+        cls.proj = Project.objects.create(company=cls.co, name='Visit Tower')
+
+    def setUp(self):
+        self.lead = Lead.objects.create(company=self.co, name='L', phone='+919100000001', project=self.proj, stm=self.stm)
+        auth(self.client, self.mgr)
+
+    def visits(self):
+        from sales.models import SiteVisit
+        return SiteVisit.objects.filter(lead=self.lead)
+
+    def test_sv_done_without_visit_is_refused(self):
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'sv_done', 'stm_remarks': 'x'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.lead.refresh_from_db()
+        self.assertEqual(self.lead.stm_status, '')
+
+    def test_sv_done_with_visit_records_it(self):
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'Liked it',
+            'sv_outcome': 'hot', 'sv_visited_at': '2026-09-20',
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        v = self.visits().get()
+        self.assertEqual((v.status, v.outcome, v.remarks), ('completed', 'hot', 'Liked it'))
+        from django.utils import timezone
+        self.assertEqual(timezone.localtime(v.visited_at).date().isoformat(), '2026-09-20')
+
+    def test_scheduled_visit_is_completed_not_duplicated(self):
+        from sales.models import SiteVisit
+        from django.utils import timezone
+        SiteVisit.objects.create(lead=self.lead, project=self.proj, scheduled_at=timezone.now(), status='scheduled', stm=self.stm)
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'ok', 'sv_outcome': 'warm', 'sv_visited_at': '2026-09-21',
+        }, format='json')
+        self.assertEqual(list(self.visits().values_list('status', flat=True)), ['completed'])
+
+    def test_completing_a_visit_moves_the_lead_on(self):
+        from sales.models import SiteVisit
+        from django.utils import timezone
+        sv = SiteVisit.objects.create(lead=self.lead, project=self.proj, scheduled_at=timezone.now(), status='scheduled', stm=self.stm)
+        res = self.client.patch(f'/api/sales/site-visits/{sv.id}/', {
+            'status': 'completed', 'outcome': 'cold', 'remarks': 'Came', 'visited_at': timezone.now().isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.stm_status, self.lead.status), ('sv_done', 'sv_done'))
+        # …and with a visit on record, a later plain save at SV Done is fine.
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'hot'}, format='json')
+        res = self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm_status': 'sv_done'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_reassigning_a_visited_lead_keeps_its_status(self):
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {
+            'stm_status': 'sv_done', 'stm_remarks': 'ok', 'sv_outcome': 'hot', 'sv_visited_at': '2026-09-20',
+        }, format='json')
+        self.client.patch(f'/api/sales/leads/{self.lead.id}/', {'stm': self.stm2.id}, format='json')
+        self.lead.refresh_from_db()
+        self.assertEqual((self.lead.stm_id, self.lead.stm_status), (self.stm2.id, 'sv_done'))
+
+    def test_new_lead_at_sv_done_needs_the_visit(self):
+        body = {'name': 'N', 'phone': '+919100000002', 'project': self.proj.id, 'stm': self.stm.id,
+                'stm_status': 'sv_done', 'stm_remarks': 'walk-in'}
+        self.assertEqual(self.client.post('/api/sales/leads/', body, format='json').status_code, 400)
+        body.update(sv_outcome='warm', sv_visited_at='2026-09-22')
+        res = self.client.post('/api/sales/leads/', body, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        lead = Lead.objects.get(id=res.json()['id'])
+        self.assertEqual(lead.site_visits.filter(status='completed').count(), 1)
+
+
+class ManualHoldTests(APITestCase):
+    """The plot card's Hold button: a deliberate Hold, counted apart from In Progress."""
+
+    def test_hold_button_marks_counts_and_clears(self):
+        co = Company.objects.create(code='MHD', name='Hold Co')
+        admin = User.objects.create(email='mh_admin@x.com', company=co, role='Admin', user_code='MH1')
+        proj = Project.objects.create(company=co, name='Hold Tower')
+        plot = Plot.objects.create(project=proj, number='H-1')
+        auth(self.client, admin)
+        res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'status': 'hold', 'manual_hold': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual((res.json()['status'], res.json()['manual_hold']), ('hold', True))
+        counts = self.client.get(f'/api/sales/projects/{proj.id}/').json()['plot_counts']
+        self.assertEqual((counts['pending'], counts['hold']), (1, 0))
+        res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'status': 'available'}, format='json')
+        self.assertEqual((res.json()['status'], res.json()['manual_hold']), ('available', False))
+
+
+class LeadHistoryFollowUpTests(APITestCase):
+    """Follow-ups appear on the lead's History timeline."""
+
+    def test_follow_ups_are_in_the_history(self):
+        from django.utils import timezone
+        from sales.models import FollowUp
+        co = Company.objects.create(code='LHF', name='Hist Co')
+        admin = User.objects.create(email='lh_admin@x.com', company=co, role='Admin', user_code='LH1')
+        lead = Lead.objects.create(company=co, name='H', phone='+919200000001')
+        FollowUp.objects.create(lead=lead, assigned_to=admin, role_context='stm', created_by=admin,
+                                scheduled_at=timezone.now(), status='completed',
+                                completed_at=timezone.now(), outcome='Will visit Sunday')
+        FollowUp.objects.create(lead=lead, assigned_to=admin, role_context='telecaller',
+                                scheduled_at=timezone.now(), status='missed')
+        auth(self.client, admin)
+        hist = self.client.get(f'/api/sales/leads/{lead.id}/').json()['history']
+        kinds = [h['field_changed'] for h in hist]
+        self.assertEqual(kinds.count('follow_up'), 2)
+        self.assertIn('follow_up_done', kinds)
+        self.assertIn('follow_up_missed', kinds)
+        done = next(h for h in hist if h['field_changed'] == 'follow_up_done')
+        self.assertEqual(done['new_value'], 'Will visit Sunday')
+
+
+class VisitCreditsTelecallerTests(APITestCase):
+    """An STM's site visit on a telecaller's lead warms the telecaller and is theirs too."""
+
+    def test_visit_warms_and_credits_the_telecaller(self):
+        from django.utils import timezone
+        from sales.models import SiteVisit
+        co = Company.objects.create(code='VCT', name='Credit Co')
+        admin = User.objects.create(email='vc_admin@x.com', company=co, role='Admin', user_code='VC1')
+        tc = User.objects.create(email='vc_tc@x.com', company=co, role='Employee', user_code='VC2')
+        proj = Project.objects.create(company=co, name='Credit Tower')
+        lead = Lead.objects.create(company=co, name='C', phone='+919300000001', project=proj,
+                                   telecaller=tc, telecaller_status='cold')
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/site-visits/', {
+            'lead': lead.id, 'project': proj.id, 'status': 'scheduled',
+            'scheduled_at': timezone.now().isoformat(),
+        }, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        lead.refresh_from_db()
+        self.assertEqual(lead.telecaller_status, 'warm')
+        self.assertEqual(SiteVisit.objects.get(lead=lead).referred_by_telecaller_id, tc.id)
+
+    def test_number_lookup_lists_each_lead_with_its_statuses(self):
+        co = Company.objects.create(code='NLK', name='Lookup Co')
+        admin = User.objects.create(email='nl_admin@x.com', company=co, role='Admin', user_code='NL1')
+        p1 = Project.objects.create(company=co, name='P1')
+        p2 = Project.objects.create(company=co, name='P2')
+        Lead.objects.create(company=co, name='A', phone='+919300000009', project=p1, telecaller_status='cold')
+        Lead.objects.create(company=co, name='A', phone='9300000009', project=p2, stm_status='hot')
+        auth(self.client, admin)
+        rows = self.client.get('/api/sales/leads/search/?search=9300000009').json()
+        self.assertEqual(sorted(r['project_name'] for r in rows), ['P1', 'P2'])
+        self.assertEqual({r['project_name']: (r['telecaller_status'], r['stm_status']) for r in rows},
+                         {'P1': ('cold', ''), 'P2': ('', 'hot')})
+
+
+class NightlyBackupCronTests(APITestCase):
+    """The 5-minute cron takes due scheduled backups, in the nightly hour only."""
+
+    def test_backups_run_only_in_the_backup_hour(self):
+        from datetime import datetime
+        from unittest import mock
+        from django.core.management import call_command
+        from django.utils import timezone
+        from sales.management.commands import run_scheduled_notifications as cmd
+        with mock.patch('sales.backup_schedule.run_due', return_value=[('Co', 10)]) as run_due:
+            at_noon = timezone.make_aware(datetime(2026, 9, 30, 12, 0))
+            with mock.patch('django.utils.timezone.now', return_value=at_noon):
+                call_command('run_scheduled_notifications')
+            self.assertFalse(run_due.called)
+            at_two = timezone.make_aware(datetime(2026, 9, 30, cmd.BACKUP_HOUR, 5))
+            with mock.patch('django.utils.timezone.now', return_value=at_two):
+                call_command('run_scheduled_notifications')
+            self.assertTrue(run_due.called)

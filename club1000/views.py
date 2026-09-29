@@ -315,6 +315,13 @@ class Club1000UsersView(APIView):
         return Response(data)
 
 
+def _distinct(qs, field):
+    """Every value `field` takes in `qs`, as strings, blanks left out — what a
+    filter picker may offer (?facets=1), so it never lists a choice that
+    returns nothing."""
+    return sorted({str(v) for v in qs.order_by().values_list(field, flat=True).distinct() if v not in (None, '')})
+
+
 class InvestorListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -331,6 +338,15 @@ class InvestorListCreateView(APIView):
                 qs = qs.filter(Q(added_by=request.user) | Q(scheme_id__in=approver_scheme_ids))
             else:
                 qs = qs.filter(added_by=request.user)
+        if request.query_params.get('facets') == '1':
+            # The pool the page lists from, before its own filters.
+            pool = qs
+            approval = request.query_params.get('approval_status')
+            if approval and approval != 'all':
+                pool = pool.filter(approval_status=approval)
+            elif not approval:
+                pool = pool.exclude(approval_status='rejected')
+            return Response({'scheme_ids': _distinct(pool, 'scheme_id'), 'statuses': _distinct(pool, 'status')})
         if request.query_params.get('scheme_id'):
             qs = qs.filter(scheme_id=request.query_params['scheme_id'])
         if request.query_params.get('status'):
@@ -710,6 +726,11 @@ class LeadListCreateView(APIView):
             _company_filtered(Lead.objects.select_related('assigned_to', 'scheme_interest', 'created_by'), request),
             request.user,
         )
+        if request.query_params.get('facets') == '1':
+            return Response({
+                'statuses': _distinct(qs, 'status'), 'sources': _distinct(qs, 'source'),
+                'scheme_ids': _distinct(qs, 'scheme_interest_id'), 'assignee_ids': _distinct(qs, 'assigned_to_id'),
+            })
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         if request.query_params.get('assigned_to'):

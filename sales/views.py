@@ -38,7 +38,7 @@ from .models import (
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
-    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner,
+    UserProjectAssignment, Booking, LeadTransfer, ChannelPartner, SV_OUTCOME,
 )
 from .serializers import (
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
@@ -1337,6 +1337,131 @@ def _leads_by_sv_outcome(leads_scope, value, date_from, date_to):
     return set(qs.values_list('id', flat=True))
 
 
+# ── A lead is "SV Done" only with the visit on record ────────────────────────
+# The web/app used to save stm_status='sv_done' first and log the visit in a
+# second, best-effort request; when that one failed (or a screen never sent it)
+# the lead sat at SV Done with no visit, invisible to every visit list and count.
+# Now the save that marks SV Done carries the visit (sv_outcome + sv_visited_at,
+# optional sv_remarks) and the server records it in the same transaction — or it
+# is refused unless the lead already has a completed visit.
+SV_DONE_FIELDS = ('sv_outcome', 'sv_visited_at', 'sv_remarks')
+# STM statuses that only describe the run-up to a visit: a completed visit moves
+# them on to sv_done. Later ones (closed, not_interested…) are left alone.
+PRE_VISIT_STM = ('', 'sv_scheduled', 'hot', 'warm', 'cold')
+
+
+def _parse_visited_at(raw):
+    """An ISO datetime, or a plain YYYY-MM-DD dated at the current time of day."""
+    from django.utils.dateparse import parse_datetime, parse_date
+    raw = str(raw or '').strip()
+    if not raw:
+        return None
+    dt = parse_datetime(raw)
+    if dt is None:
+        d = parse_date(raw)
+        if d is None:
+            return None
+        now = timezone.localtime()
+        dt = now.replace(year=d.year, month=d.month, day=d.day)
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt)
+    return dt
+
+
+def _sv_done_visit(lead, data, remarks_fallback=''):
+    """For a save that turns the lead SV Done: (visit_details | None, error | None).
+    visit_details is None when the lead already has a completed visit and the save
+    brings no new one."""
+    outcome = str(data.get('sv_outcome') or '').strip()
+    visited_raw = data.get('sv_visited_at')
+    if outcome or visited_raw:
+        if outcome not in dict(SV_OUTCOME):
+            return None, 'Pick the visit outcome (Hot, Warm, Cold or Not Interested).'
+        visited_at = _parse_visited_at(visited_raw)
+        if not visited_at:
+            return None, 'Pick the date of the visit.'
+        if visited_at > timezone.now() + timedelta(minutes=5):
+            return None, 'The visit date cannot be in the future.'
+        remarks = str(data.get('sv_remarks') or remarks_fallback or '').strip()
+        if not remarks:
+            return None, 'Add remarks about the visit.'
+        return {'outcome': outcome, 'visited_at': visited_at, 'remarks': remarks}, None
+    if lead is not None and lead.pk and lead.site_visits.filter(status='completed').exists():
+        return None, None
+    return None, ('Record the site visit to mark SV Done — pick its outcome and date. '
+                  'A lead cannot be SV Done without a visit on record.')
+
+
+def _record_visit_done(lead, user, visit):
+    """Complete the lead's latest scheduled visit, or log a completed one."""
+    sv = lead.site_visits.filter(status='scheduled').order_by('-scheduled_at', '-id').first()
+    if sv:
+        sv.status = 'completed'
+        sv.visited_at = visit['visited_at']
+        sv.outcome = visit['outcome']
+        sv.remarks = visit['remarks']
+        sv.save(update_fields=['status', 'visited_at', 'outcome', 'remarks'])
+        old = 'scheduled'
+    else:
+        sv = SiteVisit.objects.create(
+            lead=lead, project_id=lead.project_id,
+            scheduled_at=visit['visited_at'], visited_at=visit['visited_at'], status='completed',
+            stm=lead.stm or user, referred_by_telecaller_id=lead.telecaller_id,
+            outcome=visit['outcome'], remarks=visit['remarks'],
+        )
+        old = ''
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=user, field_changed='site_visit', old_value=old,
+        new_value=f'Completed · {sv.get_outcome_display()}', remarks='Site visit completed',
+    )
+    _credit_visit_to_telecaller(sv, user)
+    return sv
+
+
+def _credit_visit_to_telecaller(sv, user):
+    """A site visit recorded on a lead a telecaller worked belongs to that telecaller
+    too: the visit is credited to them (referred_by_telecaller — what their
+    conversions and incentive count) and their status becomes Warm, whatever it was
+    (Cold, Not reachable…) — the lead did turn out warm. Called whenever a visit is
+    scheduled or completed."""
+    lead = sv.lead
+    if not lead.telecaller_id:
+        return
+    if not sv.referred_by_telecaller_id:
+        sv.referred_by_telecaller_id = lead.telecaller_id
+        sv.save(update_fields=['referred_by_telecaller'])
+    if lead.telecaller_status != 'warm':
+        old = lead.telecaller_status
+        lead.telecaller_status = 'warm'
+        lead.save(update_fields=['telecaller_status'])
+        LeadStatusHistory.objects.create(
+            lead=lead, changed_by=user, field_changed='telecaller_status', old_value=old,
+            new_value='warm', remarks='Site visit recorded — warm transfer',
+        )
+
+
+def _sync_lead_to_completed_visit(lead, user):
+    """A completed visit takes a lead still in its run-up to SV Done, so the two
+    never disagree (a lead with a visit on record but a blank STM status)."""
+    if lead.stm_status not in PRE_VISIT_STM:
+        return
+    old_stm, old_status = lead.stm_status, lead.status
+    lead.stm_status = 'sv_done'
+    fields = ['stm_status']
+    if lead.status not in ('closed', 'lost', 'sv_done'):
+        lead.status = 'sv_done'
+        fields.append('status')
+    lead.save(update_fields=fields)
+    LeadStatusHistory.objects.create(
+        lead=lead, changed_by=user, field_changed='stm_status', old_value=old_stm,
+        new_value='sv_done', remarks='Site visit completed',
+    )
+    if 'status' in fields:
+        LeadStatusHistory.objects.create(
+            lead=lead, changed_by=user, field_changed='status', old_value=old_status, new_value=lead.status,
+        )
+
+
 def _merge_into_existing_lead(existing, validated, user, can_assign):
     """Same phone + same project as an already-live lead: update that lead in
     place instead of inserting a duplicate row, regardless of who's adding it
@@ -1467,6 +1592,12 @@ class LeadListView(APIView):
         # Telecallers / STMs only see leads assigned to them.
         qs = scope_leads_to_role(qs, request.user, request=request)
 
+        # ?facets=1 — what the filter pickers may offer: only the projects, people,
+        # sources and statuses that actually occur in the leads this person can see,
+        # so a picker never lists a value that would return nothing.
+        if request.query_params.get('facets') == '1':
+            return Response(self._facets(request, qs))
+
         # Filters
         search = request.query_params.get('search', '').strip()
         if search:
@@ -1553,11 +1684,18 @@ class LeadListView(APIView):
                 ids = _leads_worked_in_range(qs, 'status', 'new', date_from_param, date_to_param)
             qs = qs.filter(id__in=ids)
             skip_created_at_filter = True
-        project_id = request.query_params.get('project_id')
-        if project_id == 'none':
-            qs = qs.filter(project__isnull=True)   # unmapped leads (no project)
-        elif project_id:
-            qs = qs.filter(project_id=project_id)
+        # Project / telecaller / STM filters take one id or several (comma-separated,
+        # from the multi-select): a lead matches any of them. 'none' in the project
+        # list means leads with no project.
+        def _ids(param):
+            raw = request.query_params.get(param) or ''
+            return [x.strip() for x in raw.split(',') if x.strip()]
+        _proj = _ids('project_id')
+        if _proj:
+            _pq = Q(project_id__in=[p for p in _proj if p.isdigit()])
+            if 'none' in _proj:
+                _pq |= Q(project__isnull=True)     # unmapped leads (no project)
+            qs = qs.filter(_pq)
         if request.query_params.get('source_id'):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('channel_partner_id'):
@@ -1567,10 +1705,10 @@ class LeadListView(APIView):
             # by any channel partner, OR added via the regular Sales flow with
             # Source set to "Channel Partner" (see cp_lead_q).
             qs = qs.filter(cp_lead_q())
-        if request.query_params.get('telecaller_id'):
-            qs = qs.filter(telecaller_id=request.query_params['telecaller_id'])
-        if request.query_params.get('stm_id'):
-            qs = qs.filter(stm_id=request.query_params['stm_id'])
+        if _ids('telecaller_id'):
+            qs = qs.filter(telecaller_id__in=[x for x in _ids('telecaller_id') if x.isdigit()])
+        if _ids('stm_id'):
+            qs = qs.filter(stm_id__in=[x for x in _ids('stm_id') if x.isdigit()])
         # Drill-through for the dashboard's "Unassigned" tile. `telecaller_id`/
         # `stm_id` above only accept a concrete id, so there is no way to ask for
         # "nobody owns this" without a dedicated flag.
@@ -1626,6 +1764,36 @@ class LeadListView(APIView):
             'results': LeadListSerializer(leads, many=True).data,
         })
 
+    @staticmethod
+    def _facets(request, qs):
+        # Same pool the list pages from: the CP section's own leads, and one
+        # company for a platform admin picking it (mirrors the filters in get()).
+        if request.query_params.get('channel_partner_id'):
+            qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+            qs = qs.filter(cp_lead_q())
+        if request.query_params.get('company_id') and is_platform_admin(request.user):
+            qs = qs.filter(company_id=request.query_params['company_id'])
+        qs = qs.order_by()
+
+        def distinct(field):
+            return sorted({str(v) for v in qs.values_list(field, flat=True).distinct() if v not in (None, '')})
+
+        # The STM status filter also matches a visit's Hot/Warm/Cold outcome
+        # (a 'sv_done' lead whose last visit was Hot counts as Hot), so those count.
+        stm_statuses = set(distinct('stm_status'))
+        stm_statuses |= {v for v in qs.filter(stm_status='sv_done').values_list('sv_outcome', flat=True).distinct() if v}
+        return {
+            'project_ids': distinct('project_id'),
+            'has_no_project': qs.filter(project__isnull=True).exists(),
+            'telecaller_ids': distinct('telecaller_id'),
+            'stm_ids': distinct('stm_id'),
+            'source_ids': distinct('source_id'),
+            'statuses': distinct('status'),
+            'telecaller_statuses': distinct('telecaller_status'),
+            'stm_statuses': sorted(stm_statuses),
+        }
+
     def post(self, request):
         # Any authenticated Sales user (incl. telecallers) may add a lead.
         # Consistent with PATCH (lead update), which has no admin/manager gate.
@@ -1639,6 +1807,13 @@ class LeadListView(APIView):
         ser = LeadCreateSerializer(data=data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Added straight at SV Done → the visit comes with it (see _sv_done_visit).
+        sv_visit = None
+        if data.get('stm_status') == 'sv_done':
+            sv_visit, sv_err = _sv_done_visit(None, data, data.get('stm_remarks'))
+            if sv_err:
+                return Response({'detail': sv_err}, status=status.HTTP_400_BAD_REQUEST)
 
         company = request.user.company
 
@@ -1664,7 +1839,10 @@ class LeadListView(APIView):
                 .order_by('-created_at').first()
             )
             if same_lead:
-                merged = _merge_into_existing_lead(same_lead, ser.validated_data, request.user, can_assign)
+                with transaction.atomic():
+                    merged = _merge_into_existing_lead(same_lead, ser.validated_data, request.user, can_assign)
+                    if sv_visit:
+                        _record_visit_done(merged, request.user, sv_visit)
                 return Response(LeadDetailSerializer(merged).data, status=status.HTTP_200_OK)
 
         # Duplicate check — match last 10 digits regardless of +91 prefix. Scoped to
@@ -1812,9 +1990,45 @@ class LeadListView(APIView):
         # (admin didn't pick one and it isn't self-sourced / warm-transferred).
         elif not lead.telecaller_id and not lead.stm_id:
             _run_distribution(company, 'telecaller')
+        if sv_visit:
+            _record_visit_done(lead, request.user, sv_visit)
         lead.refresh_from_db()
 
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
+
+
+def _follow_up_events(lead):
+    """Timeline entries for a lead's follow-ups, shaped like LeadStatusHistory rows
+    (field_changed follow_up / follow_up_done / follow_up_missed)."""
+    def when(dt):
+        return timezone.localtime(dt).strftime('%d %b %Y, %I:%M %p') if dt else ''
+    def iso(dt):
+        return timezone.localtime(dt).isoformat() if dt else None
+    out = []
+    for fu in lead.follow_ups.select_related('assigned_to', 'created_by').all():
+        who = fu.assigned_to.name if fu.assigned_to_id else ''
+        role = 'STM' if fu.role_context == 'stm' else 'TC' if fu.role_context == 'telecaller' else ''
+        out.append({
+            'id': f'fu-{fu.id}', 'field_changed': 'follow_up', 'old_value': '',
+            'new_value': f"For {when(fu.scheduled_at)}" + (f" · {who}" if who else '') + (f" ({role})" if role else ''),
+            'remarks': fu.remarks or '',
+            'changed_by_name': fu.created_by.name if fu.created_by_id else (who or None),
+            'created_at': iso(fu.created_at),
+        })
+        if fu.status == 'completed':
+            out.append({
+                'id': f'fu-{fu.id}-done', 'field_changed': 'follow_up_done', 'old_value': '',
+                'new_value': fu.outcome or 'Done', 'remarks': fu.outcome or '',
+                'changed_by_name': who or None,
+                'created_at': iso(fu.completed_at or fu.updated_at),
+            })
+        elif fu.status == 'missed':
+            out.append({
+                'id': f'fu-{fu.id}-missed', 'field_changed': 'follow_up_missed', 'old_value': '',
+                'new_value': f"Due {when(fu.scheduled_at)}", 'remarks': '',
+                'changed_by_name': None, 'created_at': iso(fu.scheduled_at),
+            })
+    return out
 
 
 class LeadDetailView(APIView):
@@ -1842,7 +2056,15 @@ class LeadDetailView(APIView):
         # (e.g. status change → warm transfer → STM assigned).
         recent = list(lead.history.order_by('-created_at', '-id')[:30])
         recent.reverse()
-        data['history'] = LeadStatusHistorySerializer(recent, many=True).data
+        events = list(LeadStatusHistorySerializer(recent, many=True).data)
+        # Follow-ups write no history rows of their own, so the timeline never showed
+        # them. Read them off the follow-ups themselves (past ones included): when one
+        # was scheduled, and when it was done or missed.
+        events += _follow_up_events(lead)
+        from django.utils.dateparse import parse_datetime
+        _epoch = timezone.make_aware(datetime(2000, 1, 1))
+        events.sort(key=lambda e: parse_datetime(str(e['created_at'])) if e['created_at'] else _epoch)
+        data['history'] = events[-40:]
         data['follow_ups'] = FollowUpSerializer(lead.follow_ups.all(), many=True).data
         data['site_visits'] = SiteVisitSerializer(lead.site_visits.all(), many=True).data
         return Response(data)
@@ -1888,7 +2110,15 @@ class LeadDetailView(APIView):
         ser = LeadUpdateSerializer(lead, data=data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Turning SV Done needs the visit on record (see _sv_done_visit).
+        sv_visit = None
+        if data.get('stm_status') == 'sv_done' and old_stm_status != 'sv_done':
+            sv_visit, sv_err = _sv_done_visit(lead, data, data.get('stm_remarks') or lead.stm_remarks)
+            if sv_err:
+                return Response({'detail': sv_err}, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
+        if sv_visit:
+            _record_visit_done(lead, request.user, sv_visit)
 
         # Handing a lead to a different STM starts their work fresh — the new owner
         # hasn't called them yet, so their own stm_status/remarks can't legitimately
@@ -1902,7 +2132,11 @@ class LeadDetailView(APIView):
         # in the assignee's "To Call" bucket); this brings reassignment via PATCH
         # in line with that. Only fires on an actual change of owner, not every
         # save, and not when stm is being cleared back to nobody.
-        if old_stm_id != lead.stm_id and lead.stm_id:
+        # A lead that has already visited (or booked) keeps where it stands: wiping it
+        # left leads with a completed visit — even closed ones — at a blank STM status.
+        visited = (lead.site_visits.filter(status='completed').exists()
+                   or Closure.objects.filter(lead=lead).exists())
+        if old_stm_id != lead.stm_id and lead.stm_id and not visited:
             lead.stm_status = ''
             lead.stm_remarks = ''
             lead.status = 'assigned'
@@ -2391,6 +2625,10 @@ class PlotDetailView(APIView):
 
         before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
         saved = ser.save()
+        # A manual Hold ends the moment the unit is anything but held.
+        if saved.manual_hold and saved.status != Plot.HOLD:
+            saved.manual_hold = False
+            saved.save(update_fields=['manual_hold'])
         # The price is computed from the areas, so a change to them has to reach the
         # price book or the booking form goes on quoting the old one.
         _resync_generated_price_book(saved, before)
@@ -2582,6 +2820,10 @@ class LeadCompanySearchView(APIView):
                 'project_name': l.project.name if l.project_id else '',
                 'telecaller_name': l.telecaller.name if l.telecaller_id else '',
                 'stm_name': l.stm.name if l.stm_id else '',
+                # Where each side stands — the Add Lead number check lists every lead
+                # on this number with who holds it and how far they got.
+                'telecaller_status': l.telecaller_status,
+                'stm_status': l.stm_status,
                 'created_at': l.created_at,
                 'is_cp': bool(l.channel_partner_id or (l.source_id and l.source.name.lower() == 'channel partner')),
                 'channel_partner_name': l.channel_partner.name if l.channel_partner_id else '',
@@ -2837,6 +3079,10 @@ class SiteVisitListView(APIView):
         if not _lead_in_scope(request, request.data.get('lead')):
             return Response({'detail': 'Invalid lead for your company.'}, status=status.HTTP_400_BAD_REQUEST)
         sv = ser.save()
+        if sv.status == 'completed':
+            _sync_lead_to_completed_visit(sv.lead, request.user)
+        if sv.status in ('scheduled', 'completed'):
+            _credit_visit_to_telecaller(sv, request.user)
         sched = sv.scheduled_at.strftime('%d %b %I:%M %p') if sv.scheduled_at else ''
         # A visit can be created already-completed (the sv_done fallback when no
         # scheduled visit exists yet) — label it as such, with the outcome, rather
@@ -2902,6 +3148,8 @@ class SiteVisitDetailView(APIView):
                 remarks='Site visit updated',
             )
             if sv.status == 'completed':
+                _sync_lead_to_completed_visit(sv.lead, request.user)
+                _credit_visit_to_telecaller(sv, request.user)
                 # Telecaller who referred the lead + the STM both hear that the SV is done.
                 from notifications import notify
                 for who in (sv.referred_by_telecaller, sv.stm):
@@ -4266,6 +4514,16 @@ class BulkImportLeadsView(APIView):
             sv_stat  = sv_stat if sv_stat in SV_ST else ''
             has_sv   = bool(sv_sched or sv_vis or sv_stat or str(row.get('sv_remarks', '')).strip())
             cl_date  = _imp_date(row.get('closure_date'))
+            # Keep the STM status and the visit agreeing, as the app now enforces:
+            # SV Done always has a completed visit on record, and a completed visit
+            # (or a closure) never leaves the STM status blank.
+            if stm_status == 'sv_done' and sv_stat != 'completed':
+                has_sv, sv_stat = True, 'completed'
+                sv_vis = sv_vis or sv_sched or lead_dt or timezone.now()
+            if not stm_status and cl_date:
+                stm_status = 'closed'
+            elif not stm_status and sv_stat == 'completed':
+                stm_status = 'sv_done'
 
             # Overall lead status: explicit wins; otherwise derive from the furthest stage reached.
             overall = str(row.get('overall_status', '')).strip().lower()
@@ -4977,16 +5235,14 @@ class BookingListCreateView(APIView):
             # looking at Sales My Bookings still sees their own and their team's work
             # there.
             if request.query_params.get('cp_only') == 'true':
-                # Plus everything this person and their reporting tree sold, whatever
-                # the source: My Bookings answers "what have I and my people sold",
-                # and a CP Cluster Head's team does not stop being their team the
-                # moment a deal comes in as a walk-in. Without the tree half, a
-                # reportee's non-partner booking appeared on no screen this manager
-                # could reach. One filter, so a booking that qualifies both ways is
-                # listed once.
+                # Plus this person's OWN bookings from any source — but not their
+                # reportees' non-partner ones: the CP module is the partner book, and
+                # a team member's walk-in belongs on Sales My Bookings, not here
+                # (the owner's rule, 2026-09-29, over the team-wide version of 09-25).
+                # One filter, so a booking that qualifies both ways is listed once.
                 _desk = _cp_desk_ids(request.user)
                 cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
-                mine_q = cp_part | Q(stm_id__in=own_and_team)
+                mine_q = cp_part | Q(stm_id=request.user.id)
             qs = qs.filter(mine_q)
         else:
             if approver_project_ids or cp_approver_project_ids:

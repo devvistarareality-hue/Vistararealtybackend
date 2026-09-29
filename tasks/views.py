@@ -139,6 +139,13 @@ class TaskListDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _distinct(qs, field):
+    """Every value `field` takes in `qs`, as strings, blanks left out — what a
+    filter picker may offer (?facets=1), so it never lists a choice that
+    returns nothing."""
+    return sorted({str(v) for v in qs.order_by().values_list(field, flat=True).distinct() if v not in (None, '')})
+
+
 class TasksView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -147,6 +154,11 @@ class TasksView(APIView):
         p = request.query_params
         if p.get('include_archived') != 'true':
             qs = qs.filter(archived=False)
+        if p.get('facets') == '1':
+            return Response({
+                'list_ids': _distinct(qs, 'task_list_id'), 'statuses': _distinct(qs, 'status'),
+                'priorities': _distinct(qs, 'priority'), 'assignee_ids': _distinct(qs, 'assignees__id'),
+            })
         if p.get('task_list_id'):
             qs = qs.filter(task_list_id=p['task_list_id'])
         if p.get('status'):

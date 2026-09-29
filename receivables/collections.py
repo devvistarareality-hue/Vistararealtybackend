@@ -225,9 +225,10 @@ class ARCollectionsView(APIView):
         for pid, name in qs.filter(status='active').values_list('booking__project_id', 'booking__project__name').distinct():
             if pid:
                 projects[pid] = name or ''
-        pid = request.query_params.get('project')
-        if pid:
-            qs = qs.filter(booking__project_id=pid)
+        # One project or several (comma-separated, from the multi-select).
+        pids = [x for x in (request.query_params.get('project') or '').split(',') if x.strip().isdigit()]
+        if pids:
+            qs = qs.filter(booking__project_id__in=pids)
         rows, window_end = collections_snapshot(qs, as_of, days)
         overdue = [x for x in rows if x['overdue'] > 0]
         upcoming = [x for x in rows if x['upcoming_amount'] > 0]

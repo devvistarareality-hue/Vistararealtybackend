@@ -151,9 +151,10 @@ class ARRegisterView(APIView):
         _sync(request)
         as_of = _as_of(request)
         qs = _accounts_qs(request)
-        pid = request.query_params.get('project')
-        if pid:
-            qs = qs.filter(booking__project_id=pid)
+        # One project or several (comma-separated, from the multi-select).
+        pids = [x for x in (request.query_params.get('project') or '').split(',') if x.strip().isdigit()]
+        if pids:
+            qs = qs.filter(booking__project_id__in=pids)
         rows = [_summary(a, p, r, m) for a, p, r, m, _ in _computed(qs, as_of)]
         q = (request.query_params.get('q') or '').strip().lower()
         if q:
@@ -358,9 +359,10 @@ class ARDashboardView(APIView):
             if pid:
                 projects[pid] = name or ''
         qs = base
-        pid = request.query_params.get('project')
-        if pid:
-            qs = qs.filter(booking__project_id=pid)
+        # One project or several (comma-separated, from the multi-select).
+        pids = [x for x in (request.query_params.get('project') or '').split(',') if x.strip().isdigit()]
+        if pids:
+            qs = qs.filter(booking__project_id__in=pids)
         totals = {k: ZERO for k in ('collectable', 'received', 'outstanding', 'overdue', 'not_due', 'net_interest', 'os_with_interest')}
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
         forecast, order, rows = {}, [], []

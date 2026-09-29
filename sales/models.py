@@ -245,6 +245,10 @@ class Plot(models.Model):
     # afterward, silently losing the resale flag. Blank for a plot that's never
     # been held, or whose hold predates this field.
     pre_hold_status = models.CharField(max_length=20, blank=True)
+    # An admin put this unit on Hold by hand (Projects → the card's Hold button), as
+    # opposed to someone mid-way through booking it (In Progress). Only means anything
+    # while status is 'hold' and no one's soft pick (held_by) is on it.
+    manual_hold = models.BooleanField(default=False)
     size = models.CharField(max_length=100, blank=True)
     construction_area = models.CharField(max_length=100, blank=True)  # sq.ft; auto-maps into booking
     cluster_type = models.CharField(max_length=100, blank=True)
