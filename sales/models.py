@@ -171,6 +171,21 @@ class Project(models.Model):
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
+    # ── Locking ──────────────────────────────────────────────────────────────
+    # A project being set up — units not numbered, prices not signed off, plans not
+    # drawn — should not be pickable by the sales floor yet. Locking holds it back
+    # from everyone but a company/platform admin, who still sees it marked Locked so
+    # they can finish it and release it.
+    #
+    # Deliberately NOT is_active: an inactive project is one that is over, and it
+    # still shows in filters and reports so its history stays reachable. A locked
+    # one is one that has not started.
+    is_locked = models.BooleanField(default=False)
+    # Block labels locked within an otherwise open project, e.g. ['C', 'D'] while
+    # blocks A and B are selling. Matched against the prefix of Plot.number, which
+    # is how a unit carries its block ('A-101' -> 'A'); there is no Block model.
+    locked_blocks = models.JSONField(default=list, blank=True)
+
     approver_email = EncryptedTextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -178,6 +193,21 @@ class Project(models.Model):
 
     def __str__(self):
         return self.name
+
+    @staticmethod
+    def block_of(unit_number):
+        """The block a unit number belongs to: 'A-101' -> 'A', '12' -> ''."""
+        n = str(unit_number or '')
+        return n.split('-', 1)[0] if '-' in n else ''
+
+    def locked_block_set(self):
+        return {str(b).strip() for b in (self.locked_blocks or []) if str(b).strip()}
+
+    def blocks_unit_locked(self, unit_number):
+        """Whether this unit sits in a locked block. The project's own lock is a
+        separate question — check `is_locked` for that."""
+        locked = self.locked_block_set()
+        return bool(locked) and Project.block_of(unit_number) in locked
 
 
 class UserProjectAssignment(models.Model):

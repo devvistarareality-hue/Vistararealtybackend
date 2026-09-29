@@ -290,6 +290,53 @@ def _is_hard_admin(user):
     return is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin'
 
 
+def _may_see_locked(user):
+    """Who still sees a locked project or block.
+
+    A real company or platform administrator — the same bar as _is_hard_admin.
+    Someone who merely reaches company-wide visibility through the org tree does
+    not qualify: the point of a lock is that the sales floor cannot see the
+    project, and a department head is on the sales floor.
+    """
+    return _is_hard_admin(user)
+
+
+def _visible_projects(qs, user):
+    """Drop locked projects unless this person is allowed to see them."""
+    return qs if _may_see_locked(user) else qs.filter(is_locked=False)
+
+
+def _locked_project_error(request, project_id):
+    """403 if this project is locked to this user, else None.
+
+    Guards the write paths. Without it a locked project is merely hidden, and a
+    hidden project is still bookable by anyone who kept the id in a tab or typed
+    it into the URL.
+    """
+    if not project_id or _may_see_locked(request.user):
+        return None
+    if Project.objects.filter(pk=project_id, is_locked=True).exists():
+        return Response({'detail': 'This project is locked and cannot be used yet.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
+def _locked_units_error(request, project_id, unit_numbers):
+    """403 if any of these units sits in a locked block, else None."""
+    if not project_id or not unit_numbers or _may_see_locked(request.user):
+        return None
+    project = Project.objects.filter(pk=project_id).only('id', 'locked_blocks').first()
+    if not project:
+        return None
+    hit = sorted({n for n in unit_numbers if project.blocks_unit_locked(n)})
+    if hit:
+        return Response(
+            {'detail': 'These units are in a locked block and cannot be booked yet: '
+                       + ', '.join(hit)},
+            status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
 def _approver_project_ids(user, company):
     """Ids of projects where `user` is a configured booking approver — they should
     see every booking for that project regardless of the STM's reporting chain."""
@@ -2020,6 +2067,9 @@ class ProjectListView(APIView):
         pids = manager_project_ids(request.user)
         if pids is not None:
             projects = projects.filter(id__in=pids)
+        # A locked project is not pickable, and this endpoint is what every "pick a
+        # project" screen calls.
+        projects = _visible_projects(projects, request.user)
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
@@ -2054,11 +2104,12 @@ class ProjectDetailView(APIView):
 
     def get(self, request, pk):
         try:
-            project = scope_to_company(
+            project = _visible_projects(scope_to_company(
                 Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
                 request.user,
-            ).get(pk=pk)
+            ), request.user).get(pk=pk)
         except Project.DoesNotExist:
+            # 404, not 403: a locked project should not confirm it exists.
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(ProjectSerializer(project).data)
 
@@ -2251,6 +2302,13 @@ class PlotListView(APIView):
         _reclaim_units_with_a_live_sale(Plot.objects.filter(project_id=project_id))
         plots = (Plot.objects.filter(project_id=project_id)
                  .select_related('project').defer(*PROJECT_BLOBS))
+        # Units in a locked block come off the map entirely for everyone but an
+        # admin. Filtered in Python because a unit carries its block in the prefix
+        # of its number rather than in a column of its own.
+        if not _may_see_locked(request.user):
+            proj = Project.objects.filter(pk=project_id).only('id', 'locked_blocks').first()
+            if proj and proj.locked_block_set():
+                plots = [p for p in plots if not proj.blocks_unit_locked(p.number)]
         # context: can_cancel_hold is per-viewer, so the serializer needs the request.
         return Response(PlotSerializer(plots, many=True, context={'request': request}).data)
 
@@ -5026,6 +5084,19 @@ class BookingListCreateView(APIView):
         if refs_err:
             return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
 
+        # Hiding a locked project is not the same as closing it: the id survives in
+        # an open tab, a bookmark, or a draft saved before the lock. Refuse here too.
+        lock_err = _locked_project_error(request, data.get('project'))
+        if lock_err:
+            return lock_err
+        pids = [x for x in ([data.get('plot')] + list(data.get('plot_ids') or [])) if str(x).isdigit()]
+        if pids:
+            lock_err = _locked_units_error(
+                request, data.get('project'),
+                list(Plot.objects.filter(pk__in=pids).values_list('number', flat=True)))
+            if lock_err:
+                return lock_err
+
         # Reject an oversized signed LOI before any booking/lead/plot side effects run —
         # base64 inflates the raw file by ~1/3, so compare against the encoded length.
         lf_check = data.get('loi_file')
@@ -5426,6 +5497,19 @@ class BookingDraftView(APIView):
         refs_err = _booking_refs_error(company, data)
         if refs_err:
             return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+
+        # Hiding a locked project is not the same as closing it: the id survives in
+        # an open tab, a bookmark, or a draft saved before the lock. Refuse here too.
+        lock_err = _locked_project_error(request, data.get('project'))
+        if lock_err:
+            return lock_err
+        pids = [x for x in ([data.get('plot')] + list(data.get('plot_ids') or [])) if str(x).isdigit()]
+        if pids:
+            lock_err = _locked_units_error(
+                request, data.get('project'),
+                list(Plot.objects.filter(pk__in=pids).values_list('number', flat=True)))
+            if lock_err:
+                return lock_err
 
         draft = None
         if data.get('id'):
