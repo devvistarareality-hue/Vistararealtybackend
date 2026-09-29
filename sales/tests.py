@@ -1624,3 +1624,23 @@ class NightlyBackupCronTests(APITestCase):
             with mock.patch('django.utils.timezone.now', return_value=at_two):
                 call_command('run_scheduled_notifications')
             self.assertTrue(run_due.called)
+
+
+class DuplicateIsPerProjectTests(APITestCase):
+    """Same number, different project = a separate inquiry, not a duplicate."""
+
+    def test_other_project_is_not_a_duplicate(self):
+        co = Company.objects.create(code='DPP', name='Dup Co')
+        admin = User.objects.create(email='dp_admin@x.com', company=co, role='Admin', user_code='DP1')
+        p1 = Project.objects.create(company=co, name='P1')
+        p2 = Project.objects.create(company=co, name='P2')
+        src = LeadSource.objects.create(company=co, name='Walk-in')
+        first = Lead.objects.create(company=co, name='A', phone='+919400000001', project=p1, status='lost')
+        auth(self.client, admin)
+        res = self.client.post('/api/sales/leads/', {'name': 'A', 'phone': '9400000001', 'project': p2.id, 'source': src.id}, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertFalse(Lead.objects.get(id=res.json()['id']).is_duplicate)
+        # Same project (the old one is lost, so this is a new row) — that IS a duplicate.
+        res = self.client.post('/api/sales/leads/', {'name': 'A', 'phone': '9400000001', 'project': p1.id, 'source': src.id}, format='json')
+        again = Lead.objects.get(id=res.json()['id'])
+        self.assertEqual((again.is_duplicate, again.duplicate_of_id), (True, first.id))
