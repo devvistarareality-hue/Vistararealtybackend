@@ -1604,3 +1604,23 @@ class VisitCreditsTelecallerTests(APITestCase):
         self.assertEqual(sorted(r['project_name'] for r in rows), ['P1', 'P2'])
         self.assertEqual({r['project_name']: (r['telecaller_status'], r['stm_status']) for r in rows},
                          {'P1': ('cold', ''), 'P2': ('', 'hot')})
+
+
+class NightlyBackupCronTests(APITestCase):
+    """The 5-minute cron takes due scheduled backups, in the nightly hour only."""
+
+    def test_backups_run_only_in_the_backup_hour(self):
+        from datetime import datetime
+        from unittest import mock
+        from django.core.management import call_command
+        from django.utils import timezone
+        from sales.management.commands import run_scheduled_notifications as cmd
+        with mock.patch('sales.backup_schedule.run_due', return_value=[('Co', 10)]) as run_due:
+            at_noon = timezone.make_aware(datetime(2026, 9, 30, 12, 0))
+            with mock.patch('django.utils.timezone.now', return_value=at_noon):
+                call_command('run_scheduled_notifications')
+            self.assertFalse(run_due.called)
+            at_two = timezone.make_aware(datetime(2026, 9, 30, cmd.BACKUP_HOUR, 5))
+            with mock.patch('django.utils.timezone.now', return_value=at_two):
+                call_command('run_scheduled_notifications')
+            self.assertTrue(run_due.called)

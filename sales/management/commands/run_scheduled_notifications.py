@@ -18,6 +18,12 @@ from django.db.models import Q
 from django.utils import timezone
 
 from sales.models import FollowUp, SiteVisit, UserAvailability
+
+# Scheduled Excel backups (Data Backup & Reset → Automatic backup) ride on this
+# 5-minute job: no separate backup service was ever set up on Railway, so the
+# schedule never ran. Only in this hour (local time, IST), so building a large
+# workbook never competes with the working day; run_due decides who is due.
+BACKUP_HOUR = 2
 from accounts.models import User
 from notifications import notify, notify_many, reporting_chain
 
@@ -50,6 +56,8 @@ class Command(BaseCommand):
                             help='One-time: stamp every currently-overdue follow-up/SV as already '
                                  'handled (both markers) WITHOUT notifying, so the first real cron '
                                  'run only fires for items that go overdue afterwards.')
+        parser.add_argument('--backups-now', action='store_true',
+                            help='Also take any due scheduled backups now, outside the nightly hour.')
 
     def handle(self, *args, **opts):
         now = timezone.now()
@@ -75,6 +83,14 @@ class Command(BaseCommand):
             c.update(task_reminders.run(now, dry))
         except Exception:
             c.update({'task_due_soon': 0})
+        c['backups'] = 0
+        if not dry and (opts.get('backups_now') or timezone.localtime(now).hour == BACKUP_HOUR):
+            try:
+                from sales.backup_schedule import run_due
+                c['backups'] = len(run_due(now))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Scheduled backups failed')
         tag = '[dry-run] ' if dry else ''
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
@@ -83,6 +99,7 @@ class Command(BaseCommand):
             f' · AR follow-ups: {c["ar_fu_reminder"]} nudged / {c["ar_fu_escalate"]} escalated'
             f' · AR digest: {c["ar_digest"]} sent · AR due soon: {c["ar_due_soon"]}'
             f' · Task due soon: {c["task_due_soon"]}'
+            f' · backups taken: {c["backups"]}'
         ))
 
     # ── One-time backfill (suppress the existing backlog) ─────────────────
