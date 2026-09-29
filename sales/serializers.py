@@ -45,11 +45,21 @@ class ProjectSerializer(serializers.ModelSerializer):
         # Count over the prefetched plots in Python — the views prefetch_related('plots'),
         # so this uses the cached rows (0 queries) instead of firing 4 COUNT queries per
         # project (the previous .count()/.filter().count() chain caused an N+1).
-        counts = {'total': 0, 'available': 0, 'hold': 0, 'sold': 0, 'resale': 0}
+        counts = {'total': 0, 'available': 0, 'hold': 0, 'pending': 0, 'sold': 0, 'resale': 0}
+        held = []
         for p in obj.plots.all():
             counts['total'] += 1
             if p.status in counts:
                 counts[p.status] += 1
+            if p.status == Plot.HOLD:
+                held.append(p.id)
+        # 'hold' is someone still filling the booking form (In Progress); 'pending' is a
+        # submitted booking waiting for approval (Hold). Same plot.status underneath, told
+        # apart by the pending booking — one query, only for a project with held units.
+        if held:
+            waiting = _plot_pending_map(obj.id)
+            counts['pending'] = sum(1 for pid in held if pid in waiting)
+            counts['hold'] -= counts['pending']
         return counts
 
 
