@@ -122,3 +122,77 @@ class DirectBookingClosesItsLead(TestCase):
                           self._payload('Draft Then Real', lead=lead_id), format='json')
         self.assertIn(r.status_code, (200, 201), r.data)
         self.assertEqual(Lead.objects.get(id=lead_id).stm_status, 'closed')
+
+
+class ARejectedSubmissionLeavesNoOrphan(TestCase):
+    """The lead used to be written before the booking was validated.
+
+    So a submission the server refused returned 400 with the lead already in the
+    database — a client sitting in the STM's To Call queue with no booking, no
+    site visit and no closure behind them. That is the exact shape of the leads
+    reported from production. A revision had the same problem from the other
+    end: it takes the prior booking's lead, so the one it had just minted was
+    thrown away.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='ORP', name='Orphan Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@orp.com', company=cls.co, user_code='ORP001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.stm = User.objects.create_user(
+            'stm@orp.com', company=cls.co, user_code='ORP002', password='p',
+            name='STM', role='Employee', designation='STM', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.project = Project.objects.create(company=cls.co, name='Orphan Project')
+        cls.plot = Plot.objects.create(project=cls.project, number='O-1')
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+        self.api.force_authenticate(user=self.stm)
+
+    def test_a_refused_booking_writes_no_lead_at_all(self):
+        before = Lead.objects.count()
+        r = self.api.post('/api/sales/bookings/', {
+            'client_name': 'Never Booked', 'phone': '+919800000055',
+            'project': self.project.id,
+            # No unit, on a project that has one mapped — refused by the server.
+        }, format='json')
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(Lead.objects.count(), before,
+                         'a refused booking left a lead behind')
+
+    def test_a_lead_is_born_closed_not_closed_afterwards(self):
+        """Belt and braces: even if the closing update below it were removed, the
+        row never exists in the 'new'/'' state the To Call queue selects on."""
+        r = self.api.post('/api/sales/bookings/', {
+            'client_name': 'Born Closed', 'phone': '+919800000056',
+            'project': self.project.id, 'plot': self.plot.id,
+            'final_amount': '1000000', 'land_rate': '3500', 'area': '100',
+        }, format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        lead = Lead.objects.get(id=Booking.objects.get(id=r.data['id']).lead_id)
+        self.assertEqual((lead.status, lead.stm_status), ('closed', 'closed'))
+
+    def test_a_revision_does_not_mint_a_second_lead(self):
+        first = self.api.post('/api/sales/bookings/', {
+            'client_name': 'Revised Client', 'phone': '+919800000057',
+            'project': self.project.id, 'plot': self.plot.id,
+            'final_amount': '1000000', 'land_rate': '3500', 'area': '100',
+        }, format='json')
+        self.assertIn(first.status_code, (200, 201), first.data)
+        b = Booking.objects.get(id=first.data['id'])
+        before = Lead.objects.count()
+
+        rev = self.api.post('/api/sales/bookings/', {
+            'client_name': 'Revised Client', 'phone': '+919800000057',
+            'project': self.project.id, 'plot': self.plot.id,
+            'final_amount': '1100000', 'land_rate': '3600', 'area': '100',
+            'revision_of': b.id,
+        }, format='json')
+        self.assertIn(rev.status_code, (200, 201), rev.data)
+        self.assertEqual(Lead.objects.count(), before,
+                         'the revision minted a lead it then threw away')
+        self.assertEqual(Booking.objects.get(id=rev.data['id']).lead_id, b.lead_id)
