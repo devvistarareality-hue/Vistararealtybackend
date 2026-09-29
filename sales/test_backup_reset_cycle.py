@@ -177,13 +177,13 @@ class ResetIsGated(APITestCase):
 
     def test_an_employee_cannot_reset(self):
         self.client.force_authenticate(self.rep)
-        r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
+        r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': 'CYC'}, format='json')
         self.assertEqual(r.status_code, 403)
 
     def test_no_reset_without_a_backup(self):
         with self.settings():
             os.environ['DATA_RESET_KEY'] = RESET_KEY
-            r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE'},
+            r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': 'CYC'},
                                  format='json')
         self.assertEqual(r.status_code, 409)
         self.assertIn('backup', r.json()['detail'].lower())
@@ -214,17 +214,28 @@ class ResetIsGated(APITestCase):
     def test_all_three_gates_passed_resets_the_company(self):
         self._take_backup()
         os.environ['DATA_RESET_KEY'] = RESET_KEY
-        r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
+        r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': 'CYC'}, format='json')
         self.assertEqual(r.status_code, 200, r.content[:300])
         self.assertFalse(Lead.objects.filter(company=self.co).exists())
         self.assertTrue(User.objects.filter(pk=self.boss.pk).exists(),
                         'the admin who ran it must still be able to sign in')
 
+    def test_no_reset_without_the_company_code(self):
+        from sales.models import BackupStamp
+        from sales.backup_excel import MODULES
+        BackupStamp.objects.create(company=self.co, modules=list(MODULES), taken_by=self.boss)
+        os.environ['DATA_RESET_KEY'] = RESET_KEY
+        for code in ('', 'WRONG'):
+            r = self.client.post(self.url, {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': code}, format='json')
+            self.assertEqual(r.status_code, 400)
+            self.assertIn('CYC', r.json()['detail'])
+        self.assertTrue(Lead.objects.filter(company=self.co).exists(), 'nothing may be deleted')
+
     def test_a_company_cannot_reset_another(self):
         other = Company.objects.create(code='OTH', name='Other Co', is_active=True)
         os.environ['DATA_RESET_KEY'] = RESET_KEY
         r = self.client.post(f'/api/sales/backups/reset/?company_id={other.id}',
-                             {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
+                             {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': 'OTH'}, format='json')
         self.assertEqual(r.status_code, 403)
 
 
@@ -239,7 +250,7 @@ class APartialBackupCannotAuthoriseAReset(APITestCase):
 
     def _reset(self):
         return self.client.post(f'/api/sales/backups/reset/?company_id={self.co.id}',
-                                {'reset_key': RESET_KEY, 'confirm': 'DELETE'}, format='json')
+                                {'reset_key': RESET_KEY, 'confirm': 'DELETE', 'company_code': 'CYC'}, format='json')
 
     def test_an_old_partial_stamp_is_not_enough(self):
         from sales.models import BackupStamp

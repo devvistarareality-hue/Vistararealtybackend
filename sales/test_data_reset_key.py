@@ -22,7 +22,7 @@ class DataResetKey(TestCase):
         Lead.objects.create(company=self.co, name='L', phone='9111111111')
 
     def _post(self, user=None, **body):
-        payload = {'confirm': 'DELETE'}
+        payload = {'confirm': 'DELETE', 'company_code': 'DR'}
         payload.update(body)
         req = APIRequestFactory().post('/x/', payload, format='json')
         force_authenticate(req, user=user or self.admin)
