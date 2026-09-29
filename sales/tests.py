@@ -1526,3 +1526,21 @@ class SvDoneNeedsVisitTests(APITestCase):
         self.assertEqual(res.status_code, 201, res.content)
         lead = Lead.objects.get(id=res.json()['id'])
         self.assertEqual(lead.site_visits.filter(status='completed').count(), 1)
+
+
+class ManualHoldTests(APITestCase):
+    """The plot card's Hold button: a deliberate Hold, counted apart from In Progress."""
+
+    def test_hold_button_marks_counts_and_clears(self):
+        co = Company.objects.create(code='MHD', name='Hold Co')
+        admin = User.objects.create(email='mh_admin@x.com', company=co, role='Admin', user_code='MH1')
+        proj = Project.objects.create(company=co, name='Hold Tower')
+        plot = Plot.objects.create(project=proj, number='H-1')
+        auth(self.client, admin)
+        res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'status': 'hold', 'manual_hold': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual((res.json()['status'], res.json()['manual_hold']), ('hold', True))
+        counts = self.client.get(f'/api/sales/projects/{proj.id}/').json()['plot_counts']
+        self.assertEqual((counts['pending'], counts['hold']), (1, 0))
+        res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'status': 'available'}, format='json')
+        self.assertEqual((res.json()['status'], res.json()['manual_hold']), ('available', False))

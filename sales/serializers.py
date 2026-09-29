@@ -52,13 +52,14 @@ class ProjectSerializer(serializers.ModelSerializer):
             if p.status in counts:
                 counts[p.status] += 1
             if p.status == Plot.HOLD:
-                held.append(p.id)
+                held.append(p)
         # 'hold' is someone still filling the booking form (In Progress); 'pending' is a
         # submitted booking waiting for approval (Hold). Same plot.status underneath, told
         # apart by the pending booking — one query, only for a project with held units.
         if held:
             waiting = _plot_pending_map(obj.id)
-            counts['pending'] = sum(1 for pid in held if pid in waiting)
+            counts['pending'] = sum(1 for p in held
+                                    if p.id in waiting or (p.manual_hold and not p.held_by_id))
             counts['hold'] -= counts['pending']
         return counts
 
@@ -197,7 +198,7 @@ class PlotSerializer(serializers.ModelSerializer):
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
                   'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
-                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold']
+                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold', 'manual_hold']
         read_only_fields = ['id', 'project']
 
 

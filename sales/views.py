@@ -2560,6 +2560,10 @@ class PlotDetailView(APIView):
 
         before = {k: getattr(plot, k) for k in ('size', 'terrace_area', 'facing', 'floor')}
         saved = ser.save()
+        # A manual Hold ends the moment the unit is anything but held.
+        if saved.manual_hold and saved.status != Plot.HOLD:
+            saved.manual_hold = False
+            saved.save(update_fields=['manual_hold'])
         # The price is computed from the areas, so a change to them has to reach the
         # price book or the booking form goes on quoting the old one.
         _resync_generated_price_book(saved, before)
