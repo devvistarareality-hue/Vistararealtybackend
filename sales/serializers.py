@@ -37,6 +37,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'plot_type_plans', 'eoi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
             'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
+            'is_locked', 'locked_blocks',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 
