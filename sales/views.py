@@ -5466,6 +5466,36 @@ class BookingListCreateView(APIView):
         # Resolve or create the lead (Book Unit flow types a new client; Record Closure
         # passes an existing lead).
         lead_id = data.get('lead') or None
+
+        # Revision of an existing (sold) booking — carries the prior lead, bumps the
+        # revision number, and leaves the plot/closure untouched until approved.
+        prior = None
+        rev_of = data.get('revision_of')
+        if rev_of:
+            prior = Booking.objects.filter(id=rev_of, company=company).first()
+            if prior:
+                lead_id = prior.lead_id
+
+        # Submitting a saved draft promotes that same row instead of creating a new
+        # Booking — otherwise the draft would be left behind as an orphaned duplicate.
+        draft = None
+        if data.get('draft_id'):
+            draft = Booking.objects.filter(id=data['draft_id'], company=company,
+                                            stm=request.user, status='draft').first()
+
+        ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
+        ser.is_valid(raise_exception=True)
+
+        # The lead for a direct booking is minted here — after validation, and
+        # after `prior`/`draft` have had their say — for two reasons found the
+        # hard way. Created any earlier, an invalid submission returned 400 with
+        # the lead already written, leaving a client in the STM's To Call queue
+        # with no booking behind them; and a revision, which takes `prior`'s lead
+        # a few lines above, minted a second lead it then threw away.
+        #
+        # It is born closed. The STM has just sold this client: they are not
+        # someone to ring, and 'new' with an empty stm_status is precisely the
+        # shape the To Call queue selects on.
         if not lead_id and (data.get('client_name') or '').strip():
             src = None
             sname = (data.get('source') or '').strip()
@@ -5487,7 +5517,8 @@ class BookingListCreateView(APIView):
                 )
             lead = Lead.objects.create(
                 company=company, name=data.get('client_name', '').strip(),
-                phone=(data.get('phone') or '').strip(), status='new',
+                phone=(data.get('phone') or '').strip(),
+                status='closed', stm_status='closed',
                 project_id=data.get('project') or None, source=src,
                 channel_partner=channel_partner,
                 # STM self-sourced this client straight into a booking — no
@@ -5499,24 +5530,6 @@ class BookingListCreateView(APIView):
             )
             lead_id = lead.id
 
-        # Revision of an existing (sold) booking — carries the prior lead, bumps the
-        # revision number, and leaves the plot/closure untouched until approved.
-        prior = None
-        rev_of = data.get('revision_of')
-        if rev_of:
-            prior = Booking.objects.filter(id=rev_of, company=company).first()
-            if prior:
-                lead_id = prior.lead_id
-
-        # Submitting a saved draft promotes that same row instead of creating a new
-        # Booking — otherwise the draft would be left behind as an orphaned duplicate.
-        draft = None
-        if data.get('draft_id'):
-            draft = Booking.objects.filter(id=data['draft_id'], company=company,
-                                            stm=request.user, status='draft').first()
-
-        ser = BookingSerializer(draft, data=data, partial=True) if draft else BookingSerializer(data=data)
-        ser.is_valid(raise_exception=True)
         if prior:
             extra = dict(revision_no=prior.revision_no + 1, closure=prior.closure,
                          revision_of=prior,
