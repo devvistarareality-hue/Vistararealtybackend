@@ -48,6 +48,12 @@ def scope_investors(qs, user, prefix=''):
     and leaving it unset keeps the old split exactly.
     """
     from accounts.capabilities import (SCOPE_COMPANY, SCOPE_OWN, SCOPE_TEAM, data_scope)
+    # A platform admin sees the whole desk whatever their designation says. They
+    # are the account owner, and a designation set to "own records only" would
+    # otherwise hide every other employee's work from the person answerable for
+    # all of it.
+    if is_platform_admin(user):
+        return qs
     field = f'{prefix}added_by'
     scope = data_scope(user)
     if scope == SCOPE_COMPANY:
@@ -367,9 +373,12 @@ class InvestorListCreateView(APIView):
                 qs = qs.filter(Q(added_by=request.user) | Q(scheme_id__in=approver_scheme_ids))
             else:
                 qs = qs.filter(added_by=request.user)
-        # A draft is unfinished work, not a record: only its author ever sees
-        # one, whatever scheme-approver or manager rights the viewer holds.
-        qs = qs.exclude(Q(approval_status='draft') & ~Q(added_by=request.user))
+        # A draft is unfinished work, not a record: only its author sees one,
+        # whatever scheme-approver or manager rights the viewer holds. The
+        # exception is a platform admin, who can see any employee's data in this
+        # module — they own the account and answer for what is in it.
+        if not is_platform_admin(request.user):
+            qs = qs.exclude(Q(approval_status='draft') & ~Q(added_by=request.user))
         if request.query_params.get('facets') == '1':
             # The pool the page lists from, before its own filters.
             pool = qs
