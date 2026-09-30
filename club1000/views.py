@@ -79,7 +79,15 @@ class StatsView(APIView):
         if not has_club1000_access(request.user):
             return _no_access()
 
-        investors = _company_filtered(Investor.objects.select_related('scheme'), request)
+        # Only an approved investor is an investor. Until someone signs off, the
+        # money is not committed — a pending one may be rejected and a draft was
+        # never even submitted, yet both used to land in total_invested, the
+        # investor count, the per-scheme split and the top-investors list. A
+        # rejected one counted too, which meant a refused deal permanently
+        # overstated the book. pending_approval_count below is deliberately
+        # separate: counting what is waiting is its whole job.
+        investors = _company_filtered(
+            Investor.objects.select_related('scheme'), request).filter(approval_status='approved')
         manager = is_club1000_manager(request.user)
         _scoped = scope_investors(investors, request.user)
         if _scoped is not None:
@@ -122,7 +130,8 @@ class StatsView(APIView):
         # decision right now" or "what's coming due" is a live snapshot, not
         # a fact about investments made in a chosen date range. Same
         # ownership scoping as `investors`, just without the date clause.
-        portfolio = _company_filtered(Investor.objects.select_related('scheme'), request)
+        portfolio = _company_filtered(
+            Investor.objects.select_related('scheme'), request).filter(approval_status='approved')
         if not manager:
             portfolio = portfolio.filter(added_by=request.user)
 
