@@ -1685,7 +1685,7 @@ class MetaReEnquiryTests(APITestCase):
 
 
 class KalravPlcTests(APITestCase):
-    """Kalrav PLC: plots carry Corner / Club House Facing marks; bookings the amounts."""
+    """Kalrav PLC: plots carry Corner / Common Plot Facing marks; bookings the amounts."""
 
     def test_plot_marks_and_booking_amounts(self):
         from sales.serializers import BookingSerializer

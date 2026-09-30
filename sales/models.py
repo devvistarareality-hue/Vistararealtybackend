@@ -252,6 +252,8 @@ class Plot(models.Model):
     manual_hold = models.BooleanField(default=False)
     # Kalrav PLC (Premium Location Charge): where the plot sits. Each adds that
     # project's Rate Master PLC amount (plc_corner / plc_clubhouse) to a booking.
+    # NOTE: the 'clubhouse' names mean COMMON PLOT FACING (COP) — the UI calls it that;
+    # the field names stay as they are (fields are never renamed or removed).
     is_corner = models.BooleanField(default=False)
     is_clubhouse_facing = models.BooleanField(default=False)
     size = models.CharField(max_length=100, blank=True)
