@@ -7,6 +7,8 @@ draft rule, which otherwise shows a half-finished investor to its author alone.
 Everyone else still gets the ordinary scoping — this is an exemption for the
 account owner, not a hole.
 """
+from decimal import Decimal
+
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -88,3 +90,73 @@ class SuperAdminSeesEverything(TestCase):
 
     def test_an_employee_does_not_see_another_persons_investor(self):
         self.assertNotIn(self.emp_approved.id, self._ids(self.other_emp))
+
+
+class SuperAdminCanEditAnyDraft(TestCase):
+    """Seeing another person's draft and being able to save it are one feature.
+
+    Without this, pressing Edit on someone else's draft would silently fork a
+    second draft of the admin's own and leave the original untouched — the
+    confusing half-state, not a refusal.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.vrl = Company.objects.create(code='VRL', name='Vistara', is_active=True)
+        cls.super_admin = User.objects.create_user(
+            'boss@vrl.com', company=cls.vrl, user_code='VRL001', password='p',
+            name='Platform Boss', role='Admin', modules=['Club 1000', 'Sales'])
+        cls.employee = User.objects.create_user(
+            'emp@vrl.com', company=cls.vrl, user_code='VRL002', password='p',
+            name='Shrey', role='Employee', modules=['Club 1000'],
+            reporting_manager=cls.super_admin)
+        cls.mate = User.objects.create_user(
+            'mate@vrl.com', company=cls.vrl, user_code='VRL003', password='p',
+            name='Colleague', role='Employee', modules=['Club 1000'],
+            reporting_manager=cls.super_admin)
+        cls.scheme = Scheme.objects.create(
+            company=cls.vrl, name='RISE', tenure_months=12, min_ticket_size=100000,
+            interest_payout_options=['maturity'])
+        cls.draft = Investor.objects.create(
+            company=cls.vrl, scheme=cls.scheme, added_by=cls.employee,
+            name='ASHOK PATEL AND GROUP', phone='+918866339595',
+            amount_invested=0, investment_date='2026-09-30',
+            maturity_date='2027-09-30', approval_status='draft')
+
+    def setUp(self):
+        self.api = APIClient()
+
+    def test_a_platform_admin_saves_the_same_draft_not_a_new_one(self):
+        self.api.force_authenticate(user=self.super_admin)
+        before = Investor.objects.count()
+        r = self.api.post('/api/club1000/investors/draft/', {
+            'id': self.draft.id, 'scheme': self.scheme.id,
+            'name': 'ASHOK PATEL AND GROUP', 'amount_invested': '80000000',
+        }, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(Investor.objects.count(), before, 'a second draft was forked')
+        self.draft.refresh_from_db()
+        self.assertEqual(Decimal(str(self.draft.amount_invested)), Decimal('80000000'))
+        self.assertEqual(self.draft.added_by_id, self.employee.id,
+                         'editing should not steal authorship')
+
+    def test_a_colleague_still_cannot_touch_it(self):
+        self.api.force_authenticate(user=self.mate)
+        self.api.post('/api/club1000/investors/draft/', {
+            'id': self.draft.id, 'scheme': self.scheme.id, 'name': 'HIJACKED',
+        }, format='json')
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.name, 'ASHOK PATEL AND GROUP')
+
+    def test_a_platform_admin_can_submit_someone_elses_draft(self):
+        self.api.force_authenticate(user=self.super_admin)
+        before = Investor.objects.count()
+        r = self.api.post('/api/club1000/investors/', {
+            'draft_id': self.draft.id, 'scheme': self.scheme.id,
+            'name': 'ASHOK PATEL AND GROUP', 'phone': '+918866339595',
+            'amount_invested': '80000000',
+        }, format='json')
+        self.assertIn(r.status_code, (200, 201), r.data)
+        self.assertEqual(Investor.objects.count(), before, 'submitting left the draft behind')
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.approval_status, 'pending')

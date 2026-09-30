@@ -462,9 +462,11 @@ class InvestorListCreateView(APIView):
         # the same client would appear twice.
         draft = None
         if request.data.get('draft_id'):
+            owned = Q(added_by=request.user)
+            if is_platform_admin(request.user):
+                owned = Q()
             draft = (_company_filtered(Investor.objects.all(), request)
-                     .filter(pk=request.data['draft_id'], added_by=request.user,
-                             approval_status='draft').first())
+                     .filter(Q(pk=request.data['draft_id'], approval_status='draft') & owned).first())
             if draft:
                 ser.instance = draft
 
@@ -1105,8 +1107,14 @@ class InvestorDraftView(APIView):
 
         draft = None
         if data.get('id'):
+            # A platform admin can edit any draft in the company, matching what
+            # they can see — otherwise pressing Edit on someone else's draft would
+            # quietly fork a second one of their own instead of saving theirs.
+            owned = Q(added_by=request.user)
+            if is_platform_admin(request.user):
+                owned = Q()
             draft = (_company_filtered(Investor.objects.all(), request)
-                     .filter(pk=data['id'], added_by=request.user, approval_status='draft').first())
+                     .filter(Q(pk=data['id'], approval_status='draft') & owned).first())
 
         scheme_id = data.get('scheme') or (draft.scheme_id if draft else None)
         scheme = Scheme.objects.filter(pk=scheme_id).first() if scheme_id else None
