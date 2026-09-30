@@ -9,6 +9,7 @@ urlpatterns = [
     path('schemes/<int:pk>/toggle-approver/', views.SchemeToggleApproverView.as_view()),
     path('investors/references/',     views.ReferenceSuggestionsView.as_view()),
     path('investors/next-loi-no/',    views.InvestorNextLoiNoView.as_view()),
+    path('investors/draft/',          views.InvestorDraftView.as_view()),
     path('investors/',                views.InvestorListCreateView.as_view()),
     path('investors/<int:pk>/',       views.InvestorDetailView.as_view()),
     path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),

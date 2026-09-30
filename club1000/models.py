@@ -42,6 +42,11 @@ INVESTOR_STATUS = [
 ]
 
 INVESTOR_APPROVAL_STATUS = [
+    # Saved but not submitted — the submitter's own unfinished work, mirroring a
+    # sales Booking at status='draft'. It skips the required-field checks, so it
+    # is not reviewable: it has to be completed and submitted before anyone can
+    # approve it, and nobody but its author sees it.
+    ('draft', 'Draft'),
     ('pending', 'Pending'),
     ('approved', 'Approved'),
     ('rejected', 'Rejected'),

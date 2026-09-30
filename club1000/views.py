@@ -322,6 +322,26 @@ def _distinct(qs, field):
     return sorted({str(v) for v in qs.order_by().values_list(field, flat=True).distinct() if v not in (None, '')})
 
 
+def _parse_date(value):
+    """A date from the client, or None when it is missing or unparseable."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _draft_decimal(value, fallback):
+    """A number a half-filled form may simply not have yet."""
+    if value in (None, ''):
+        return fallback or 0
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return fallback or 0
+
+
 class InvestorListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -338,6 +358,9 @@ class InvestorListCreateView(APIView):
                 qs = qs.filter(Q(added_by=request.user) | Q(scheme_id__in=approver_scheme_ids))
             else:
                 qs = qs.filter(added_by=request.user)
+        # A draft is unfinished work, not a record: only its author ever sees
+        # one, whatever scheme-approver or manager rights the viewer holds.
+        qs = qs.exclude(Q(approval_status='draft') & ~Q(added_by=request.user))
         if request.query_params.get('facets') == '1':
             # The pool the page lists from, before its own filters.
             pool = qs
@@ -345,7 +368,7 @@ class InvestorListCreateView(APIView):
             if approval and approval != 'all':
                 pool = pool.filter(approval_status=approval)
             elif not approval:
-                pool = pool.exclude(approval_status='rejected')
+                pool = pool.exclude(approval_status__in=('rejected', 'draft'))
             return Response({'scheme_ids': _distinct(pool, 'scheme_id'), 'statuses': _distinct(pool, 'status')})
         if request.query_params.get('scheme_id'):
             qs = qs.filter(scheme_id=request.query_params['scheme_id'])
@@ -358,8 +381,10 @@ class InvestorListCreateView(APIView):
             qs = qs.filter(approval_status=approval_status)
         else:
             # Default view excludes rejected investors — they only show up under
-            # an explicit ?approval_status=rejected (or =all) filter.
-            qs = qs.exclude(approval_status='rejected')
+            # an explicit ?approval_status=rejected (or =all) filter. Drafts are
+            # left out for the same reason and one more: nothing has been agreed
+            # yet, so counting one as an investor would overstate the book.
+            qs = qs.exclude(approval_status__in=('rejected', 'draft'))
         search = request.query_params.get('search', '').strip()
         if search:
             # name/phone/email are encrypted, so SQL can't match them. A full
@@ -413,6 +438,17 @@ class InvestorListCreateView(APIView):
                 if normalize_phone(phone) == normalized:
                     reference_name, reference_phone = name, phone
                     break
+
+        # Submitting a saved draft promotes that same row instead of creating a
+        # second one — otherwise the draft would be left behind as an orphan, and
+        # the same client would appear twice.
+        draft = None
+        if request.data.get('draft_id'):
+            draft = (_company_filtered(Investor.objects.all(), request)
+                     .filter(pk=request.data['draft_id'], added_by=request.user,
+                             approval_status='draft').first())
+            if draft:
+                ser.instance = draft
 
         # Custom payout-schedule edits (if any) are held until approval, not
         # generated now — generate_payout_schedule runs in InvestorActionView.approve.
@@ -1025,6 +1061,79 @@ def _notify_investor_approvers(company, investor, submitter):
         pass
 
 
+class InvestorDraftView(APIView):
+    """Save a half-filled investor, or update the one already saved.
+
+    Mirrors sales' BookingDraftView, and for the same reason: the point is never
+    to lose typed work, so none of the submit-time completeness checks apply.
+    Only the scheme is required, because the maturity date is derived from its
+    tenure and the form shows it back straight away.
+
+    A draft belongs to whoever saved it and to nobody else — see the exclude() in
+    InvestorListCreateView.get. It cannot be approved (InvestorActionView refuses
+    one); submitting it POSTs to /investors/ with draft_id, which runs the real
+    validation and turns this same row into a pending investor rather than
+    leaving a duplicate behind.
+    """
+    permission_classes = [IsAuthenticated]
+
+    DRAFTABLE = ('source', 'reference_name', 'reference_phone', 'name', 'phone',
+                 'email', 'pan', 'notes', 'security', 'interest_payout')
+
+    def post(self, request):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        data = request.data
+
+        draft = None
+        if data.get('id'):
+            draft = (_company_filtered(Investor.objects.all(), request)
+                     .filter(pk=data['id'], added_by=request.user, approval_status='draft').first())
+
+        scheme_id = data.get('scheme') or (draft.scheme_id if draft else None)
+        scheme = Scheme.objects.filter(pk=scheme_id).first() if scheme_id else None
+        if not scheme:
+            return Response({'detail': 'Pick a scheme before saving a draft.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if scheme.company_id and scheme.company_id != request.user.company_id and not is_platform_admin(request.user):
+            return Response({'detail': 'Invalid scheme for your company.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        investment_date = _parse_date(data.get('investment_date')) or (
+            draft.investment_date if draft else date.today())
+        fields = {
+            'scheme': scheme,
+            'investment_date': investment_date,
+            'maturity_date': investment_date + relativedelta(months=scheme.tenure_months),
+            # amount_invested is NOT NULL, and a draft is allowed to have no
+            # figure yet — zero stands for "not said", and the submit path makes
+            # it meet the scheme's minimum before anything is committed.
+            'amount_invested': _draft_decimal(data.get('amount_invested'),
+                                              draft.amount_invested if draft else 0),
+            'total_return_pct': _draft_decimal(data.get('total_return_pct'),
+                                               draft.total_return_pct if draft else 0),
+        }
+        for f in self.DRAFTABLE:
+            if f in data:
+                fields[f] = data.get(f) or ''
+            elif draft is not None:
+                fields[f] = getattr(draft, f)
+        fields['interest_payout'] = fields.get('interest_payout') or (
+            scheme.interest_payout_options[0] if scheme.interest_payout_options else 'maturity')
+        fields['source'] = fields.get('source') or 'referral'
+
+        if draft:
+            for k, v in fields.items():
+                setattr(draft, k, v)
+            draft.save()
+        else:
+            draft = Investor.objects.create(
+                company=request.user.company, added_by=request.user,
+                approval_status='draft', **fields)
+        return Response(InvestorListSerializer(draft).data,
+                        status=status.HTTP_200_OK if data.get('id') else status.HTTP_201_CREATED)
+
+
 class InvestorActionView(APIView):
     """Approve / reject a pending investor (approver = that scheme's configured
     investor_approvers, or a real admin — see can_approve_investor)."""
@@ -1048,6 +1157,13 @@ class InvestorActionView(APIView):
         action = request.data.get('action')
         if action not in ('approve', 'reject'):
             return Response({'detail': "action must be 'approve' or 'reject'."}, status=status.HTTP_400_BAD_REQUEST)
+        if investor.approval_status == 'draft':
+            # A draft skipped the completeness checks, so it may have no amount,
+            # no KYC and no signed LOI — and approval is what generates the payout
+            # schedule from those figures. It has to be submitted first.
+            return Response(
+                {'detail': 'This is still a draft. It has to be completed and submitted before it can be approved.'},
+                status=status.HTTP_400_BAD_REQUEST)
         if investor.approval_status != 'pending':
             return Response({'detail': f'Investor is already {investor.approval_status}.'}, status=status.HTTP_400_BAD_REQUEST)
 
