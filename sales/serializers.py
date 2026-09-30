@@ -198,7 +198,8 @@ class PlotSerializer(serializers.ModelSerializer):
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
                   'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
-                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold', 'manual_hold']
+                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold', 'manual_hold',
+                  'is_corner', 'is_clubhouse_facing']
         read_only_fields = ['id', 'project']
 
 

@@ -250,6 +250,10 @@ class Plot(models.Model):
     # opposed to someone mid-way through booking it (In Progress). Only means anything
     # while status is 'hold' and no one's soft pick (held_by) is on it.
     manual_hold = models.BooleanField(default=False)
+    # Kalrav PLC (Premium Location Charge): where the plot sits. Each adds that
+    # project's Rate Master PLC amount (plc_corner / plc_clubhouse) to a booking.
+    is_corner = models.BooleanField(default=False)
+    is_clubhouse_facing = models.BooleanField(default=False)
     size = models.CharField(max_length=100, blank=True)
     construction_area = models.CharField(max_length=100, blank=True)  # sq.ft; auto-maps into booking
     cluster_type = models.CharField(max_length=100, blank=True)
@@ -595,6 +599,10 @@ class Booking(models.Model):
     maint_advance    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     legal_charges    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     premium_location = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    # Kalrav PLC, as charged on this booking (0 = not applied). Their sum is what
+    # premium_location holds for a Kalrav booking, inside the Extra Work Amount.
+    plc_corner       = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    plc_clubhouse    = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     total_extra      = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     discount         = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     final_amount     = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)

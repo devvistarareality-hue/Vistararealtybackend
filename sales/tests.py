@@ -1682,3 +1682,22 @@ class MetaReEnquiryTests(APITestCase):
             got = _create_lead_from_meta(self.fields, self.cfg, 'Oct campaign')
         self.assertNotEqual(got.id, first.id)
         self.assertEqual((got.is_duplicate, got.duplicate_of_id), (True, first.id))
+
+
+class KalravPlcTests(APITestCase):
+    """Kalrav PLC: plots carry Corner / Club House Facing marks; bookings the amounts."""
+
+    def test_plot_marks_and_booking_amounts(self):
+        from sales.serializers import BookingSerializer
+        co = Company.objects.create(code='PLC', name='Plc Co')
+        admin = User.objects.create(email='plc_admin@x.com', company=co, role='Admin', user_code='PL1')
+        proj = Project.objects.create(company=co, name='Kalrav 3', formula_set='kalrav',
+                                      rate_master={'plc_corner_price': 200000, 'plc_clubhouse_price': 150000})
+        plot = Plot.objects.create(project=proj, number='A-1')
+        auth(self.client, admin)
+        res = self.client.patch(f'/api/sales/plots/{plot.id}/', {'is_corner': True, 'is_clubhouse_facing': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual((res.json()['is_corner'], res.json()['is_clubhouse_facing']), (True, True))
+        self.assertEqual(self.client.get(f'/api/sales/projects/{proj.id}/').json()['rate_master']['plc_corner_price'], 200000)
+        self.assertIn('plc_corner', BookingSerializer().fields)
+        self.assertIn('plc_clubhouse', BookingSerializer().fields)
