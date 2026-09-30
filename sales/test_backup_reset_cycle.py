@@ -307,6 +307,30 @@ class ScheduledBackups(APITestCase):
         BackupStamp.objects.filter(pk=stamp.pk).update(taken_at=timezone.now() - timedelta(days=8))
         self.assertTrue(due(sched), 'a week later, due again')
 
+    def test_a_backup_taken_by_hand_does_not_skip_the_night(self):
+        from sales.backup_schedule import due
+        from sales.models import BackupSchedule, BackupStamp
+        sched, _ = BackupSchedule.objects.get_or_create(company=self.co)
+        sched.is_enabled = True
+        sched.frequency = 'daily'
+        sched.save()
+        # Last night's scheduled one, then a "Take one now" this afternoon.
+        night = BackupStamp.objects.create(company=self.co, automatic=True, file_path='night.xlsx')
+        BackupStamp.objects.filter(pk=night.pk).update(taken_at=timezone.now() - timedelta(hours=24))
+        BackupStamp.objects.create(company=self.co, automatic=True, file_path='hand.xlsx', taken_by=self.boss)
+        self.assertTrue(due(sched), 'the manual one must not reset the nightly clock')
+
+    def test_a_daily_backup_is_due_despite_a_few_minutes_drift(self):
+        from sales.backup_schedule import due
+        from sales.models import BackupSchedule, BackupStamp
+        sched, _ = BackupSchedule.objects.get_or_create(company=self.co)
+        sched.is_enabled = True
+        sched.frequency = 'daily'
+        sched.save()
+        stamp = BackupStamp.objects.create(company=self.co, automatic=True, file_path='x.xlsx')
+        BackupStamp.objects.filter(pk=stamp.pk).update(taken_at=timezone.now() - timedelta(hours=23, minutes=50))
+        self.assertTrue(due(sched))
+
     def test_a_disabled_schedule_is_never_due(self):
         from sales.backup_schedule import due
         from sales.models import BackupSchedule

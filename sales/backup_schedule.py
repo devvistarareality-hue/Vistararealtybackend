@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 # How long after the last one a schedule is due again.
 EVERY = {'daily': timedelta(days=1), 'weekly': timedelta(days=7), 'monthly': timedelta(days=30)}
+# The cron only tries in one fixed hour each night, so "exactly 24h since the last
+# one" would let a few minutes' drift push a daily backup out by a whole day.
+SLACK = timedelta(hours=3)
 
 
 def due(schedule, now=None):
@@ -23,14 +26,17 @@ def due(schedule, now=None):
         return False
     from .models import BackupStamp
     now = now or timezone.now()
+    # Only the schedule's own backups (nobody pressed a button: taken_by is empty)
+    # set its clock. A "Take one now" at 4 PM used to count, so the 2 AM run ten
+    # hours later found it "not due" and that night's backup was skipped.
     last = (BackupStamp.objects
-            .filter(company=schedule.company, automatic=True)
+            .filter(company=schedule.company, automatic=True, taken_by__isnull=True)
             .exclude(file_path='')
             .order_by('-taken_at')
             .first())
     if last is None:
         return True
-    return (now - last.taken_at) >= EVERY.get(schedule.frequency, EVERY['weekly'])
+    return (now - last.taken_at) >= EVERY.get(schedule.frequency, EVERY['weekly']) - SLACK
 
 
 def take(schedule, triggered_by=None):
