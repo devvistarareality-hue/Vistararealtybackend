@@ -864,10 +864,21 @@ class StatsView(APIView):
         # the frontend's cp_only param is the normal path but not the only one
         # that can reach this view.
         cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
+        # Dashboard filters. Every tile, the funnel and the recent-leads table all
+        # narrow together — a dashboard where the headline and the list beneath it
+        # answer different questions is worse than one with no filters at all.
+        f_project = request.query_params.get('project_id') or ''
+        f_partner = request.query_params.get('channel_partner_id') or ''
+        f_person  = request.query_params.get('person_id') or ''
+        f_project = f_project if f_project.isdigit() else ''
+        f_partner = f_partner if f_partner.isdigit() else ''
+        f_person  = f_person if f_person.isdigit() else ''
         # The permissions version is in the key so a designation change takes
         # effect at once, instead of at the end of the cache's 20 seconds.
         _pv = permissions_version(getattr(request.user, 'company_id', None))
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}:{_pv}'
+        cache_key = (f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:'
+                     f'{date_to or ""}:{"admin" if admin_view else "own"}:'
+                     f'{"cp" if cp_only else "all"}:{f_project}:{f_partner}:{f_person}:{_pv}')
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -902,7 +913,31 @@ class StatsView(APIView):
             cl_filter  = {'company_id': company_id}
             prj_filter = {'company_id': company_id}
         else:
-            sv_filter = cl_filter = prj_filter = {}
+            # Three separate dicts, deliberately. `a = b = c = {}` binds all three
+            # names to ONE dict, so adding a key for site visits silently added it
+            # to the project filter too — which only became visible once anything
+            # wrote to them individually.
+            sv_filter, cl_filter, prj_filter = {}, {}, {}
+
+        # The dashboard filters, threaded through every pool the tiles count from.
+        if f_project:
+            leads_qs = leads_qs.filter(project_id=f_project)
+            sv_filter['project_id'] = f_project
+            cl_filter['project_id'] = f_project
+            prj_filter['id'] = f_project
+        if f_partner:
+            leads_qs = leads_qs.filter(channel_partner_id=f_partner)
+            sv_filter['lead__channel_partner_id'] = f_partner
+            cl_filter['lead__channel_partner_id'] = f_partner
+        # Whoever is working it, on either side of the hand-off — a CP executive
+        # owns leads as `stm`, a telecaller as `telecaller`, and asking which one
+        # would make the filter useless on a mixed desk. It is a Q rather than a
+        # dict entry because that is an OR, and it is applied to the visit and
+        # closure pools where they are built rather than by pulling every matching
+        # lead id into Python first.
+        person_q = Q(stm_id=f_person) | Q(telecaller_id=f_person) if f_person else None
+        if f_person:
+            leads_qs = leads_qs.filter(person_q)
 
         # Role/company-scoped leads WITHOUT the created_at window — used for the
         # SQL funnel count (leads that *became* warm within the window).
@@ -1117,6 +1152,11 @@ class StatsView(APIView):
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        if person_q is not None:
+            # A closure names its own STM; a site visit inherits the lead's people.
+            cl_scoped = cl_scoped.filter(Q(stm_id=f_person) | Q(lead__telecaller_id=f_person))
+            sv_scoped = sv_scoped.filter(
+                Q(lead__stm_id=f_person) | Q(lead__telecaller_id=f_person))
         # Active projects are the company's projects, not a count of the person's
         # own records: the same number on every dashboard, so "9 here, 11 there,
         # 4 after changing a scope" cannot happen. The only narrowing is a
@@ -3487,6 +3527,17 @@ class TelecallerListView(APIView):
             ).order_by('name')
             if not users.exists():
                 users = sales_qs
+        elif crm_role == 'cp_only':
+            # Strictly the partner desk: CP Executives and CP-designation
+            # Managers, by designation alone.
+            #
+            # Deliberately NOT crm_role='cp' (which falls back to every Sales user
+            # when a company has no CP designations) and NOT 'cp_module' (which
+            # also pulls in admins and any STM who currently owns a CP lead after
+            # a hand-off). Both put STMs on a partner-desk picker, which is
+            # exactly what this exists to avoid.
+            users = sorted((u for u in base_qs if is_cp_designated(u)),
+                           key=lambda u: u.name or '')
         elif crm_role == 'cp_module':
             # Everyone with access to the Channel Partner module — admins/staff/
             # Sales Admin-Modules users, CP Executives and CP-designation Managers
