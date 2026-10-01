@@ -337,17 +337,28 @@ def _may_approve_projects(user):
     return bool(company and user.id in (company.project_approvers or []))
 
 
-def _visible_projects(qs, user):
+def _visible_projects(qs, user, include_unapproved=False):
     """Drop what this person is not meant to see: locked projects, and projects
     still waiting on (or refused) approval.
 
-    Both answer the same question — is this project open for business — so both
-    are hidden from the sales floor the same way, and both stay visible to the
-    people who manage projects so they can act on them.
+    Both answer the same question — is this project open for business.
+
+    `include_unapproved` is opt-in, and only the two screens that ACT on an
+    unapproved project pass it: the Projects list and the Project Approvals
+    queue. Everywhere else — above all the booking flow — an unapproved project
+    is absent for everyone, approvers included.
+
+    Letting approvers see one everywhere was the first version, and it put a
+    project called "testing do not approve" straight into the Booking module for
+    the very person who had not approved it. Seeing a project is not the same as
+    it being open for business; that lesson is already written into the locked
+    blocks above, and it applies here too.
     """
-    if _may_see_locked(user) or _may_approve_projects(user):
-        return qs
-    return qs.filter(is_locked=False, approval_status='approved')
+    if not (include_unapproved and (_may_see_locked(user) or _may_approve_projects(user))):
+        qs = qs.filter(approval_status='approved')
+    if not _may_see_locked(user):
+        qs = qs.filter(is_locked=False)
+    return qs
 
 
 def _existing_lead_for_booking(company, project_id, phone):
@@ -2352,7 +2363,9 @@ class ProjectListView(APIView):
             projects = projects.filter(id__in=pids)
         # A locked project is not pickable, and this endpoint is what every "pick a
         # project" screen calls.
-        projects = _visible_projects(projects, request.user)
+        projects = _visible_projects(
+            projects, request.user,
+            include_unapproved=request.query_params.get('include_unapproved') == '1')
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
@@ -2376,19 +2389,15 @@ class ProjectListView(APIView):
         ser = ProjectSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        # A project is not real until it is signed off. An administrator creating
-        # one approves it in the same breath — asking them to approve their own
-        # creation is ceremony, and they are the people the approval protects
-        # against nobody.
-        auto = _may_approve_projects(request.user)
-        project = ser.save(
-            company=request.user.company, created_by=request.user,
-            approval_status='approved' if auto else 'pending',
-            approved_by=request.user if auto else None,
-            approved_at=timezone.now() if auto else None,
-        )
-        if not auto:
-            _notify_project_approvers(request.user.company, project, request.user)
+        # Every new project waits, whoever created it. An earlier version let an
+        # administrator's own project through on the grounds that asking someone
+        # who may approve to approve their own creation is ceremony — but that
+        # made the gate invisible to the people most likely to be adding
+        # projects, and a project went straight to ACTIVE with nobody having
+        # looked at it. The approval step either applies or it does not.
+        project = ser.save(company=request.user.company, created_by=request.user,
+                           approval_status='pending')
+        _notify_project_approvers(request.user.company, project, request.user)
         _sync_plots(project)
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
@@ -2402,7 +2411,7 @@ class ProjectDetailView(APIView):
             project = _visible_projects(scope_to_company(
                 Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
                 request.user,
-            ), request.user).get(pk=pk)
+            ), request.user, include_unapproved=True).get(pk=pk)
         except Project.DoesNotExist:
             # 404, not 403: a locked project should not confirm it exists.
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
