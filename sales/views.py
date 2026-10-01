@@ -324,9 +324,30 @@ def _may_see_locked(user):
     return _is_hard_admin(user) or _manages_projects(user)
 
 
+def _may_approve_projects(user):
+    """Who signs off a new project.
+
+    The company's configured project_approvers, plus real administrators — a
+    company that has configured nobody must not end up with projects that can
+    never be approved.
+    """
+    if _is_hard_admin(user):
+        return True
+    company = getattr(user, 'company', None)
+    return bool(company and user.id in (company.project_approvers or []))
+
+
 def _visible_projects(qs, user):
-    """Drop locked projects unless this person is allowed to see them."""
-    return qs if _may_see_locked(user) else qs.filter(is_locked=False)
+    """Drop what this person is not meant to see: locked projects, and projects
+    still waiting on (or refused) approval.
+
+    Both answer the same question — is this project open for business — so both
+    are hidden from the sales floor the same way, and both stay visible to the
+    people who manage projects so they can act on them.
+    """
+    if _may_see_locked(user) or _may_approve_projects(user):
+        return qs
+    return qs.filter(is_locked=False, approval_status='approved')
 
 
 def _existing_lead_for_booking(company, project_id, phone):
@@ -370,6 +391,11 @@ def _locked_project_error(request, project_id):
         return None
     if Project.objects.filter(pk=project_id, is_locked=True).exists():
         return Response({'detail': 'This project is locked and cannot be used yet.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    # An unapproved project is not open for business either, and an approver can
+    # see one — so seeing it must not be enough to book against it.
+    if Project.objects.filter(pk=project_id).exclude(approval_status='approved').exists():
+        return Response({'detail': 'This project has not been approved yet and cannot be used.'},
                         status=status.HTTP_403_FORBIDDEN)
     return None
 
@@ -2350,7 +2376,19 @@ class ProjectListView(APIView):
         ser = ProjectSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        project = ser.save(company=request.user.company)
+        # A project is not real until it is signed off. An administrator creating
+        # one approves it in the same breath — asking them to approve their own
+        # creation is ceremony, and they are the people the approval protects
+        # against nobody.
+        auto = _may_approve_projects(request.user)
+        project = ser.save(
+            company=request.user.company, created_by=request.user,
+            approval_status='approved' if auto else 'pending',
+            approved_by=request.user if auto else None,
+            approved_at=timezone.now() if auto else None,
+        )
+        if not auto:
+            _notify_project_approvers(request.user.company, project, request.user)
         _sync_plots(project)
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
@@ -2668,6 +2706,110 @@ class PlotDetailView(APIView):
         # price book or the booking form goes on quoting the old one.
         _resync_generated_price_book(saved, before)
         return Response(PlotSerializer(saved, context={'request': request}).data)
+
+
+def _notify_project_approvers(company, project, creator):
+    """Tell whoever signs off new projects that one is waiting.
+
+    Never lets a notification failure take the creation down with it — the
+    project is already saved by the time this runs, and a push that did not go
+    out is a smaller problem than a 500 on a successful create.
+    """
+    try:
+        from notifications import notify_many
+        ids = (company.project_approvers or []) if company else []
+        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True))
+        if not recipients:
+            return
+        notify_many(recipients, 'project_pending_approval', 'New project needs approval',
+                    '%s created "%s" — it stays hidden until you approve it.'
+                    % (creator.name or creator.user_code, project.name),
+                    data={'project': project.id})
+    except Exception:
+        logger.exception('Could not notify project approvers for project %s', project.id)
+
+
+class ProjectApprovalActionView(APIView):
+    """Approve or reject a project, which is what makes it exist for everyone else.
+
+    Only a configured approver (or a real administrator) may act. Approving sets
+    the project loose: it starts appearing in pickers, on the unit map and in the
+    booking form. Rejecting leaves it invisible with the reason recorded, rather
+    than deleting it — whoever created it should be able to read why and fix it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not _may_approve_projects(request.user):
+            return Response({'detail': 'You are not a configured project approver.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        project = scope_to_company(Project.objects.all(), request.user).filter(pk=pk).first()
+        if not project:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        action = request.data.get('action')
+        if action not in ('approve', 'reject'):
+            return Response({'detail': "action must be 'approve' or 'reject'."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if project.approval_status != 'pending':
+            return Response({'detail': 'This project is already %s.' % project.approval_status},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        project.approval_status = 'approved' if action == 'approve' else 'rejected'
+        project.approved_by = request.user
+        project.approved_at = timezone.now()
+        if action == 'reject':
+            project.rejected_reason = (request.data.get('reason') or '').strip()
+        project.save(update_fields=['approval_status', 'approved_by', 'approved_at',
+                                    'rejected_reason'])
+        from activity.recorder import note
+        note(request, '%s project "%s"' % ('Approved' if action == 'approve' else 'Rejected',
+                                           project.name),
+             action=action, target_type='Project', target_id=str(project.pk), module='Sales')
+        return Response(ProjectSerializer(
+            Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
+        ).data)
+
+
+class ProjectApproversView(APIView):
+    """The company's project approvers — one list, not one per project.
+
+    A project does not exist when it needs approving, so there is nothing to
+    scope the choice to; whoever is named here approves every new project.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _resolve_company(request)
+        if not company:
+            return Response({'approvers': []})
+        ids = company.project_approvers or []
+        people = User.objects.filter(id__in=ids, company=company, is_active=True)
+        return Response({
+            'approvers': ids,
+            'people': [{'id': u.id, 'name': u.name, 'role': u.role} for u in people],
+        })
+
+    def patch(self, request):
+        # Deciding who may authorise a project is an administrative setting, the
+        # same bar the booking-approver picker uses.
+        if not _is_hard_admin(request.user):
+            return Response({'detail': 'Only an administrator can change project approvers.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        if not company:
+            return Response({'detail': 'No company.'}, status=status.HTTP_400_BAD_REQUEST)
+        ids = request.data.get('approvers')
+        if not isinstance(ids, list):
+            return Response({'detail': 'approvers must be a list of user ids.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Only this company's own active people, so an id from elsewhere cannot be
+        # parked in the list.
+        valid = list(User.objects.filter(id__in=[i for i in ids if str(i).isdigit()],
+                                         company=company, is_active=True)
+                     .values_list('id', flat=True))
+        company.project_approvers = valid
+        company.save(update_fields=['project_approvers'])
+        return Response({'approvers': valid})
 
 
 class PlotHoldView(APIView):

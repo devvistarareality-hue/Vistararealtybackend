@@ -38,6 +38,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'is_locked', 'locked_blocks',
+            'approval_status', 'approved_by', 'approved_at', 'rejected_reason', 'created_by',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 

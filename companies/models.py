@@ -17,6 +17,10 @@ class Company(models.Model):
         default=False,
         help_text='Allow this company to generate and open LOI / EOI documents.',
     )
+    # Managers who approve NEW projects. One list for the company, not per
+    # project — a project does not exist yet when it needs approving, so there is
+    # nothing to scope the choice to. Mirrors Project.booking_approvers in shape.
+    project_approvers = models.JSONField(default=list, blank=True)
     created_at  = models.DateTimeField(auto_now_add=True)
 
     class Meta:

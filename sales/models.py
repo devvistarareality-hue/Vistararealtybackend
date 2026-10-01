@@ -172,6 +172,35 @@ class Project(models.Model):
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
+    # ── Approval ─────────────────────────────────────────────────────────────
+    # A new project is not real until someone signs it off. Until then it is
+    # invisible everywhere a locked project is invisible — no pickers, no unit
+    # map, no bookings — because the two questions are the same one: is this
+    # project open for business yet.
+    #
+    # Separate from is_locked all the same. A lock is reversible housekeeping an
+    # admin applies and lifts at will; approval happens once, by a named person,
+    # and says the project was authorised to exist at all.
+    PROJECT_APPROVAL_STATUS = [
+        ('pending', 'Pending'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    # Defaults to 'approved', and the CREATE ENDPOINT sets 'pending' instead.
+    # The gate belongs to the human act of adding a project, not to the column:
+    # defaulting to pending here made every project any other code path creates —
+    # a test fixture, an import, a restore from backup — invisible and
+    # unbookable, which broke 58 tests and would have broken a restore in exactly
+    # the same way, silently.
+    approval_status = models.CharField(max_length=20, choices=PROJECT_APPROVAL_STATUS,
+                                       default='approved')
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='projects_approved')
+    approved_at = models.DateTimeField(null=True, blank=True)
+    rejected_reason = models.TextField(blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='projects_created')
+
     # ── Locking ──────────────────────────────────────────────────────────────
     # A project being set up — units not numbered, prices not signed off, plans not
     # drawn — should not be pickable by the sales floor yet. Locking holds it back

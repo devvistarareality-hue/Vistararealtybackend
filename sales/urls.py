@@ -11,6 +11,8 @@ urlpatterns = [
     path('leads/search/',              views.LeadCompanySearchView.as_view()),
     path('leads/<int:pk>/',            views.LeadDetailView.as_view()),
     path('projects/',                  views.ProjectListView.as_view()),
+    path('projects/approvers/',        views.ProjectApproversView.as_view()),
+    path('projects/<int:pk>/approval/', views.ProjectApprovalActionView.as_view()),
     path('projects/<int:pk>/',         views.ProjectDetailView.as_view()),
     path('leads/backfill-duplicates/', views.BackfillDuplicatesView.as_view()),
     path('sources/',                   views.LeadSourceListView.as_view()),
