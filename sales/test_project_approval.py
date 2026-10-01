@@ -294,3 +294,100 @@ class AnUnapprovedProjectIsAbsentFromTheBookingFlow(TestCase):
         r = self.api.get(f'/api/sales/projects/{self.pending.id}/')
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data['approval_status'], 'pending')
+
+
+class EditingSendsItBackForApproval(TestCase):
+    """An approval is for a set of details, not for a name.
+
+    Without this, a project could be approved once and then quietly edited into
+    a different one — different location, different pricing model, different
+    layout — while staying live on a sign-off nobody gave for it.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='EDT', name='Edit Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@edt.com', company=cls.co, user_code='EDT001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.director = User.objects.create_user(
+            'dir@edt.com', company=cls.co, user_code='EDT002', password='p',
+            name='Director', role='Director', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.rep = User.objects.create_user(
+            'rep@edt.com', company=cls.co, user_code='EDT003', password='p',
+            name='Rep', role='Employee', modules=['Sales'], reporting_manager=cls.admin)
+        cls.co.project_approvers = [cls.director.id]
+        cls.co.save(update_fields=['project_approvers'])
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+        self.api.force_authenticate(user=self.admin)
+        self.project = Project.objects.create(
+            company=self.co, name='Live One', location='Vadodara',
+            approval_status='approved', approved_by=self.director)
+
+    def _patch(self, body):
+        return self.api.patch(f'/api/sales/projects/{self.project.id}/', body, format='json')
+
+    def _status(self):
+        self.project.refresh_from_db()
+        return self.project.approval_status
+
+    # ── edits that send it back ──────────────────────────────────────────────
+    def test_renaming_it_sends_it_back(self):
+        r = self._patch({'name': 'Renamed'})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self._status(), 'pending')
+
+    def test_moving_it_sends_it_back(self):
+        self._patch({'location': 'Somewhere Else'})
+        self.assertEqual(self._status(), 'pending')
+
+    def test_changing_how_it_is_priced_sends_it_back(self):
+        self._patch({'formula_set': 'pratishtha'})
+        self.assertEqual(self._status(), 'pending')
+
+    def test_the_old_approval_is_cleared_not_left_stale(self):
+        self._patch({'name': 'Renamed Again'})
+        self.project.refresh_from_db()
+        self.assertIsNone(self.project.approved_by_id)
+        self.assertIsNone(self.project.approved_at)
+
+    def test_and_it_disappears_from_the_floor_again(self):
+        self._patch({'name': 'Gone Again'})
+        self.api.force_authenticate(user=self.rep)
+        r = self.api.get('/api/sales/projects/')
+        self.assertNotIn('Gone Again', {p['name'] for p in r.data})
+
+    def test_a_rejected_project_edited_is_resubmitted(self):
+        """The fix-and-resubmit loop the rejection reason exists for."""
+        Project.objects.filter(pk=self.project.pk).update(
+            approval_status='rejected', rejected_reason='RERA missing')
+        self._patch({'rera': 'RERA/PNE/2024/001'})
+        self.assertEqual(self._status(), 'pending')
+
+    # ── changes that do not ──────────────────────────────────────────────────
+    def test_deactivating_it_does_not(self):
+        """Active has its own button and its own meaning — a project that is over
+        is not a project awaiting sign-off."""
+        self._patch({'is_active': False})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_locking_it_does_not(self):
+        """Locking is reversible housekeeping an admin applies and lifts at will."""
+        self._patch({'is_locked': True})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_setting_booking_approvers_does_not(self):
+        self._patch({'booking_approvers': [self.director.id]})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_the_bookkeeping_calls_after_a_save_do_not(self):
+        """The save flow PATCHes total_plots and plot_type_plans of its own accord
+        after the real edit; those must not count as a second edit."""
+        self._patch({'total_plots': 40})
+        self.assertEqual(self._status(), 'approved')
+        self._patch({'plot_type_plans': [{'name': 'A'}]})
+        self.assertEqual(self._status(), 'approved')

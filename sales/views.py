@@ -2403,6 +2403,25 @@ class ProjectListView(APIView):
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
 
 
+# Changing one of these does not send a project back for approval. They are
+# operational switches and bookkeeping, not a different project: the Active
+# toggle has its own button, locking is reversible housekeeping, the approver
+# lists are an administrative setting, and total_plots/plot_type_plans are
+# written by follow-up calls the save flow itself makes after the real edit.
+# Everything else — the name, where it is, how it is priced, its layout — is the
+# project, and changing it means the approval that was given was for something
+# else.
+_EDITS_THAT_KEEP_APPROVAL = {
+    'is_active', 'total_plots', 'plot_type_plans', 'is_locked', 'locked_blocks',
+    'booking_approvers', 'cp_booking_approvers',
+    'accounts_booking_approvers', 'accounts_cp_booking_approvers',
+}
+
+
+def _edit_needs_reapproval(data):
+    return bool(set(data or {}) - _EDITS_THAT_KEEP_APPROVAL)
+
+
 class ProjectDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2450,6 +2469,16 @@ class ProjectDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
+        # An edited project goes back for approval: the sign-off that was given
+        # was for a different set of details, and leaving it live would let a
+        # project be approved once and then quietly changed into another one.
+        # A rejected project coming back through here is the fix-and-resubmit
+        # loop working as intended.
+        if _edit_needs_reapproval(request.data) and project.approval_status != 'pending':
+            Project.objects.filter(pk=project.pk).update(
+                approval_status='pending', approved_by=None, approved_at=None)
+            project.refresh_from_db()
+            _notify_project_approvers(request.user.company, project, request.user)
         # _sync_plots intentionally NOT called on PATCH — plots are managed via /plots/bulk/
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data)
