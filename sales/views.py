@@ -2781,12 +2781,25 @@ class ProjectApproversView(APIView):
     def get(self, request):
         company = _resolve_company(request)
         if not company:
-            return Response({'approvers': []})
+            return Response({'approvers': [], 'people': []})
+        # Who can be PICKED: Directors, and only Directors. Authorising a project
+        # to exist is a board-level call, not something to hand to whoever happens
+        # to hold the Projects screen.
+        #
+        # Separate from who CAN approve: _may_approve_projects also lets a real
+        # administrator through, so a company that has named nobody here is not
+        # stuck with projects it can never release. This list is about whom you
+        # deliberately appoint; that is the floor beneath it.
+        #
+        # Returning only the already-selected ids, as this did first, left the
+        # picker with nothing to choose from at all.
+        candidates = list(User.objects.filter(company=company, is_active=True, role='Director')
+                          .only('id', 'name', 'role')
+                          .order_by('name'))
         ids = company.project_approvers or []
-        people = User.objects.filter(id__in=ids, company=company, is_active=True)
         return Response({
             'approvers': ids,
-            'people': [{'id': u.id, 'name': u.name, 'role': u.role} for u in people],
+            'people': [{'id': u.id, 'name': u.name, 'role': u.role} for u in candidates],
         })
 
     def patch(self, request):

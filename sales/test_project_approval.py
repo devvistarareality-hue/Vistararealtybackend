@@ -160,6 +160,53 @@ class ProjectApproval(TestCase):
                            {'approvers': [self.rep.id]}, format='json')
         self.assertEqual(r.status_code, 403)
 
+    def _people(self):
+        self.api.force_authenticate(user=self.admin)
+        r = self.api.get('/api/sales/projects/approvers/')
+        self.assertEqual(r.status_code, 200, r.data)
+        return {p['name'] for p in r.data['people']}
+
+    def test_the_picker_offers_directors(self):
+        """The list to choose FROM, not the list already chosen — returning only
+        the selected ids left the picker with nothing in it."""
+        director = User.objects.create_user(
+            'dir@pap.com', company=self.co, user_code='PAP005', password='p',
+            name='A Director', role='Director', modules=['Sales'])
+        self.assertIn('A Director', self._people())
+
+    def test_it_offers_nobody_else(self):
+        """Authorising a project to exist is a board-level call. Not a manager,
+        not a rep — and not an administrator either, who can already approve
+        without being appointed."""
+        people = self._people()
+        for name in ('Rep', 'Creator', 'Approver', 'Admin'):
+            self.assertNotIn(name, people)
+
+    def test_an_inactive_director_is_not_offered(self):
+        User.objects.create_user(
+            'gone@pap.com', company=self.co, user_code='PAP006', password='p',
+            name='Former Director', role='Director', modules=['Sales'], is_active=False)
+        self.assertNotIn('Former Director', self._people())
+
+    def test_a_director_at_another_company_is_not_offered(self):
+        other = Company.objects.create(code='OT2', name='Other Two', is_active=True)
+        User.objects.create_user(
+            'd@ot2.com', company=other, user_code='OT2001', password='p',
+            name='Their Director', role='Director', modules=['Sales'])
+        self.assertNotIn('Their Director', self._people())
+
+    def test_an_administrator_can_still_approve_without_being_in_the_list(self):
+        """The floor beneath the list: a company that has named nobody must not
+        be stuck with projects it can never release."""
+        self.co.project_approvers = []
+        self.co.save(update_fields=['project_approvers'])
+        self._create(self.creator, 'Nobody Appointed')
+        proj = Project.objects.get(name='Nobody Appointed')
+        self.api.force_authenticate(user=self.admin)
+        r = self.api.post(f'/api/sales/projects/{proj.id}/approval/',
+                          {'action': 'approve'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+
     def test_an_outsider_cannot_be_parked_in_the_list(self):
         other_co = Company.objects.create(code='OTH', name='Other', is_active=True)
         outsider = User.objects.create_user('x@oth.com', company=other_co, user_code='OTH001',
