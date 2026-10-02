@@ -47,7 +47,9 @@ class ARAccount(models.Model):
 
 
 class ARReceipt(models.Model):
-    MODES = [('bank', 'Bank'), ('nbfc', 'NBFC'), ('cash', 'Cash'), ('cheque', 'Cheque')]
+    # New payments are recorded as Loan or NBFC only; Bank / Cash / Cheque stay valid so
+    # receipts entered (or imported) before that keep reading correctly.
+    MODES = [('loan', 'Loan'), ('nbfc', 'NBFC'), ('bank', 'Bank'), ('cash', 'Cash'), ('cheque', 'Cheque')]
     SOURCES = [('manual', 'Entered'), ('import', 'Excel import')]
 
     account = models.ForeignKey(ARAccount, on_delete=models.CASCADE, related_name='receipts')

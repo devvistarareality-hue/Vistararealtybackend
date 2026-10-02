@@ -252,7 +252,7 @@ def _clean_receipt(data, partial=False):
     if 'mode' in data or not partial:
         m = (data.get('mode') or '').lower()
         if m not in MODES:
-            errs['mode'] = 'Mode must be Bank, NBFC, Cash or Cheque.'
+            errs['mode'] = 'Mode must be Loan or NBFC.'
         else:
             out['mode'] = m
     if 'remarks' in data:
@@ -492,7 +492,7 @@ HEADER_ALIASES = {
     'mode': ('mode', 'payment mode'),
     'remarks': ('remarks', 'remark', 'narration'),
 }
-MODE_ALIASES = {'bank': 'bank', 'nbfc': 'nbfc', 'cash': 'cash', 'cheque': 'cheque', 'chq': 'cheque', 'check': 'cheque'}
+MODE_ALIASES = {'loan': 'loan', 'nbfc': 'nbfc', 'bank': 'bank', 'cash': 'cash', 'cheque': 'cheque', 'chq': 'cheque', 'check': 'cheque'}
 
 
 def _norm_plot(v):
@@ -577,7 +577,7 @@ def _check_rows(request, pid, rows):
         elif row['amount'] <= 0:
             reason = 'Amount must be more than zero'
         elif not row['mode']:
-            reason = 'Mode must be Bank, NBFC, Cash or Cheque'
+            reason = 'Mode must be Loan or NBFC'
         elif not acct:
             reason = f"No approved booking for plot {row.get('plot') or '?'} in this project"
         elif acct.status == 'frozen':
@@ -686,7 +686,7 @@ class ARImportTemplateView(APIView):
         for r in range(2, max(n, 2) + 200):
             ws.cell(r, 3).number_format = 'DD/MM/YYYY'
             ws.cell(r, 4).number_format = '#,##,##0'
-        dv = DataValidation(type='list', formula1='"Bank,NBFC,Cash,Cheque"', allow_blank=True)
+        dv = DataValidation(type='list', formula1='"Loan,NBFC"', allow_blank=True)
         ws.add_data_validation(dv)
         dv.add(f'E2:E{max(n, 2) + 200}')
         ws.freeze_panes = 'A2'
@@ -695,7 +695,7 @@ class ARImportTemplateView(APIView):
             f'{project} — receipts template',
             'One row per payment. For a second payment on the same plot, add a row with the same Plot No.',
             'Paid Date: the date the money was received (not in the future).',
-            'Paid: the amount in rupees. Mode: Bank, NBFC, Cash or Cheque.',
+            'Paid: the amount in rupees. Mode: Loan or NBFC.',
             'Leave a plot row blank if nothing was received — blank rows are ignored.',
             'Upload this file on the Import page; you will see a preview before anything is saved.',
         ):
