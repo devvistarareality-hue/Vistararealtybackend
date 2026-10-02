@@ -101,7 +101,6 @@ SCREENS = [
     ('ar.screen.collections', 'Collections', 'AR'),
     ('ar.screen.register', 'Register', 'AR'),
     ('ar.screen.import', 'Import receipts', 'AR'),
-    ('ar.screen.banks', 'Bank Master', 'AR'),
     ('ar.screen.cancellations', 'Cancellations', 'AR'),
     ('club.screen.dashboard', 'Dashboard', 'Club 1000'),
     ('club.screen.leads', 'Leads', 'Club 1000'),
