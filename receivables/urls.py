@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import banks, collections, views
+from . import banks, cancellations, collections, views
 
 urlpatterns = [
     path('accounts/', views.ARRegisterView.as_view()),
@@ -20,6 +20,12 @@ urlpatterns = [
     path('banks/', banks.ARBankListView.as_view()),
     path('banks/<int:pk>/', banks.ARBankView.as_view()),
     path('banks/<int:pk>/statement/', banks.ARBankStatementView.as_view()),
+    path('accounts/<int:pk>/cancellation/', cancellations.ARAccountCancellationView.as_view()),
+    path('cancellations/', cancellations.ARCancellationListView.as_view()),
+    path('cancellations/<int:pk>/decide/', cancellations.ARCancellationDecideView.as_view()),
+    path('cancellations/<int:pk>/refunds/', cancellations.ARRefundCreateView.as_view()),
+    path('cancellations/<int:pk>/letter/', cancellations.ARCancellationLetterView.as_view()),
+    path('refunds/<int:rid>/', cancellations.ARRefundView.as_view()),
     path('import/', views.ARImportView.as_view()),
     path('import/template/', views.ARImportTemplateView.as_view()),
 ]

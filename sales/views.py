@@ -7443,9 +7443,81 @@ class MediaDeleteView(APIView):
         return Response({'ok': True})
 
 
+def can_cancel_closure(user, closure, company):
+    """Who may cancel a sale. Two independent routes: the Sales/CP approver for this
+    project (admin/manager, same authority that approves/rejects it — the owning
+    STM can no longer self-cancel), OR the Accounts approver who signed off on it
+    at that separate stage — undoing either approval is cancelling the same sale,
+    so either side's approver may void it once it's Accounts-approved. Shared with
+    AR's cancellation approval (receivables/cancellations.py)."""
+    booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
+    if _can_approve_accounts_booking(user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
+        return True
+    return is_admin_or_manager(user) and _can_approve_booking(
+        user, closure.project_id, closure.project, closure.lead_id, company, booking_source)
+
+
+def cancel_closure(request, closure, company):
+    """Cancel a sale: frees the plot(s) for Sales straight away, marks the related
+    booking(s) and the closure cancelled, and tells everyone concerned. Used by
+    Sales' own Cancel and by AR's approved cancellations."""
+    # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
+    notif_stm      = closure.stm
+    notif_project  = closure.project
+    notif_unit     = (closure.unit_type + ' ' + (closure.unit_no or '')).strip() or '—'
+    notif_client   = getattr(closure.lead, 'name', None) or closure.client_name or '—'
+    notif_amount   = int(closure.total_amount or 0)
+    notif_extra    = {'closure_id': closure.pk}
+
+    linked_booking = Booking.objects.filter(closure=closure).only('id').first()
+    if linked_booking:
+        notif_extra['booking_id'] = linked_booking.pk
+
+    # A cancellation is a record, not an erasure. The signed LOI stays in storage
+    # and stays linked: it is the evidence of what the buyer agreed to, and
+    # Accounts needs the cancelled deal and its PDF to reconcile against. Deleting
+    # the document left nothing to show the day someone disputes a cancellation,
+    # which is the one day it matters.
+    for b in Booking.objects.filter(closure=closure):
+        _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
+        _release_plots(_pids, booking=b)
+        b.status = 'rejected'
+        b.approval_status = 'CANCELLED'
+        b.cancelled_by = request.user
+        b.cancelled_at = timezone.now()
+        b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at'])
+    if closure.lead_id:
+        Lead.objects.filter(id=closure.lead_id).update(stm_status='')
+    # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
+    # Conversion counts exclude it (see the closure querysets in the dashboards),
+    # so the numbers are unchanged while the row survives for Accounts.
+    closure.status = 'cancelled'
+    closure.save(update_fields=['status'])
+
+    # The rep, the project's Sales/CP approvers and its Accounts approvers all
+    # hear about it, whichever side cancelled.
+    notif_booking = (Booking.objects.filter(closure_id=notif_extra['closure_id'])
+                     .select_related('stm', 'project', 'plot', 'revision_of__stm')
+                     .order_by('-revision_no', '-id').first())
+    if notif_booking:
+        _notify_booking_event(company, notif_booking, 'cancelled', request.user,
+                              'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'), request=request)
+    else:
+        _notify_closure_cancellation(
+            notif_stm, notif_project, company,
+            notif_unit, notif_client, notif_amount,
+            request.user, extra_data=notif_extra,
+        )
+        _notify_accounts_managers(
+            company, 'accounts_booking_cancelled', 'Booking cancelled',
+            f'{notif_client} · {getattr(notif_project, "name", "") or ""} Unit {notif_unit} · ₹{notif_amount} — cancelled by {getattr(request.user, "name", "")}',
+            notif_extra,
+        )
+
+
 class ClosureCancelView(APIView):
-    """Cancel a closure: deletes the closure, frees the plot(s), removes the
-    signed LOI PDFs from Supabase, and marks the related booking(s) cancelled."""
+    """Cancel a closure: frees the plot(s) and marks the related booking(s) and the
+    closure cancelled (see cancel_closure)."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
@@ -7455,76 +7527,12 @@ class ClosureCancelView(APIView):
         if not closure:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         company = _resolve_company(request)
-        # A closure has no Source field of its own — pull it from the booking that
-        # was approved into this closure, if any, so a CP-sourced deal still routes
-        # to the CP approvers at cancel time too.
-        booking_source = Booking.objects.filter(closure_id=closure.pk).values_list('source', flat=True).first()
-        # Two independent routes to cancel authority: the Sales/CP approver for this
-        # project (admin/manager, same authority that approves/rejects it — the owning
-        # STM can no longer self-cancel), OR the Accounts approver who signed off on it
-        # at that separate stage — undoing either approval is cancelling the same sale,
-        # so either side's approver may void it once it's Accounts-approved.
-        is_accounts_approver = _can_approve_accounts_booking(
-            request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source)
-        if not is_accounts_approver:
+        if not can_cancel_closure(request.user, closure, company):
             if not is_admin_or_manager(request.user):
                 return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
-            if not _can_approve_booking(request.user, closure.project_id, closure.project, closure.lead_id, company, booking_source):
-                return Response({'detail': 'You are not a booking approver for this project.'},
-                                status=status.HTTP_403_FORBIDDEN)
-
-        # Extract all notification data BEFORE deletion (closure.pk becomes None after delete).
-        notif_stm      = closure.stm
-        notif_project  = closure.project
-        notif_unit     = (closure.unit_type + ' ' + (closure.unit_no or '')).strip() or '—'
-        notif_client   = getattr(closure.lead, 'name', None) or closure.client_name or '—'
-        notif_amount   = int(closure.total_amount or 0)
-        notif_extra    = {'closure_id': closure.pk}
-
-        linked_booking = Booking.objects.filter(closure=closure).only('id').first()
-        if linked_booking:
-            notif_extra['booking_id'] = linked_booking.pk
-
-        # A cancellation is a record, not an erasure. The signed LOI stays in storage
-        # and stays linked: it is the evidence of what the buyer agreed to, and
-        # Accounts needs the cancelled deal and its PDF to reconcile against. Deleting
-        # the document left nothing to show the day someone disputes a cancellation,
-        # which is the one day it matters.
-        for b in Booking.objects.filter(closure=closure):
-            _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
-            _release_plots(_pids, booking=b)
-            b.status = 'rejected'
-            b.approval_status = 'CANCELLED'
-            b.cancelled_by = request.user
-            b.cancelled_at = timezone.now()
-            b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at'])
-        if closure.lead_id:
-            Lead.objects.filter(id=closure.lead_id).update(stm_status='')
-        # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
-        # Conversion counts exclude it (see the closure querysets in the dashboards),
-        # so the numbers are unchanged while the row survives for Accounts.
-        closure.status = 'cancelled'
-        closure.save(update_fields=['status'])
-
-        # The rep, the project's Sales/CP approvers and its Accounts approvers all
-        # hear about it, whichever side cancelled.
-        notif_booking = (Booking.objects.filter(closure_id=notif_extra['closure_id'])
-                         .select_related('stm', 'project', 'plot', 'revision_of__stm')
-                         .order_by('-revision_no', '-id').first())
-        if notif_booking:
-            _notify_booking_event(company, notif_booking, 'cancelled', request.user,
-                                  'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'), request=request)
-        else:
-            _notify_closure_cancellation(
-                notif_stm, notif_project, company,
-                notif_unit, notif_client, notif_amount,
-                request.user, extra_data=notif_extra,
-            )
-            _notify_accounts_managers(
-                company, 'accounts_booking_cancelled', 'Booking cancelled',
-                f'{notif_client} · {getattr(notif_project, "name", "") or ""} Unit {notif_unit} · ₹{notif_amount} — cancelled by {getattr(request.user, "name", "")}',
-                notif_extra,
-            )
+            return Response({'detail': 'You are not a booking approver for this project.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        cancel_closure(request, closure, company)
         return Response({'detail': 'Closure cancelled.'})
 
 

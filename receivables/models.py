@@ -142,3 +142,60 @@ class ARFollowUp(models.Model):
     class Meta:
         ordering = ['scheduled_at', 'id']
         indexes = [models.Index(fields=['status', 'scheduled_at']), models.Index(fields=['account', 'status'])]
+
+
+class ARCancellation(models.Model):
+    """Cancelling a deal the client stopped paying on.
+
+    AR raises it, an approver (the project's booking or Accounts approver, or an
+    admin) decides it. On approval the plot goes straight back to Sales (the same
+    cancel Sales itself uses), the account freezes, and a cancellation letter with
+    the ledger statement can be issued.
+
+    The amounts are frozen when it is raised — the deal net of stamp duty and
+    registration, what we keep (forfeit_pct of it, capped at what was received),
+    what was received, and the refund — so later changes elsewhere cannot move a
+    settlement already agreed. Refunds are recorded as they are actually paid
+    (ARRefund), possibly in parts, and come out of a Bank Master bank.
+    """
+    STATUS = [('pending', 'Awaiting approval'), ('approved', 'Approved'), ('rejected', 'Rejected')]
+
+    company = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='ar_cancellations')
+    account = models.ForeignKey(ARAccount, on_delete=models.PROTECT, related_name='cancellations')
+    booking = models.ForeignKey('sales.Booking', on_delete=models.PROTECT, related_name='ar_cancellations')
+    status = models.CharField(max_length=10, choices=STATUS, default='pending')
+    reason = EncryptedTextField(blank=True, default='')
+    # Snapshot at request time (encrypted, like every AR amount).
+    deal_net = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)       # total deal − stamp − registration
+    forfeit_pct = models.DecimalField(max_digits=5, decimal_places=2, default=10)
+    forfeit = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)        # what we keep
+    received = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    refund_due = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)     # received − forfeit, never below 0
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = EncryptedTextField(blank=True, default='')
+
+    class Meta:
+        indexes = [models.Index(fields=['company', 'status'])]
+
+    def __str__(self):
+        return f'Cancellation {self.pk} · AR {self.account_id}'
+
+
+class ARRefund(models.Model):
+    """Money actually paid back on an approved cancellation, out of one bank."""
+    cancellation = models.ForeignKey(ARCancellation, on_delete=models.CASCADE, related_name='refunds')
+    bank = models.ForeignKey(ARBank, on_delete=models.PROTECT, related_name='refunds')
+    paid_on = EncryptedDateField()
+    amount = EncryptedDecimalField(max_digits=16, decimal_places=2)
+    reference = EncryptedTextField(blank=True, default='')      # UTR / cheque no.
+    remarks = EncryptedTextField(blank=True, default='')
+    # Soft delete, as with receipts: a removed refund stays in the trail.
+    is_deleted = models.BooleanField(default=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'Refund {self.pk} · cancellation {self.cancellation_id}'

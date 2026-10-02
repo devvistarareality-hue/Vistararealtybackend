@@ -1,0 +1,155 @@
+{% load ar %}<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cancellation - {{ c.client }} - {{ c.project }} {{ c.plots }}</title>
+<style>
+  @page { size: A4; margin: 12mm 0 12mm; }
+  @page :first { margin-top: 0; }
+  :root { --ink: #0f1b2d; --ink2: #3b4a60; --muted: #6b7a90; --line: #e3e9f1; --soft: #f4f7fb;
+          --brand: #1f5490; --brand2: #2f6db5; --good: #177245; --goodbg: #e6f4ec; --bad: #b3261e; --badbg: #fbe9e7; }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: "Inter", -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: var(--ink); font-size: 11px; line-height: 1.55; background: #fff; }
+  .page { padding: 0 16mm 14mm; }
+  .band { background: linear-gradient(120deg, #0f2f57 0%, var(--brand) 55%, var(--brand2) 100%); color: #fff; padding: 11mm 16mm 9mm; position: relative; overflow: hidden; }
+  .band:after { content: ''; position: absolute; right: -40mm; top: -30mm; width: 110mm; height: 110mm; border-radius: 50%; background: rgba(255,255,255,.06); }
+  .band-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; position: relative; z-index: 1; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 44px; height: 44px; border-radius: 12px; background: #fff; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .logo img { width: 100%; height: 100%; object-fit: contain; }
+  .logo span { color: var(--brand); font-weight: 800; font-size: 18px; }
+  .co { font-size: 17px; font-weight: 800; }
+  .co-sub { font-size: 10px; opacity: .75; letter-spacing: .08em; text-transform: uppercase; margin-top: 1px; }
+  .doc { text-align: right; }
+  .doc-title { font-size: 20px; font-weight: 800; }
+  .doc-sub { font-size: 10.5px; opacity: .85; margin-top: 2px; }
+
+  .meta { display: flex; justify-content: space-between; margin: 8mm 0 6mm; color: var(--ink2); }
+  .meta b { color: var(--ink); }
+  .to .label, .label { font-size: 8.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+  .to .name { font-size: 14px; font-weight: 800; margin-top: 2px; }
+  .subject { margin: 6mm 0 4mm; font-weight: 800; font-size: 12px; }
+  .subject span { display: inline-block; border-bottom: 2px solid var(--brand2); padding-bottom: 2px; }
+  p { margin: 0 0 3.5mm; color: var(--ink2); }
+
+  .settle { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 4mm 0 5mm; }
+  .settle td { padding: 7px 12px; border-bottom: 1px solid var(--line); }
+  .settle tr:last-child td { border-bottom: 0; }
+  .settle .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+  .settle .sub td { background: var(--soft); font-weight: 700; }
+  .settle .keep td { color: var(--bad); }
+  .settle .refund td { background: linear-gradient(135deg, var(--brand), var(--brand2)); color: #fff; font-weight: 800; font-size: 12.5px; }
+
+  .sign { margin-top: 12mm; display: flex; justify-content: space-between; align-items: flex-end; }
+  .sign .for { font-weight: 800; }
+  .sign .line { margin-top: 16mm; border-top: 1px solid var(--ink2); width: 60mm; padding-top: 4px; color: var(--muted); font-size: 10px; }
+  .ack { font-size: 10px; color: var(--muted); text-align: right; }
+
+  .break { page-break-before: always; }
+  h2 { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; margin: 14px 0 7px; display: flex; align-items: center; gap: 8px; }
+  h2:before { content: ''; width: 4px; height: 13px; border-radius: 2px; background: var(--brand2); }
+  table.t { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 10px; }
+  table.t th, table.t td { padding: 6px 9px; text-align: left; }
+  table.t th { background: var(--soft); font-size: 8.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); }
+  table.t td { border-bottom: 1px solid var(--line); }
+  table.t tr:last-child td { border-bottom: 0; }
+  table.t .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .credit { color: var(--good); font-weight: 700; }
+  .empty { color: var(--muted); text-align: center; padding: 10px; }
+  .foot { margin-top: 8mm; font-size: 9px; color: var(--muted); text-align: center; }
+  tr, .settle { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+  <div class="band">
+    <div class="band-row">
+      <div class="brand">
+        <div class="logo">{% if company.logo_url %}<img src="{{ company.logo_url }}" alt="">{% else %}<span>{{ company.name|slice:":1" }}</span>{% endif %}</div>
+        <div><div class="co">{{ company.name }}</div><div class="co-sub">Accounts Receivable</div></div>
+      </div>
+      <div class="doc"><div class="doc-title">Cancellation of Booking</div><div class="doc-sub">Ref {{ letter_no }} · {{ date }}</div></div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="meta">
+      <div class="to">
+        <div class="label">To</div>
+        <div class="name">{{ c.client|default:"—" }}</div>
+        {% if c.phone %}<div>Phone: {{ c.phone }}</div>{% endif %}
+      </div>
+      <div style="text-align:right">
+        <div><b>Ref:</b> {{ letter_no }}</div>
+        <div><b>Date:</b> {{ date }}</div>
+      </div>
+    </div>
+
+    <div class="subject"><span>Subject: Cancellation of your booking of Plot {{ c.plots }}, {{ c.project }}</span></div>
+
+    <p>Dear {{ c.client|default:"Sir / Madam" }},</p>
+    <p>This refers to your booking of <b>Plot {{ c.plots }}</b> in <b>{{ c.project }}</b>, booked on {{ booked }}.
+      The installments under the agreed payment schedule have remained unpaid{% if followups %} despite {{ followups }} follow-up{{ followups|pluralize }} from our side{% endif %},
+      as shown in the statement of account attached to this letter.</p>
+    <p>We regret to inform you that your booking stands <b>cancelled with effect from {{ date }}</b>, and the plot has been released.
+      As per the terms of booking, {{ c.forfeit_pct|floatformat:"-2" }}% of the deal value (net of stamp duty and registration) is retained,
+      and the balance of the amount received from you is refundable, as worked out below.</p>
+
+    <table class="settle">
+      <tr><td>Total deal value</td><td class="num">{{ total_deal|inr }}</td></tr>
+      <tr><td>Less: stamp duty</td><td class="num">{{ stamp|inr }}</td></tr>
+      <tr><td>Less: registration</td><td class="num">{{ reg|inr }}</td></tr>
+      <tr class="sub"><td>Deal value (net of stamp duty &amp; registration)</td><td class="num">{{ c.deal_net|inr }}</td></tr>
+      <tr><td>Amount received from you</td><td class="num">{{ c.received|inr }}</td></tr>
+      <tr class="keep"><td>Less: retained ({{ c.forfeit_pct|floatformat:"-2" }}% of deal value, up to the amount received)</td><td class="num">− {{ c.forfeit|inr }}</td></tr>
+      <tr class="refund"><td>Amount refundable to you</td><td class="num">{{ c.refund_due|inr }}</td></tr>
+      {% if refunds %}<tr><td>Refunded so far</td><td class="num">{{ c.refunded|inr }}</td></tr>
+      <tr class="sub"><td>Balance refundable</td><td class="num">{{ c.refund_balance|inr }}</td></tr>{% endif %}
+    </table>
+
+    {% if c.refund_due > 0 %}
+      <p>The refundable amount {% if refunds %}has been / {% endif %}will be paid to you by bank transfer or cheque. Please share your bank details
+        and the original booking documents with our office to complete the refund.</p>
+    {% else %}
+      <p>As the amount received does not exceed the retained amount, no refund is due.</p>
+    {% endif %}
+    <p>For any clarification, please contact our accounts office.</p>
+
+    <div class="sign">
+      <div>
+        <div>Yours faithfully,</div>
+        <div class="for">For {{ company.name }}</div>
+        <div class="line">Authorised Signatory</div>
+      </div>
+      <div class="ack">Enclosed: Statement of account</div>
+    </div>
+
+    <div class="break"></div>
+    <h2>Statement of account — Plot {{ c.plots }}, {{ c.project }}</h2>
+    <table class="t">
+      <thead><tr><th>#</th><th>Installment</th><th>Due</th><th class="num">Amount</th><th class="num">Paid</th><th class="num">Pending</th></tr></thead>
+      <tbody>{% for p in plan %}
+        <tr><td>{{ p.no }}</td><td>{{ p.label }}</td><td>{{ p.due }}</td><td class="num">{{ p.amount|inr }}</td><td class="num credit">{{ p.paid|inr }}</td><td class="num">{{ p.pending|inr }}</td></tr>
+      {% empty %}<tr><td colspan="6" class="empty">No payment schedule on the booking.</td></tr>{% endfor %}</tbody>
+    </table>
+
+    <h2>Payments received</h2>
+    <table class="t">
+      <thead><tr><th>Date</th><th>Mode</th><th class="num">Amount</th></tr></thead>
+      <tbody>{% for x in receipts %}
+        <tr><td>{{ x.date }}</td><td>{{ x.mode }}</td><td class="num credit">{{ x.amount|inr }}</td></tr>
+      {% empty %}<tr><td colspan="3" class="empty">No payments received.</td></tr>{% endfor %}</tbody>
+    </table>
+
+    {% if refunds %}
+    <h2>Refunds paid</h2>
+    <table class="t">
+      <thead><tr><th>Date</th><th>Reference</th><th class="num">Amount</th></tr></thead>
+      <tbody>{% for x in refunds %}
+        <tr><td>{{ x.date }}</td><td>{{ x.reference|default:"—" }}</td><td class="num">{{ x.amount|inr }}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+    {% endif %}
+
+    <div class="foot">Generated {{ generated }} · {{ company.name }}</div>
+  </div>
+</body></html>

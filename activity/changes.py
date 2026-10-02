@@ -27,7 +27,7 @@ TYPE_OF = {
     'lead': 'lead', 'followup': 'follow-up', 'sitevisit': 'site-visit', 'booking': 'booking',
     'closure': 'closure', 'plot': 'plot', 'project': 'project', 'leadsource': 'source',
     'channelpartner': 'channel-partner', 'user': 'user', 'leadtransfer': 'lead-transfer',
-    'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account', 'arbank': 'ar_bank',
+    'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account', 'arbank': 'ar_bank', 'arcancellation': 'ar_account', 'arrefund': 'ar_account',
     'investor': 'investor', 'payout': 'payout', 'referralreward': 'referral-reward', 'scheme': 'scheme',
     'leaveapplication': 'leave',
     'designation': 'designation', 'dashboarddefinition': 'dashboard',
@@ -88,8 +88,10 @@ def record_label(obj):
             return '%s Plot %s' % (obj.project.name if obj.project_id else '', obj.number)
         if name in ('araccount',):
             return record_label(obj.booking)
-        if name in ('arreceipt', 'arfollowup'):
+        if name in ('arreceipt', 'arfollowup', 'arcancellation'):
             return record_label(obj.account.booking)
+        if name == 'arrefund':
+            return record_label(obj.cancellation.booking)
         for attr in ('name', 'client_name', 'title', 'number', 'email'):
             v = getattr(obj, attr, None)
             if v:

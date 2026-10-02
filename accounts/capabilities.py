@@ -41,6 +41,10 @@ CAPABILITIES = [
      'Decides when interest starts on that line.'),
     ('ar.bank.manage', 'Manage banks', 'AR',
      'Add, edit or retire the banks Loan payments are received into.'),
+    ('ar.cancel.request', 'Raise plot cancellations', 'AR',
+     'Ask for a non-paying client\'s plot to be cancelled; an approver decides.'),
+    ('ar.refund.record', 'Record cancellation refunds', 'AR',
+     'Enter a refund paid back on an approved cancellation, from a bank.'),
     ('club.investor.manage', 'Add and edit investors', 'Club 1000',
      'Create an investor, revise, renew or redeem.'),
     ('club.payout.mark_paid', 'Mark payouts and rewards paid', 'Club 1000',
@@ -98,6 +102,7 @@ SCREENS = [
     ('ar.screen.register', 'Register', 'AR'),
     ('ar.screen.import', 'Import receipts', 'AR'),
     ('ar.screen.banks', 'Bank Master', 'AR'),
+    ('ar.screen.cancellations', 'Cancellations', 'AR'),
     ('club.screen.dashboard', 'Dashboard', 'Club 1000'),
     ('club.screen.leads', 'Leads', 'Club 1000'),
     ('club.screen.followups', 'Follow-Ups', 'Club 1000'),
@@ -179,7 +184,7 @@ DASHBOARD_KEYS = [d[0] for d in DASHBOARDS]
 # module could already do them. Ticking stays with the company to remove.
 DEFAULT_ON = [
     'ar.receipt.record', 'ar.receipt.edit', 'ar.import.run', 'ar.followup.manage',
-    'ar.legal_date.set', 'ar.bank.manage', 'club.investor.manage', 'club.payout.mark_paid',
+    'ar.legal_date.set', 'ar.bank.manage', 'ar.cancel.request', 'ar.refund.record', 'club.investor.manage', 'club.payout.mark_paid',
 ]
 CAPABILITY_KEYS = [c[0] for c in CAPABILITIES]
 

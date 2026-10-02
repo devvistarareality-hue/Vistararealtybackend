@@ -1,7 +1,7 @@
 """Bank Master: the company's own bank accounts that Loan payments are received into.
 
 A bank's balance is its opening balance plus every live (not deleted) Loan receipt
-recorded against it. Amounts are encrypted at rest, so the sum is taken in Python
+recorded against it, less every live refund paid out of it on a cancellation. Amounts are encrypted at rest, so the sum is taken in Python
 rather than in SQL — the same as everywhere else in AR.
 """
 from decimal import Decimal, InvalidOperation
@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from accounts.permissions import is_platform_admin, scope_to_company
 from companies.models import Company
 from .engine import rupees
-from .models import ARBank, ARReceipt
+from .models import ARBank, ARReceipt, ARRefund
 from .permissions import ar_can, has_ar_access
 from .services import _d, parse_date
 
@@ -66,13 +66,27 @@ def _received_by_bank(bank_ids):
     return totals
 
 
-def bank_row(b, received):
+def _paid_out_by_bank(bank_ids):
+    """Sum of live cancellation refunds per bank."""
+    totals = {b: ZERO for b in bank_ids}
+    for bid, amount in ARRefund.objects.filter(bank_id__in=bank_ids, is_deleted=False).values_list('bank_id', 'amount'):
+        totals[bid] = totals.get(bid, ZERO) + _d(amount)
+    return totals
+
+
+def bank_row(b, received, paid_out=ZERO):
     opening = _d(b.opening_balance)
     return {
         'id': b.id, 'name': b.name, 'account_no': b.account_no or '', 'is_active': b.is_active,
-        'opening_balance': rupees(opening), 'received': rupees(received),
-        'balance': rupees(opening + received),
+        'opening_balance': rupees(opening), 'received': rupees(received), 'paid_out': rupees(paid_out),
+        'balance': rupees(opening + received - paid_out),
     }
+
+
+def bank_rows(banks):
+    ids = [b.id for b in banks]
+    rec, out = _received_by_bank(ids), _paid_out_by_bank(ids)
+    return {b.id: bank_row(b, rec.get(b.id, ZERO), out.get(b.id, ZERO)) for b in banks}
 
 
 def _clean(data, partial=False):
@@ -118,8 +132,8 @@ class ARBankListView(APIView):
         if not has_ar_access(request.user):
             return _deny()
         banks = list(banks_qs(request))
-        totals = _received_by_bank([b.id for b in banks])
-        rows = sorted((bank_row(b, totals.get(b.id, ZERO)) for b in banks),
+        by_id = bank_rows(banks)
+        rows = sorted(by_id.values(),
                       key=lambda r: (not r['is_active'], r['name'].lower()))
         return Response({'results': rows, 'can_manage': ar_can(request.user, 'ar.bank.manage')})
 
@@ -160,7 +174,7 @@ class ARBankView(APIView):
             setattr(b, k, v)
         b.save()
         _log(request, 'Edited bank %s' % b.name, 'updated', b.id)
-        return Response(bank_row(b, _received_by_bank([b.id]).get(b.id, ZERO)))
+        return Response(bank_rows([b])[b.id])
 
     def delete(self, request, pk):
         if not ar_can(request.user, 'ar.bank.manage'):
@@ -171,7 +185,7 @@ class ARBankView(APIView):
         # A bank that has money recorded against it is retired, so those receipts
         # keep their bank; one never used is removed outright.
         with transaction.atomic():
-            if ARReceipt.objects.filter(bank=b).exists():
+            if ARReceipt.objects.filter(bank=b).exists() or ARRefund.objects.filter(bank=b).exists():
                 b.is_active = False
                 b.save(update_fields=['is_active', 'updated_at'])
                 _log(request, 'Retired bank %s (it has receipts)' % b.name, 'updated', b.id)
@@ -197,39 +211,47 @@ class ARBankStatementView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         d_from = parse_date(request.query_params.get('from'))
         d_to = parse_date(request.query_params.get('to'))
-        receipts = sorted(
-            ARReceipt.objects.filter(bank=b, is_deleted=False)
-            .select_related('account__booking__project', 'account__booking__plot', 'created_by'),
-            key=lambda x: (x.paid_on, x.id))
+        # Money in (Loan receipts) and money out (cancellation refunds), one ledger.
+        entries = [('in', x) for x in ARReceipt.objects.filter(bank=b, is_deleted=False)
+                   .select_related('account__booking__project', 'account__booking__plot', 'created_by')]
+        entries += [('out', x) for x in ARRefund.objects.filter(bank=b, is_deleted=False)
+                    .select_related('cancellation__booking__project', 'cancellation__booking__plot', 'created_by')]
+        entries.sort(key=lambda e: (e[1].paid_on, e[0] == 'out', e[1].id))
         opening = _d(b.opening_balance)
         brought = opening
-        rows, total_in = [], ZERO
-        for x in receipts:
+        rows, total_in, total_out = [], ZERO, ZERO
+        for kind, x in entries:
             amt = _d(x.amount)
+            signed = amt if kind == 'in' else -amt
             if d_from and x.paid_on < d_from:
-                brought += amt
+                brought += signed
                 continue
             if d_to and x.paid_on > d_to:
                 continue
-            total_in += amt
-            bk = x.account.booking
+            if kind == 'in':
+                total_in += amt
+                bk, account_id, note = x.account.booking, x.account_id, x.remarks or ''
+            else:
+                total_out += amt
+                bk, account_id = x.cancellation.booking, x.cancellation.account_id
+                note = ' · '.join(v for v in ('Cancellation refund', x.reference, x.remarks) if v)
             rows.append({
-                'id': x.id, 'account_id': x.account_id, 'date': x.paid_on.isoformat(),
+                'id': f'{kind}-{x.id}', 'kind': kind, 'account_id': account_id, 'date': x.paid_on.isoformat(),
                 'client': bk.client_name or '', 'project': bk.project.name if bk.project_id else '',
                 'plots': bk.plot_numbers or (bk.plot.number if bk.plot_id else ''),
-                'remarks': x.remarks or '', 'source': x.source,
-                'recorded_by': x.created_by.name if x.created_by_id else '',
-                'amount': rupees(amt), 'balance': rupees(brought + total_in),
+                'remarks': note, 'recorded_by': x.created_by.name if x.created_by_id else '',
+                'amount': rupees(amt), 'balance': rupees(brought + total_in - total_out),
             })
         return Response({
-            'bank': bank_row(b, _received_by_bank([b.id]).get(b.id, ZERO)),
+            'bank': bank_rows([b])[b.id],
             'from': d_from.isoformat() if d_from else None, 'to': d_to.isoformat() if d_to else None,
             'opening_balance': rupees(opening),
             # Opening plus everything received before the range; equals opening when
             # there is no from-date.
             'brought_forward': rupees(brought),
             'total_in': rupees(total_in),
-            'closing_balance': rupees(brought + total_in),
+            'total_out': rupees(total_out),
+            'closing_balance': rupees(brought + total_in - total_out),
             'rows': rows,
         })
 
