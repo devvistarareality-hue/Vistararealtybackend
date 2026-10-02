@@ -35,12 +35,14 @@ def _resolve_company(request):
         return Company.objects.filter(pk=cid).first() or request.user.company
     return request.user.company
 from .models import (
+    PartnerFollowUp, PartnerSiteVisit,
     Lead, LeadSource, Project, Plot, FollowUp, SiteVisit, Closure, LeadStatusHistory,
     DistributionSettings, UserAvailability, UserDistributionWeight, DistributionLog,
     SalesTeamMember, MetaWebhookConfig, MetaFormMapping,
     UserProjectAssignment, Booking, LeadTransfer, ChannelPartner, SV_OUTCOME,
 )
 from .serializers import (
+    PartnerFollowUpSerializer, PartnerSiteVisitSerializer,
     LeadListSerializer, LeadDetailSerializer, LeadCreateSerializer, LeadUpdateSerializer,
     LeadSourceSerializer, ProjectSerializer, PlotSerializer,
     FollowUpSerializer, SiteVisitSerializer, ClosureSerializer,
@@ -2839,6 +2841,182 @@ def _notify_project_approvers(company, project, creator):
         logger.exception('Could not notify project approvers for project %s', project.id)
 
 
+class PartnerFollowUpListCreateView(APIView):
+    """Follow-ups with channel partners themselves, not with their leads.
+
+    One flat list rather than a nested route, so the same endpoint serves both
+    the partner's own page (?channel_partner_id=) and the CP module's Follow-Ups
+    screen, where partner rows sit alongside lead ones.
+
+    Scoped through channel_partner__company — the partner is the thing that
+    belongs to a company here, since there is no lead to scope through.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        qs = scope_to_company(
+            PartnerFollowUp.objects.select_related(
+                'channel_partner', 'assigned_to', 'created_by'),
+            request.user, 'channel_partner__company')
+        cp_id = request.query_params.get('channel_partner_id')
+        if cp_id and str(cp_id).isdigit():
+            qs = qs.filter(channel_partner_id=cp_id)
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('assigned_to'):
+            qs = qs.filter(assigned_to_id=request.query_params['assigned_to'])
+        if request.query_params.get('date_from'):
+            qs = qs.filter(scheduled_at__date__gte=request.query_params['date_from'])
+        if request.query_params.get('date_to'):
+            qs = qs.filter(scheduled_at__date__lte=request.query_params['date_to'])
+        return Response(PartnerFollowUpSerializer(qs[:500], many=True).data)
+
+    def post(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        err = _partner_in_scope(request, request.data.get('channel_partner'))
+        if err:
+            return err
+        refs_err = _refs_error(request, request.data, {'assigned_to': (User, 'company')})
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+        ser = PartnerFollowUpSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        obj = ser.save(created_by=request.user,
+                       assigned_to=ser.validated_data.get('assigned_to') or request.user)
+        return Response(PartnerFollowUpSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+
+class PartnerFollowUpDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        obj = scope_to_company(PartnerFollowUp.objects.all(), request.user,
+                               'channel_partner__company').filter(pk=pk).first()
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        ser = PartnerFollowUpSerializer(obj, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Marking one done stamps the time, so "completed" and "when" cannot drift.
+        if request.data.get('status') == 'completed' and not obj.completed_at:
+            ser.save(completed_at=timezone.now())
+        else:
+            ser.save()
+        return Response(PartnerFollowUpSerializer(obj).data)
+
+    def delete(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        obj = scope_to_company(PartnerFollowUp.objects.all(), request.user,
+                               'channel_partner__company').filter(pk=pk).first()
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PartnerSiteVisitListCreateView(APIView):
+    """Site visits taken by a channel partner. No hot/warm/cold outcome: a
+    partner is a continuing relationship, not a lead being qualified."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        qs = scope_to_company(
+            PartnerSiteVisit.objects.select_related(
+                'channel_partner', 'project', 'host', 'created_by'),
+            request.user, 'channel_partner__company')
+        cp_id = request.query_params.get('channel_partner_id')
+        if cp_id and str(cp_id).isdigit():
+            qs = qs.filter(channel_partner_id=cp_id)
+        if request.query_params.get('status'):
+            qs = qs.filter(status=request.query_params['status'])
+        if request.query_params.get('project_id'):
+            qs = qs.filter(project_id=request.query_params['project_id'])
+        if request.query_params.get('date_from'):
+            qs = qs.filter(scheduled_at__date__gte=request.query_params['date_from'])
+        if request.query_params.get('date_to'):
+            qs = qs.filter(scheduled_at__date__lte=request.query_params['date_to'])
+        return Response(PartnerSiteVisitSerializer(qs[:500], many=True).data)
+
+    def post(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        err = _partner_in_scope(request, request.data.get('channel_partner'))
+        if err:
+            return err
+        refs_err = _refs_error(request, request.data, {
+            'project': (Project, 'company'), 'host': (User, 'company'),
+        })
+        if refs_err:
+            return Response({'detail': refs_err}, status=status.HTTP_403_FORBIDDEN)
+        ser = PartnerSiteVisitSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        obj = ser.save(created_by=request.user,
+                       host=ser.validated_data.get('host') or request.user)
+        return Response(PartnerSiteVisitSerializer(obj).data, status=status.HTTP_201_CREATED)
+
+
+class PartnerSiteVisitDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        obj = scope_to_company(PartnerSiteVisit.objects.all(), request.user,
+                               'channel_partner__company').filter(pk=pk).first()
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        ser = PartnerSiteVisitSerializer(obj, data=request.data, partial=True)
+        if not ser.is_valid():
+            return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        if request.data.get('status') == 'completed' and not obj.visited_at:
+            ser.save(visited_at=timezone.now())
+        else:
+            ser.save()
+        return Response(PartnerSiteVisitSerializer(obj).data)
+
+    def delete(self, request, pk):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        obj = scope_to_company(PartnerSiteVisit.objects.all(), request.user,
+                               'channel_partner__company').filter(pk=pk).first()
+        if not obj:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _partner_in_scope(request, partner_id):
+    """The partner must belong to the caller's company — otherwise a follow-up
+    could be hung off another company's partner by id alone."""
+    if not partner_id:
+        return Response({'detail': 'channel_partner is required.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    exists = scope_to_company(ChannelPartner.objects.all(), request.user).filter(
+        pk=partner_id).exists()
+    if not exists:
+        return Response({'detail': 'Unknown channel partner.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 class ProjectApprovalActionView(APIView):
     """Approve or reject a project, which is what makes it exist for everyone else.
 
@@ -3191,7 +3369,14 @@ class ChannelPartnerListCreateView(APIView):
         # rather than typing it freehand. Mirrors LeadSourceListView.get, which
         # is similarly unrestricted; only creating/editing/deleting entries
         # (below) stays admin/CP-manager only.
-        qs = scope_to_company(ChannelPartner.objects.all(), request.user).annotate(lead_count=Count('leads'))
+        # distinct=True on all three: three joins in one annotate multiply each
+        # other's rows, so a partner with 3 leads and 2 visits would otherwise
+        # report 6 of each.
+        qs = scope_to_company(ChannelPartner.objects.all(), request.user).annotate(
+            lead_count=Count('leads', distinct=True),
+            follow_up_count=Count('follow_ups', distinct=True),
+            site_visit_count=Count('site_visits', distinct=True),
+        )
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(company_id=request.query_params['company_id'])
         if request.query_params.get('category'):
