@@ -16,7 +16,7 @@ from accounts.permissions import is_platform_admin, scope_to_company
 from companies.models import Company
 from .engine import rupees
 from .models import ARBank, ARReceipt, ARRefund
-from .permissions import ar_can, has_ar_access
+from .permissions import can_manage_banks, has_finance_access
 from .services import _d, parse_date
 
 ZERO = Decimal('0')
@@ -129,16 +129,16 @@ class ARBankListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not has_ar_access(request.user):
+        if not has_finance_access(request.user):
             return _deny()
         banks = list(banks_qs(request))
         by_id = bank_rows(banks)
         rows = sorted(by_id.values(),
                       key=lambda r: (not r['is_active'], r['name'].lower()))
-        return Response({'results': rows, 'can_manage': ar_can(request.user, 'ar.bank.manage')})
+        return Response({'results': rows, 'can_manage': can_manage_banks(request.user)})
 
     def post(self, request):
-        if not ar_can(request.user, 'ar.bank.manage'):
+        if not can_manage_banks(request.user):
             return _deny('You cannot manage banks.')
         company = _company_for_create(request)
         if not company:
@@ -160,7 +160,7 @@ class ARBankView(APIView):
         return banks_qs(request).filter(pk=pk).first()
 
     def patch(self, request, pk):
-        if not ar_can(request.user, 'ar.bank.manage'):
+        if not can_manage_banks(request.user):
             return _deny('You cannot manage banks.')
         b = self._get(request, pk)
         if not b:
@@ -177,7 +177,7 @@ class ARBankView(APIView):
         return Response(bank_rows([b])[b.id])
 
     def delete(self, request, pk):
-        if not ar_can(request.user, 'ar.bank.manage'):
+        if not can_manage_banks(request.user):
             return _deny('You cannot manage banks.')
         b = self._get(request, pk)
         if not b:
@@ -204,7 +204,7 @@ class ARBankStatementView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        if not has_ar_access(request.user):
+        if not has_finance_access(request.user):
             return _deny()
         b = banks_qs(request).filter(pk=pk).first()
         if not b:

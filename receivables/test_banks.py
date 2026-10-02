@@ -117,3 +117,16 @@ class ARBankTests(TestCase):
         theirs = ARBank.objects.create(company=self.other, name='Their Bank')
         self.assertEqual(self.api.get(f'/api/ar/banks/{theirs.id}/statement/').status_code, 404)
 
+    def test_accounts_and_finance_users_reach_bank_master(self):
+        fin = User.objects.create_user('fin@test.local', company=self.co, user_code='FN1', password='x', name='Fin',
+                                       role='Employee', modules=['Accounts & Finance'])
+        sales = User.objects.create_user('sl@test.local', company=self.co, user_code='SL1', password='x', name='S',
+                                         role='Employee', modules=['Sales'])
+        bid = self.add_bank('HDFC', '0')
+        c = APIClient(); c.force_authenticate(fin)
+        self.assertEqual(c.get('/api/ar/banks/').status_code, 200)
+        self.assertEqual(c.get(f'/api/ar/banks/{bid}/statement/').status_code, 200)
+        self.assertEqual(c.post('/api/ar/banks/', {'name': 'SBI', 'opening_balance': '0'}, format='json').status_code, 201)
+        c.force_authenticate(sales)
+        self.assertEqual(c.get('/api/ar/banks/').status_code, 403, 'outside the department, no banks')
+

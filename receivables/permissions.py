@@ -23,3 +23,24 @@ def ar_can(user, key):
     AR module, nothing here applies."""
     from accounts.capabilities import user_can
     return has_ar_access(user) and user_can(user, key)
+
+
+FINANCE_MODULE = 'Accounts & Finance'
+
+
+def has_finance_access(user):
+    """Bank Master belongs to the Accounts & Finance department — shared by AR now
+    and Accounts Payable next — so the Accounts & Finance module opens it as well
+    as AR does."""
+    if has_ar_access(user):
+        return True
+    if not (user and user.is_authenticated):
+        return False
+    return bool(FINANCE_MODULE in (user.modules or []) or FINANCE_MODULE in (user.manager_modules or [])
+                or FINANCE_MODULE in (user.admin_modules or []))
+
+
+def can_manage_banks(user):
+    from accounts.capabilities import user_can
+    return has_finance_access(user) and user_can(user, 'ar.bank.manage')
+
