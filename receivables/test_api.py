@@ -416,3 +416,19 @@ class ARBookingAndLoiTests(TestCase):
         c = APIClient(); c.force_authenticate(other)
         self.assertEqual(c.get(f'/api/ar/accounts/{self.aid}/booking/').status_code, 403)
         self.assertEqual(c.get(f'/api/ar/accounts/{self.aid}/loi-url/').status_code, 403)
+
+
+class ARProjectWiseDashboardTests(TestCase):
+    def test_project_breakdown_adds_up_to_the_totals(self):
+        co = Company.objects.create(code='PW', name='PW')
+        user = User.objects.create_user('pw@test.local', company=co, user_code='PW1', password='x', name='P',
+                                        role='Employee', modules=['AR'])
+        a, b = Project.objects.create(company=co, name='Kalrav'), Project.objects.create(company=co, name='Tundav')
+        make_booking(co, a, plot='1'); make_booking(co, a, plot='2', phone='9000000002'); make_booking(co, b, plot='7', phone='9000000003')
+        api = APIClient(); api.force_authenticate(user)
+        d = api.get('/api/ar/dashboard/').json()
+        self.assertEqual({p['name']: p['accounts'] for p in d['by_project']}, {'Kalrav': 2, 'Tundav': 1})
+        for k in ('collectable', 'outstanding', 'overdue', 'os_with_interest'):
+            self.assertEqual(sum(p['totals'][k] for p in d['by_project']), d['totals'][k], k)
+        self.assertEqual(sum(sum(p['ageing'].values()) for p in d['by_project']), sum(d['ageing'].values()))
+

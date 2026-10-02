@@ -389,9 +389,23 @@ class ARDashboardView(APIView):
         ageing = {label: ZERO for label, _, _ in AGEING_BUCKETS}
         forecast, order, rows = {}, [], []
         issues = {'no_schedule': 0, 'plan_mismatch': 0, 'bad_dates': 0}
+        # The same figures, per project — the dashboard's Project-wise view. Summed
+        # from the very accounts the totals above are, so the two always agree.
+        by_project = {}
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
+            pid = acct.booking.project_id
+            bp = by_project.get(pid)
+            if bp is None:
+                bp = by_project[pid] = {'totals': {k: ZERO for k in totals}, 'ageing': {label: ZERO for label, _, _ in AGEING_BUCKETS},
+                                        'accounts': 0, 'overdue_accounts': 0}
+            bp['accounts'] += 1
+            bp['overdue_accounts'] += 1 if r.overdue > 0 else 0
+            for k in totals:
+                bp['totals'][k] += getattr(r, k)
+            for k, v in r.ageing.items():
+                bp['ageing'][k] = bp['ageing'].get(k, ZERO) + v
             for k, v in r.ageing.items():
                 ageing[k] += v
             for lbl, v in r.month_forecast:
@@ -424,6 +438,13 @@ class ARDashboardView(APIView):
             'top_overdue': [brief(sm, sm['overdue']) for sm, _ in top_overdue],
             'top_over_180': [brief(sm, v) for sm, v in top_180],
             'issues': issues,
+            'by_project': sorted(({
+                'id': pid, 'name': projects.get(pid, '') or '—', 'accounts': bp['accounts'],
+                'overdue_accounts': bp['overdue_accounts'],
+                'totals': {k: rupees(v) for k, v in bp['totals'].items()},
+                'pct_realised': round(float(bp['totals']['received'] / bp['totals']['collectable'] * 100), 1) if bp['totals']['collectable'] else 0,
+                'ageing': {k: rupees(v) for k, v in bp['ageing'].items()},
+            } for pid, bp in by_project.items()), key=lambda x: x['totals']['os_with_interest'], reverse=True),
         })
 
 
