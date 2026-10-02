@@ -98,3 +98,22 @@ class ARBankTests(TestCase):
         from activity.models import ActivityLog
         self.add_bank('Kotak')
         self.assertTrue(any('Kotak' in (row.summary or '') for row in ActivityLog.objects.all()))
+
+    def test_statement_runs_a_balance_and_rolls_up_before_a_range(self):
+        bid = self.add_bank('HDFC', '1000000')
+        self.pay(bank=bid, paid_on='2025-08-01', amount='100000')
+        self.pay(bank=bid, paid_on='2025-09-12', amount='200000')
+        self.pay(bank=bid, paid_on='2025-10-05', amount='300000')
+        self.pay(mode='nbfc', paid_on='2025-09-20', amount='999999')   # never in a bank
+        st = self.api.get(f'/api/ar/banks/{bid}/statement/').json()
+        self.assertEqual([r['balance'] for r in st['rows']], [1100000, 1300000, 1600000])
+        self.assertEqual(st['closing_balance'], self.bank(bid)['balance'])
+        self.assertEqual(st['rows'][0]['client'], 'Jigar Makwana')
+        st = self.api.get(f'/api/ar/banks/{bid}/statement/?from=2025-09-01&to=2025-09-30').json()
+        self.assertEqual((st['brought_forward'], st['total_in'], st['closing_balance']), (1100000, 200000, 1300000))
+        self.assertEqual(len(st['rows']), 1)
+
+    def test_another_companys_statement_is_hidden(self):
+        theirs = ARBank.objects.create(company=self.other, name='Their Bank')
+        self.assertEqual(self.api.get(f'/api/ar/banks/{theirs.id}/statement/').status_code, 404)
+

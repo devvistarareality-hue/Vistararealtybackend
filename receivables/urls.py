@@ -19,6 +19,7 @@ urlpatterns = [
     path('dashboard/', views.ARDashboardView.as_view()),
     path('banks/', banks.ARBankListView.as_view()),
     path('banks/<int:pk>/', banks.ARBankView.as_view()),
+    path('banks/<int:pk>/statement/', banks.ARBankStatementView.as_view()),
     path('import/', views.ARImportView.as_view()),
     path('import/template/', views.ARImportTemplateView.as_view()),
 ]

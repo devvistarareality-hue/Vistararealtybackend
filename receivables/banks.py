@@ -17,7 +17,7 @@ from companies.models import Company
 from .engine import rupees
 from .models import ARBank, ARReceipt
 from .permissions import ar_can, has_ar_access
-from .services import _d
+from .services import _d, parse_date
 
 ZERO = Decimal('0')
 
@@ -180,3 +180,56 @@ class ARBankView(APIView):
             b.delete()
         _log(request, 'Removed bank %s' % name, 'deleted', pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ARBankStatementView(APIView):
+    """A bank's ledger: opening balance, then every live Loan receipt into it in date
+    order with a running balance. With ?from= / ?to=, the payments before the range
+    are rolled into a brought-forward line, so the closing figure always equals the
+    balance Bank Master shows as of that date."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_ar_access(request.user):
+            return _deny()
+        b = banks_qs(request).filter(pk=pk).first()
+        if not b:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        d_from = parse_date(request.query_params.get('from'))
+        d_to = parse_date(request.query_params.get('to'))
+        receipts = sorted(
+            ARReceipt.objects.filter(bank=b, is_deleted=False)
+            .select_related('account__booking__project', 'account__booking__plot', 'created_by'),
+            key=lambda x: (x.paid_on, x.id))
+        opening = _d(b.opening_balance)
+        brought = opening
+        rows, total_in = [], ZERO
+        for x in receipts:
+            amt = _d(x.amount)
+            if d_from and x.paid_on < d_from:
+                brought += amt
+                continue
+            if d_to and x.paid_on > d_to:
+                continue
+            total_in += amt
+            bk = x.account.booking
+            rows.append({
+                'id': x.id, 'account_id': x.account_id, 'date': x.paid_on.isoformat(),
+                'client': bk.client_name or '', 'project': bk.project.name if bk.project_id else '',
+                'plots': bk.plot_numbers or (bk.plot.number if bk.plot_id else ''),
+                'remarks': x.remarks or '', 'source': x.source,
+                'recorded_by': x.created_by.name if x.created_by_id else '',
+                'amount': rupees(amt), 'balance': rupees(brought + total_in),
+            })
+        return Response({
+            'bank': bank_row(b, _received_by_bank([b.id]).get(b.id, ZERO)),
+            'from': d_from.isoformat() if d_from else None, 'to': d_to.isoformat() if d_to else None,
+            'opening_balance': rupees(opening),
+            # Opening plus everything received before the range; equals opening when
+            # there is no from-date.
+            'brought_forward': rupees(brought),
+            'total_in': rupees(total_in),
+            'closing_balance': rupees(brought + total_in),
+            'rows': rows,
+        })
+
