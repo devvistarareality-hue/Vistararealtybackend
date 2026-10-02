@@ -27,6 +27,10 @@ class ChannelPartnerSerializer(serializers.ModelSerializer):
 class ProjectSerializer(serializers.ModelSerializer):
     lead_count = serializers.IntegerField(read_only=True, default=0)
     plot_counts = serializers.SerializerMethodField()
+    # Names, not ids: the approval queue shows who asked and who decided, and an
+    # id tells a reader nothing.
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default='')
+    approved_by_name = serializers.CharField(source='approved_by.name', read_only=True, default='')
 
     class Meta:
         model = Project
@@ -39,6 +43,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'is_locked', 'locked_blocks',
             'approval_status', 'approved_by', 'approved_at', 'rejected_reason', 'created_by',
+            'created_by_name', 'approved_by_name',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
 

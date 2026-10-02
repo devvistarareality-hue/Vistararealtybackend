@@ -337,17 +337,28 @@ def _may_approve_projects(user):
     return bool(company and user.id in (company.project_approvers or []))
 
 
-def _visible_projects(qs, user):
+def _visible_projects(qs, user, include_unapproved=False):
     """Drop what this person is not meant to see: locked projects, and projects
     still waiting on (or refused) approval.
 
-    Both answer the same question — is this project open for business — so both
-    are hidden from the sales floor the same way, and both stay visible to the
-    people who manage projects so they can act on them.
+    Both answer the same question — is this project open for business.
+
+    `include_unapproved` is opt-in, and only the two screens that ACT on an
+    unapproved project pass it: the Projects list and the Project Approvals
+    queue. Everywhere else — above all the booking flow — an unapproved project
+    is absent for everyone, approvers included.
+
+    Letting approvers see one everywhere was the first version, and it put a
+    project called "testing do not approve" straight into the Booking module for
+    the very person who had not approved it. Seeing a project is not the same as
+    it being open for business; that lesson is already written into the locked
+    blocks above, and it applies here too.
     """
-    if _may_see_locked(user) or _may_approve_projects(user):
-        return qs
-    return qs.filter(is_locked=False, approval_status='approved')
+    if not (include_unapproved and (_may_see_locked(user) or _may_approve_projects(user))):
+        qs = qs.filter(approval_status='approved')
+    if not _may_see_locked(user):
+        qs = qs.filter(is_locked=False)
+    return qs
 
 
 def _existing_lead_for_booking(company, project_id, phone):
@@ -853,10 +864,21 @@ class StatsView(APIView):
         # the frontend's cp_only param is the normal path but not the only one
         # that can reach this view.
         cp_only = request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)
+        # Dashboard filters. Every tile, the funnel and the recent-leads table all
+        # narrow together — a dashboard where the headline and the list beneath it
+        # answer different questions is worse than one with no filters at all.
+        f_project = request.query_params.get('project_id') or ''
+        f_partner = request.query_params.get('channel_partner_id') or ''
+        f_person  = request.query_params.get('person_id') or ''
+        f_project = f_project if f_project.isdigit() else ''
+        f_partner = f_partner if f_partner.isdigit() else ''
+        f_person  = f_person if f_person.isdigit() else ''
         # The permissions version is in the key so a designation change takes
         # effect at once, instead of at the end of the cache's 20 seconds.
         _pv = permissions_version(getattr(request.user, 'company_id', None))
-        cache_key = f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:{date_to or ""}:{"admin" if admin_view else "own"}:{"cp" if cp_only else "all"}:{_pv}'
+        cache_key = (f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:'
+                     f'{date_to or ""}:{"admin" if admin_view else "own"}:'
+                     f'{"cp" if cp_only else "all"}:{f_project}:{f_partner}:{f_person}:{_pv}')
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -891,7 +913,31 @@ class StatsView(APIView):
             cl_filter  = {'company_id': company_id}
             prj_filter = {'company_id': company_id}
         else:
-            sv_filter = cl_filter = prj_filter = {}
+            # Three separate dicts, deliberately. `a = b = c = {}` binds all three
+            # names to ONE dict, so adding a key for site visits silently added it
+            # to the project filter too — which only became visible once anything
+            # wrote to them individually.
+            sv_filter, cl_filter, prj_filter = {}, {}, {}
+
+        # The dashboard filters, threaded through every pool the tiles count from.
+        if f_project:
+            leads_qs = leads_qs.filter(project_id=f_project)
+            sv_filter['project_id'] = f_project
+            cl_filter['project_id'] = f_project
+            prj_filter['id'] = f_project
+        if f_partner:
+            leads_qs = leads_qs.filter(channel_partner_id=f_partner)
+            sv_filter['lead__channel_partner_id'] = f_partner
+            cl_filter['lead__channel_partner_id'] = f_partner
+        # Whoever is working it, on either side of the hand-off — a CP executive
+        # owns leads as `stm`, a telecaller as `telecaller`, and asking which one
+        # would make the filter useless on a mixed desk. It is a Q rather than a
+        # dict entry because that is an OR, and it is applied to the visit and
+        # closure pools where they are built rather than by pulling every matching
+        # lead id into Python first.
+        person_q = Q(stm_id=f_person) | Q(telecaller_id=f_person) if f_person else None
+        if f_person:
+            leads_qs = leads_qs.filter(person_q)
 
         # Role/company-scoped leads WITHOUT the created_at window — used for the
         # SQL funnel count (leads that *became* warm within the window).
@@ -1106,6 +1152,11 @@ class StatsView(APIView):
 
         cl_scoped = cl_qs.filter(**cl_filter)
         sv_scoped = sv_qs.filter(**sv_filter)
+        if person_q is not None:
+            # A closure names its own STM; a site visit inherits the lead's people.
+            cl_scoped = cl_scoped.filter(Q(stm_id=f_person) | Q(lead__telecaller_id=f_person))
+            sv_scoped = sv_scoped.filter(
+                Q(lead__stm_id=f_person) | Q(lead__telecaller_id=f_person))
         # Active projects are the company's projects, not a count of the person's
         # own records: the same number on every dashboard, so "9 here, 11 there,
         # 4 after changing a scope" cannot happen. The only narrowing is a
@@ -2352,7 +2403,9 @@ class ProjectListView(APIView):
             projects = projects.filter(id__in=pids)
         # A locked project is not pickable, and this endpoint is what every "pick a
         # project" screen calls.
-        projects = _visible_projects(projects, request.user)
+        projects = _visible_projects(
+            projects, request.user,
+            include_unapproved=request.query_params.get('include_unapproved') == '1')
         if request.query_params.get('active_only') == 'true':
             projects = projects.filter(is_active=True)
         if request.query_params.get('company_id') and is_platform_admin(request.user):
@@ -2376,22 +2429,37 @@ class ProjectListView(APIView):
         ser = ProjectSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        # A project is not real until it is signed off. An administrator creating
-        # one approves it in the same breath — asking them to approve their own
-        # creation is ceremony, and they are the people the approval protects
-        # against nobody.
-        auto = _may_approve_projects(request.user)
-        project = ser.save(
-            company=request.user.company, created_by=request.user,
-            approval_status='approved' if auto else 'pending',
-            approved_by=request.user if auto else None,
-            approved_at=timezone.now() if auto else None,
-        )
-        if not auto:
-            _notify_project_approvers(request.user.company, project, request.user)
+        # Every new project waits, whoever created it. An earlier version let an
+        # administrator's own project through on the grounds that asking someone
+        # who may approve to approve their own creation is ceremony — but that
+        # made the gate invisible to the people most likely to be adding
+        # projects, and a project went straight to ACTIVE with nobody having
+        # looked at it. The approval step either applies or it does not.
+        project = ser.save(company=request.user.company, created_by=request.user,
+                           approval_status='pending')
+        _notify_project_approvers(request.user.company, project, request.user)
         _sync_plots(project)
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data, status=status.HTTP_201_CREATED)
+
+
+# Changing one of these does not send a project back for approval. They are
+# operational switches and bookkeeping, not a different project: the Active
+# toggle has its own button, locking is reversible housekeeping, the approver
+# lists are an administrative setting, and total_plots/plot_type_plans are
+# written by follow-up calls the save flow itself makes after the real edit.
+# Everything else — the name, where it is, how it is priced, its layout — is the
+# project, and changing it means the approval that was given was for something
+# else.
+_EDITS_THAT_KEEP_APPROVAL = {
+    'is_active', 'total_plots', 'plot_type_plans', 'is_locked', 'locked_blocks',
+    'booking_approvers', 'cp_booking_approvers',
+    'accounts_booking_approvers', 'accounts_cp_booking_approvers',
+}
+
+
+def _edit_needs_reapproval(data):
+    return bool(set(data or {}) - _EDITS_THAT_KEEP_APPROVAL)
 
 
 class ProjectDetailView(APIView):
@@ -2402,7 +2470,7 @@ class ProjectDetailView(APIView):
             project = _visible_projects(scope_to_company(
                 Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots'),
                 request.user,
-            ), request.user).get(pk=pk)
+            ), request.user, include_unapproved=True).get(pk=pk)
         except Project.DoesNotExist:
             # 404, not 403: a locked project should not confirm it exists.
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -2441,6 +2509,16 @@ class ProjectDetailView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         project = ser.save()
+        # An edited project goes back for approval: the sign-off that was given
+        # was for a different set of details, and leaving it live would let a
+        # project be approved once and then quietly changed into another one.
+        # A rejected project coming back through here is the fix-and-resubmit
+        # loop working as intended.
+        if _edit_needs_reapproval(request.data) and project.approval_status != 'pending':
+            Project.objects.filter(pk=project.pk).update(
+                approval_status='pending', approved_by=None, approved_at=None)
+            project.refresh_from_db()
+            _notify_project_approvers(request.user.company, project, request.user)
         # _sync_plots intentionally NOT called on PATCH — plots are managed via /plots/bulk/
         project = Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         return Response(ProjectSerializer(project).data)
@@ -3449,6 +3527,17 @@ class TelecallerListView(APIView):
             ).order_by('name')
             if not users.exists():
                 users = sales_qs
+        elif crm_role == 'cp_only':
+            # Strictly the partner desk: CP Executives and CP-designation
+            # Managers, by designation alone.
+            #
+            # Deliberately NOT crm_role='cp' (which falls back to every Sales user
+            # when a company has no CP designations) and NOT 'cp_module' (which
+            # also pulls in admins and any STM who currently owns a CP lead after
+            # a hand-off). Both put STMs on a partner-desk picker, which is
+            # exactly what this exists to avoid.
+            users = sorted((u for u in base_qs if is_cp_designated(u)),
+                           key=lambda u: u.name or '')
         elif crm_role == 'cp_module':
             # Everyone with access to the Channel Partner module — admins/staff/
             # Sales Admin-Modules users, CP Executives and CP-designation Managers

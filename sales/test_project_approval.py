@@ -64,11 +64,18 @@ class ProjectApproval(TestCase):
         self.assertIn(r.status_code, (200, 201), r.data)
         self.assertEqual(Project.objects.get(name='Needs A Nod').approval_status, 'pending')
 
-    def test_an_admin_creating_one_approves_it_in_the_same_breath(self):
-        """Asking the person who may approve to approve their own creation is
-        ceremony, not control."""
-        r = self._create(self.admin, 'Admin Made')
-        self.assertEqual(Project.objects.get(name='Admin Made').approval_status, 'approved')
+    def test_an_admin_creating_one_waits_too(self):
+        """Reported from production: an admin added a project called "testing do
+        not approve" and it went straight to ACTIVE, because an earlier version
+        let whoever could approve skip the queue. That made the gate invisible to
+        the people most likely to be adding projects. It either applies or it
+        does not."""
+        self._create(self.admin, 'Admin Made')
+        self.assertEqual(Project.objects.get(name='Admin Made').approval_status, 'pending')
+
+    def test_an_admins_new_project_is_not_visible_to_the_floor_either(self):
+        self._create(self.admin, 'Admin Made Two')
+        self.assertNotIn('Admin Made Two', self._names(self.rep))
 
     def test_the_creator_is_recorded(self):
         self._create(self.creator, 'Mine')
@@ -79,9 +86,15 @@ class ProjectApproval(TestCase):
         self._create(self.creator, 'Hidden Until Approved')
         self.assertNotIn('Hidden Until Approved', self._names(self.rep))
 
-    def test_an_approver_does_see_it_so_they_can_act(self):
+    def test_an_approver_sees_it_on_the_screens_that_act_on_it(self):
+        """Not on the plain list, which is what the booking flow calls — only
+        where they can do something about it."""
         self._create(self.creator, 'Waiting On Me')
-        self.assertIn('Waiting On Me', self._names(self.approver))
+        self.assertNotIn('Waiting On Me', self._names(self.approver))
+
+        self.api.force_authenticate(user=self.approver)
+        r = self.api.get('/api/sales/projects/?include_unapproved=1')
+        self.assertIn('Waiting On Me', {p['name'] for p in r.data})
 
     def test_approved_projects_are_unaffected(self):
         self.assertIn('Already Selling', self._names(self.rep))
@@ -216,3 +229,165 @@ class ProjectApproval(TestCase):
                            {'approvers': [outsider.id]}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(r.data['approvers'], [])
+
+
+class AnUnapprovedProjectIsAbsentFromTheBookingFlow(TestCase):
+    """Reported from production: a project called "testing do not approve" sat
+    pending and still appeared in the Booking module — for the very admin who had
+    not approved it.
+
+    The first version let anyone who could approve see a pending project
+    everywhere. But seeing a project is not the same as it being open for
+    business, which is the rule the locked blocks already follow. Only the two
+    screens that ACT on one ask for it now.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='ABS', name='Absent Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@abs.com', company=cls.co, user_code='ABS001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.director = User.objects.create_user(
+            'dir@abs.com', company=cls.co, user_code='ABS002', password='p',
+            name='Director', role='Director', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.co.project_approvers = [cls.director.id]
+        cls.co.save(update_fields=['project_approvers'])
+        cls.pending = Project.objects.create(company=cls.co, name='testing do not approve',
+                                             approval_status='pending')
+        cls.live = Project.objects.create(company=cls.co, name='Selling Now',
+                                          approval_status='approved')
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+
+    def _names(self, user, qs=''):
+        self.api.force_authenticate(user=user)
+        r = self.api.get(f'/api/sales/projects/{qs}')
+        self.assertEqual(r.status_code, 200, r.data)
+        return {p['name'] for p in r.data}
+
+    def test_the_booking_flow_does_not_offer_it_to_an_admin(self):
+        """The plain list is what the booking screens call."""
+        names = self._names(self.admin)
+        self.assertNotIn('testing do not approve', names)
+        self.assertIn('Selling Now', names)
+
+    def test_nor_to_the_approver_who_has_not_approved_it(self):
+        self.assertNotIn('testing do not approve', self._names(self.director))
+
+    def test_the_management_screens_ask_for_it_explicitly(self):
+        names = self._names(self.admin, '?include_unapproved=1')
+        self.assertIn('testing do not approve', names)
+
+    def test_a_rep_cannot_conjure_it_with_the_same_parameter(self):
+        """Otherwise the gate is one query string away from nothing."""
+        rep = User.objects.create_user(
+            'rep@abs.com', company=self.co, user_code='ABS003', password='p',
+            name='Rep', role='Employee', modules=['Sales'], reporting_manager=self.admin)
+        self.assertNotIn('testing do not approve', self._names(rep, '?include_unapproved=1'))
+
+    def test_an_approver_can_still_open_it_by_id_to_review_it(self):
+        self.api.force_authenticate(user=self.director)
+        r = self.api.get(f'/api/sales/projects/{self.pending.id}/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['approval_status'], 'pending')
+
+
+class EditingSendsItBackForApproval(TestCase):
+    """An approval is for a set of details, not for a name.
+
+    Without this, a project could be approved once and then quietly edited into
+    a different one — different location, different pricing model, different
+    layout — while staying live on a sign-off nobody gave for it.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='EDT', name='Edit Co', is_active=True)
+        cls.admin = User.objects.create_user(
+            'admin@edt.com', company=cls.co, user_code='EDT001', password='p',
+            name='Admin', role='Admin', modules=['Sales'])
+        cls.director = User.objects.create_user(
+            'dir@edt.com', company=cls.co, user_code='EDT002', password='p',
+            name='Director', role='Director', modules=['Sales'],
+            reporting_manager=cls.admin)
+        cls.rep = User.objects.create_user(
+            'rep@edt.com', company=cls.co, user_code='EDT003', password='p',
+            name='Rep', role='Employee', modules=['Sales'], reporting_manager=cls.admin)
+        cls.co.project_approvers = [cls.director.id]
+        cls.co.save(update_fields=['project_approvers'])
+
+    def setUp(self):
+        self.api = APIClient()
+        cache.clear()
+        self.api.force_authenticate(user=self.admin)
+        self.project = Project.objects.create(
+            company=self.co, name='Live One', location='Vadodara',
+            approval_status='approved', approved_by=self.director)
+
+    def _patch(self, body):
+        return self.api.patch(f'/api/sales/projects/{self.project.id}/', body, format='json')
+
+    def _status(self):
+        self.project.refresh_from_db()
+        return self.project.approval_status
+
+    # ── edits that send it back ──────────────────────────────────────────────
+    def test_renaming_it_sends_it_back(self):
+        r = self._patch({'name': 'Renamed'})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self._status(), 'pending')
+
+    def test_moving_it_sends_it_back(self):
+        self._patch({'location': 'Somewhere Else'})
+        self.assertEqual(self._status(), 'pending')
+
+    def test_changing_how_it_is_priced_sends_it_back(self):
+        self._patch({'formula_set': 'pratishtha'})
+        self.assertEqual(self._status(), 'pending')
+
+    def test_the_old_approval_is_cleared_not_left_stale(self):
+        self._patch({'name': 'Renamed Again'})
+        self.project.refresh_from_db()
+        self.assertIsNone(self.project.approved_by_id)
+        self.assertIsNone(self.project.approved_at)
+
+    def test_and_it_disappears_from_the_floor_again(self):
+        self._patch({'name': 'Gone Again'})
+        self.api.force_authenticate(user=self.rep)
+        r = self.api.get('/api/sales/projects/')
+        self.assertNotIn('Gone Again', {p['name'] for p in r.data})
+
+    def test_a_rejected_project_edited_is_resubmitted(self):
+        """The fix-and-resubmit loop the rejection reason exists for."""
+        Project.objects.filter(pk=self.project.pk).update(
+            approval_status='rejected', rejected_reason='RERA missing')
+        self._patch({'rera': 'RERA/PNE/2024/001'})
+        self.assertEqual(self._status(), 'pending')
+
+    # ── changes that do not ──────────────────────────────────────────────────
+    def test_deactivating_it_does_not(self):
+        """Active has its own button and its own meaning — a project that is over
+        is not a project awaiting sign-off."""
+        self._patch({'is_active': False})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_locking_it_does_not(self):
+        """Locking is reversible housekeeping an admin applies and lifts at will."""
+        self._patch({'is_locked': True})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_setting_booking_approvers_does_not(self):
+        self._patch({'booking_approvers': [self.director.id]})
+        self.assertEqual(self._status(), 'approved')
+
+    def test_the_bookkeeping_calls_after_a_save_do_not(self):
+        """The save flow PATCHes total_plots and plot_type_plans of its own accord
+        after the real edit; those must not count as a second edit."""
+        self._patch({'total_plots': 40})
+        self.assertEqual(self._status(), 'approved')
+        self._patch({'plot_type_plans': [{'name': 'A'}]})
+        self.assertEqual(self._status(), 'approved')
