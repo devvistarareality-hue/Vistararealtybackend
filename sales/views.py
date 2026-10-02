@@ -998,11 +998,18 @@ class StatsView(APIView):
                 qs = qs.filter(created_at__date__lte=date_to)
             return qs.values('lead').distinct().count()
 
-        hot_count           = _status_transition_count('telecaller_status', 'hot')
-        warm_count          = _status_transition_count('telecaller_status', 'warm')
-        callback_count      = _status_transition_count('telecaller_status', 'callback')
-        not_reachable_count = _status_transition_count('telecaller_status', 'not_reachable')
-        cold_count          = _status_transition_count('telecaller_status', 'cold')
+        # Undated — the common case — all five are "who is at this status now",
+        # which is one aggregate rather than five round trips. Dated, each has to
+        # walk the status history separately, so the helper still earns its keep.
+        _TC_TILES = ('hot', 'warm', 'callback', 'not_reachable', 'cold')
+        if not date_from and not date_to:
+            _tc = leads_scope.aggregate(**{
+                v: Count('id', filter=Q(telecaller_status=v)) for v in _TC_TILES})
+        else:
+            _tc = {v: _status_transition_count('telecaller_status', v) for v in _TC_TILES}
+        hot_count, warm_count = _tc['hot'], _tc['warm']
+        callback_count, not_reachable_count, cold_count = (
+            _tc['callback'], _tc['not_reachable'], _tc['cold'])
 
         # STM-pipeline hot/warm/cold: a lead that got a site-visit outcome of Hot
         # still sits at stm_status='sv_done' (the outcome doesn't overwrite it —
@@ -1042,9 +1049,21 @@ class StatsView(APIView):
             return len(direct_ids | _sv_outcome_lead_ids(value))
 
         # STM-pipeline counts (by stm_status) for the STM/CP dashboard.
-        stm_hot_count           = _effective_stm_count('hot')
-        stm_warm_count          = _effective_stm_count('warm')
-        stm_cold_count          = _effective_stm_count('cold')
+        # Same again: undated these three share one annotated queryset, so they
+        # share one query. The sv_done clause is why they cannot just read
+        # stm_status — a lead whose latest visit came back Hot still sits at
+        # 'sv_done', and the tile has to agree with the list it opens.
+        _STM_TILES = ('hot', 'warm', 'cold')
+        if not date_from and not date_to:
+            _stm_annotated = leads_scope.annotate(
+                _sv_outcome=Subquery(_latest_sv_for_lead.values('outcome')[:1]))
+            _stm = _stm_annotated.aggregate(**{
+                v: Count('id', filter=Q(stm_status=v) | Q(stm_status='sv_done', _sv_outcome=v))
+                for v in _STM_TILES})
+        else:
+            _stm = {v: _effective_stm_count(v) for v in _STM_TILES}
+        stm_hot_count, stm_warm_count, stm_cold_count = (
+            _stm['hot'], _stm['warm'], _stm['cold'])
         # Visits that are scheduled right now, counted from the Site Visits list's own
         # rows so the tile matches the Scheduled tab it opens. It used to count leads
         # whose status had ever *moved* to "SV scheduled" in the period — 19 on the
@@ -1136,8 +1155,11 @@ class StatsView(APIView):
             fu_open = fu_open.filter(scheduled_at__date__gte=date_from)
         if date_to:
             fu_open = fu_open.filter(scheduled_at__date__lte=date_to)
-        followup_pending_count = fu_open.count()
-        followup_overdue_count = fu_open.filter(scheduled_at__lt=timezone.now()).count()
+        fu_agg = fu_open.aggregate(
+            pending=Count('id'),
+            overdue=Count('id', filter=Q(scheduled_at__lt=timezone.now())),
+        )
+        followup_pending_count, followup_overdue_count = fu_agg['pending'], fu_agg['overdue']
 
         # "To Call" backlog: assigned leads this user has not actioned yet. Same rule
         # as the All Leads "To Call" tab (work=pending), so the tile and that tab can
@@ -1165,17 +1187,22 @@ class StatsView(APIView):
         _assigned = manager_project_ids(request.user)
         if _assigned is not None:
             active_projects_qs = active_projects_qs.filter(id__in=_assigned)
-        sv_done, closures, active_projects = (
-            sv_scoped.count(),
-            cl_scoped.count(),
-            active_projects_qs.count(),
+        # One aggregate, not five: the total and the four outcome buckets all come
+        # from the same window, and each separate .count() was its own round trip
+        # to the database. That is ~0.1s each when the database is a network hop
+        # away, which is what the dashboard feels like on a developer's machine.
+        sv_agg = sv_scoped.aggregate(
+            total=Count('id'),
+            hot=Count('id', filter=Q(outcome='hot')),
+            warm=Count('id', filter=Q(outcome='warm')),
+            cold=Count('id', filter=Q(outcome='cold')),
+            not_interested=Count('id', filter=Q(outcome='not_interested')),
         )
+        sv_done = sv_agg['total']
+        sv_hot_count, sv_warm_count = sv_agg['hot'], sv_agg['warm']
+        sv_cold_count, sv_not_interested_count = sv_agg['cold'], sv_agg['not_interested']
+        closures, active_projects = cl_scoped.count(), active_projects_qs.count()
         accounts_pending = cl_waiting.filter(**cl_filter).count()
-        # Post-visit outcome breakdown of the same completed-visits window above.
-        sv_hot_count  = sv_scoped.filter(outcome='hot').count()
-        sv_warm_count = sv_scoped.filter(outcome='warm').count()
-        sv_cold_count = sv_scoped.filter(outcome='cold').count()
-        sv_not_interested_count = sv_scoped.filter(outcome='not_interested').count()
 
         # SQL funnel: distinct leads that are effectively warm (stm_status → warm,
         # or still sv_done with a Warm visit outcome) in the window — same
@@ -1193,7 +1220,12 @@ class StatsView(APIView):
         avg_closure_days = round(sum(_diffs) / len(_diffs), 1) if _diffs else None
         # No .only() here: LeadListSerializer reads ~11 more fields (meta_*, statuses,
         # is_duplicate, …); deferring them caused a per-field query per lead (N+1).
-        recent = (leads_qs.select_related('project', 'source', 'telecaller', 'stm')
+        # channel_partner belongs here too: LeadListSerializer reads
+        # channel_partner.name, so leaving it out cost one extra query per recent
+        # lead — seven of them on the partner dashboard, which is most of a second
+        # when the database is a network hop away.
+        recent = (leads_qs.select_related('project', 'source', 'telecaller', 'stm',
+                                          'channel_partner')
                   .defer(*PROJECT_BLOBS).order_by('-created_at')[:8])
         payload = {
             'total_leads':        agg['total_leads'],
