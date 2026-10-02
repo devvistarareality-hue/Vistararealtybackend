@@ -46,6 +46,30 @@ class ARAccount(models.Model):
         return f'AR {self.pk} · booking {self.booking_id}'
 
 
+class ARBank(models.Model):
+    """A company's own bank account that Loan payments are received into.
+
+    Its balance is never stored: opening_balance plus every live Loan receipt
+    recorded against it (see banks.py), so editing or deleting a receipt moves the
+    balance with it and the two cannot drift. Encrypted at rest like the receipts.
+    """
+    company = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='ar_banks')
+    name = EncryptedTextField()
+    account_no = EncryptedTextField(blank=True, default='')
+    opening_balance = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
+    # A bank with receipts against it is retired, not deleted, so history keeps its name.
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['company', 'is_active'])]
+
+    def __str__(self):
+        return self.name
+
+
 class ARReceipt(models.Model):
     # New payments are recorded as Loan or NBFC only; Bank / Cash / Cheque stay valid so
     # receipts entered (or imported) before that keep reading correctly.
@@ -56,6 +80,8 @@ class ARReceipt(models.Model):
     paid_on = EncryptedDateField()
     amount = EncryptedDecimalField(max_digits=16, decimal_places=2)
     mode = EncryptedTextField(choices=MODES)
+    # The bank a Loan payment was received into (required for Loan, empty otherwise).
+    bank = models.ForeignKey(ARBank, on_delete=models.PROTECT, null=True, blank=True, related_name='receipts')
     remarks = EncryptedTextField(blank=True)
     source = models.CharField(max_length=10, choices=SOURCES, default='manual')
     # Soft delete: a removed receipt stays in the audit trail, never vanishes.

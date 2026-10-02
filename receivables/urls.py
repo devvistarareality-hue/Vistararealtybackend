@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import collections, views
+from . import banks, collections, views
 
 urlpatterns = [
     path('accounts/', views.ARRegisterView.as_view()),
@@ -17,6 +17,8 @@ urlpatterns = [
     path('followups/<int:fid>/', collections.ARFollowUpView.as_view()),
     path('assignees/', collections.ARAssigneesView.as_view()),
     path('dashboard/', views.ARDashboardView.as_view()),
+    path('banks/', banks.ARBankListView.as_view()),
+    path('banks/<int:pk>/', banks.ARBankView.as_view()),
     path('import/', views.ARImportView.as_view()),
     path('import/template/', views.ARImportTemplateView.as_view()),
 ]

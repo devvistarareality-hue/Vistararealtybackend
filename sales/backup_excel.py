@@ -118,6 +118,8 @@ SHEETS = [
     ]),
     ('AR', [
         Table('AR Accounts', 'receivables.ARAccount', 'company'),
+        # Before receipts: a Loan receipt points at the bank it was received into.
+        Table('AR Banks', 'receivables.ARBank', 'company'),
         Table('AR Receipts', 'receivables.ARReceipt', 'account__company'),
         Table('AR Follow-Ups', 'receivables.ARFollowUp', 'account__company'),
         Table('AR Receipt Audit', 'receivables.ARReceiptAudit', 'receipt__account__company'),

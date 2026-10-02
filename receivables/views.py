@@ -14,7 +14,7 @@ from rest_framework.views import APIView
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.models import Booking
 from .engine import rupees, AGEING_BUCKETS
-from .models import ARAccount, ARReceipt, ARReceiptAudit
+from .models import ARAccount, ARBank, ARReceipt, ARReceiptAudit
 from .permissions import ar_can, has_ar_access
 from .services import (compute_account, current_approved_booking_ids, expected_collectable,
                        parse_date, sync_accounts, _d)
@@ -37,8 +37,8 @@ def _log(request, acct, summary, action, target_type='ar_account', target_id=Non
 
 
 def _rc_text(rc):
-    return '₹{:,} on {} ({})'.format(rupees(_d(rc.amount)), rc.paid_on.strftime('%d/%m/%Y') if rc.paid_on else '—',
-                                     MODES.get(rc.mode, rc.mode))
+    mode = MODES.get(rc.mode, rc.mode) + (' · %s' % rc.bank.name if rc.bank_id else '')
+    return '₹{:,} on {} ({})'.format(rupees(_d(rc.amount)), rc.paid_on.strftime('%d/%m/%Y') if rc.paid_on else '—', mode)
 
 
 def _deny():
@@ -179,7 +179,7 @@ class ARAccountView(APIView):
         if not acct:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         as_of = _as_of(request)
-        receipts = sorted(acct.receipts.filter(is_deleted=False).select_related('created_by'), key=lambda x: (x.paid_on, x.id))
+        receipts = sorted(acct.receipts.filter(is_deleted=False).select_related('created_by', 'bank'), key=lambda x: (x.paid_on, x.id))
         plan, r, mismatch = compute_account(acct, as_of, receipts)
         data = _summary(acct, plan, r, mismatch)
         data.update({
@@ -193,6 +193,7 @@ class ARAccountView(APIView):
             'receipts': [{
                 'id': x.id, 'paid_on': x.paid_on.isoformat(), 'amount': float(_d(x.amount)),
                 'mode': x.mode, 'mode_label': MODES.get(x.mode, x.mode), 'remarks': x.remarks or '',
+                'bank': x.bank_id, 'bank_name': x.bank.name if x.bank_id else '',
                 'source': x.source, 'created_by': x.created_by.name if x.created_by_id else '',
             } for x in receipts],
             'interest_rows': [{
@@ -230,7 +231,8 @@ class ARAccountView(APIView):
 
 def _snap(rc):
     return json.dumps({'paid_on': rc.paid_on.isoformat() if rc.paid_on else None,
-                       'amount': str(_d(rc.amount)), 'mode': rc.mode, 'remarks': rc.remarks or ''})
+                       'amount': str(_d(rc.amount)), 'mode': rc.mode, 'remarks': rc.remarks or '',
+                       'bank': rc.bank.name if rc.bank_id else ''})
 
 
 def _clean_receipt(data, partial=False):
@@ -260,6 +262,23 @@ def _clean_receipt(data, partial=False):
     return out, errs
 
 
+def _clean_bank(request, company_id, data, vals, errs, current=None):
+    """A Loan payment must name the bank it was received into — one of this
+    company's active banks; any other mode carries no bank."""
+    mode = vals.get('mode', current.mode if current else None)
+    if mode != 'loan':
+        vals['bank'] = None
+        return
+    raw = data.get('bank') if 'bank' in data else (current.bank_id if current else None)
+    bank = ARBank.objects.filter(pk=raw, company_id=company_id).first() if raw else None
+    if not bank:
+        errs['bank'] = 'Pick the bank this loan payment was received into.'
+    elif not bank.is_active and (not current or current.bank_id != bank.id):
+        errs['bank'] = 'That bank has been retired.'
+    else:
+        vals['bank'] = bank
+
+
 class ARReceiptCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -274,6 +293,7 @@ class ARReceiptCreateView(APIView):
         if acct.status == 'frozen':
             return Response({'detail': 'This booking was cancelled — its account is frozen.'}, status=status.HTTP_400_BAD_REQUEST)
         vals, errs = _clean_receipt(request.data)
+        _clean_bank(request, acct.company_id, request.data, vals, errs)
         if errs:
             return Response(errs, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
@@ -297,6 +317,8 @@ class ARReceiptView(APIView):
         if not rc:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         vals, errs = _clean_receipt(request.data, partial=True)
+        if 'mode' in vals or 'bank' in request.data:
+            _clean_bank(request, rc.account.company_id, request.data, vals, errs, current=rc)
         if errs:
             return Response(errs, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():

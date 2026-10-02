@@ -27,7 +27,7 @@ TYPE_OF = {
     'lead': 'lead', 'followup': 'follow-up', 'sitevisit': 'site-visit', 'booking': 'booking',
     'closure': 'closure', 'plot': 'plot', 'project': 'project', 'leadsource': 'source',
     'channelpartner': 'channel-partner', 'user': 'user', 'leadtransfer': 'lead-transfer',
-    'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account',
+    'araccount': 'ar_account', 'arreceipt': 'ar_account', 'arfollowup': 'ar_account', 'arbank': 'ar_bank',
     'investor': 'investor', 'payout': 'payout', 'referralreward': 'referral-reward', 'scheme': 'scheme',
     'leaveapplication': 'leave',
     'designation': 'designation', 'dashboarddefinition': 'dashboard',
