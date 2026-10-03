@@ -311,6 +311,7 @@ class Plot(models.Model):
         return f"{self.project.name} – Plot {self.number}"
 
 
+
 LEAD_PURPOSE_CHOICES = [
     ('investment', 'Investment'),
     ('end_use', 'End Use'),
@@ -382,6 +383,83 @@ class ChannelPartner(models.Model):
 
     def __str__(self):
         return self.name
+
+
+
+class PartnerFollowUp(models.Model):
+    """A call or meeting scheduled with a channel partner themselves.
+
+    Separate from FollowUp, which hangs off a Lead. The two look alike but they
+    are not the same record: a lead follow-up is about chasing a buyer, this is
+    about keeping a referral relationship warm, and a partner has many of them
+    over years rather than a handful before a sale.
+
+    Keeping them apart also keeps the lead ones honest. FollowUp.lead is NOT
+    NULL and company scoping runs through `lead__company` in dozens of places —
+    making it nullable to fit partners in would have dropped every partner row
+    out of those scopes silently, which is the kind of leak nobody notices.
+    """
+    channel_partner = models.ForeignKey(
+        ChannelPartner, on_delete=models.CASCADE, related_name='follow_ups')
+    assigned_to = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='partner_follow_ups')
+    scheduled_at = models.DateTimeField()
+    completed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=FOLLOWUP_STATUS, default='pending')
+    remarks = EncryptedTextField(blank=True)
+    outcome = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_partner_follow_ups')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['scheduled_at']
+        indexes = [
+            models.Index(fields=['channel_partner', 'scheduled_at']),
+            models.Index(fields=['assigned_to', 'status', 'scheduled_at']),
+        ]
+
+    def __str__(self):
+        return f'Follow-up with {self.channel_partner_id} on {self.scheduled_at:%d %b %Y}'
+
+
+class PartnerSiteVisit(models.Model):
+    """Taking a channel partner to see a project.
+
+    Carries no hot/warm/cold outcome, deliberately: a partner is a continuing
+    relationship, not a lead being qualified, and there is no pipeline stage for
+    them to move to. `status` is only the state of the visit itself.
+    """
+    channel_partner = models.ForeignKey(
+        ChannelPartner, on_delete=models.CASCADE, related_name='site_visits')
+    # Which site they were shown — required, so a visit can be counted against a
+    # project the way a lead's site visit is.
+    project = models.ForeignKey(Project, on_delete=models.PROTECT,
+                                related_name='partner_site_visits')
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    visited_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=SV_STATUS, default='scheduled')
+    # Whoever is hosting them.
+    host = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                             related_name='hosted_partner_visits')
+    remarks = EncryptedTextField(blank=True)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_partner_site_visits')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-scheduled_at']
+        indexes = [
+            models.Index(fields=['channel_partner', '-scheduled_at']),
+            models.Index(fields=['project', 'status']),
+        ]
+
+    def __str__(self):
+        return f'Partner visit {self.channel_partner_id} -> {self.project_id}'
 
 
 class Lead(models.Model):

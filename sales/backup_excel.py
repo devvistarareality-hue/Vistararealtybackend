@@ -106,6 +106,13 @@ SHEETS = [
     ]),
     ('Channel Partner', [
         Table('Channel Partners', 'sales.ChannelPartner', 'company'),
+        # Activity against a partner, not the directory row itself — restorable
+        # for the same reason Sales' own Follow-Ups and Site Visits are: it is
+        # work that was done, and a reset-then-restore has to bring it back.
+        Table('Partner Follow-Ups', 'sales.PartnerFollowUp',
+              'channel_partner__company', restorable=True),
+        Table('Partner Site Visits', 'sales.PartnerSiteVisit',
+              'channel_partner__company', restorable=True),
     ]),
     ('HR', [
         Table('Users', 'accounts.User', 'company'),

@@ -2,7 +2,7 @@ from django.db.models import Q
 from rest_framework import serializers
 from .models import (
     LeadSource, Project, Plot, Lead, FollowUp, SiteVisit, Closure, LeadStatusHistory, Booking,
-    LeadTransfer, ChannelPartner,
+    LeadTransfer, ChannelPartner, PartnerFollowUp, PartnerSiteVisit,
 )
 
 
@@ -14,12 +14,17 @@ class LeadSourceSerializer(serializers.ModelSerializer):
 
 class ChannelPartnerSerializer(serializers.ModelSerializer):
     lead_count = serializers.IntegerField(read_only=True, default=0)
+    # Activity with the partner themselves. Annotated by the list view; the
+    # defaults keep the detail and create responses, which don't annotate, valid.
+    follow_up_count = serializers.IntegerField(read_only=True, default=0)
+    site_visit_count = serializers.IntegerField(read_only=True, default=0)
 
     class Meta:
         model = ChannelPartner
         fields = [
             'id', 'company_id', 'name', 'contact_no', 'firm_name', 'category', 'segment',
             'city', 'area', 'is_active', 'created_by', 'created_at', 'updated_at', 'lead_count',
+            'follow_up_count', 'site_visit_count',
         ]
         read_only_fields = ['company_id', 'created_by', 'created_at', 'updated_at']
 
@@ -563,3 +568,41 @@ class LeadTransferSerializer(serializers.ModelSerializer):
                   'decided_by', 'decided_by_name', 'decided_at', 'decision_note',
                   'created_at']
         read_only_fields = ['status', 'decided_by', 'decided_at', 'from_stm', 'requested_by']
+
+
+class PartnerFollowUpSerializer(serializers.ModelSerializer):
+    partner_name = serializers.CharField(source='channel_partner.name', read_only=True, default='')
+    partner_firm = serializers.CharField(source='channel_partner.firm_name', read_only=True, default='')
+    assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default='')
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default='')
+
+    class Meta:
+        model = PartnerFollowUp
+        fields = [
+            'id', 'channel_partner', 'partner_name', 'partner_firm',
+            'assigned_to', 'assigned_to_name', 'scheduled_at', 'completed_at',
+            'status', 'remarks', 'outcome', 'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
+        # Optional on the wire — the view falls back to the caller, so the
+        # common "I'm calling this partner myself" case needs no assignee.
+        extra_kwargs = {'assigned_to': {'required': False}}
+
+
+class PartnerSiteVisitSerializer(serializers.ModelSerializer):
+    partner_name = serializers.CharField(source='channel_partner.name', read_only=True, default='')
+    partner_firm = serializers.CharField(source='channel_partner.firm_name', read_only=True, default='')
+    project_name = serializers.CharField(source='project.name', read_only=True, default='')
+    host_name = serializers.CharField(source='host.name', read_only=True, default='')
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, default='')
+
+    class Meta:
+        model = PartnerSiteVisit
+        fields = [
+            'id', 'channel_partner', 'partner_name', 'partner_firm',
+            'project', 'project_name', 'scheduled_at', 'visited_at', 'status',
+            'host', 'host_name', 'remarks', 'created_by', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
