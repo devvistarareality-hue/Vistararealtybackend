@@ -3357,6 +3357,57 @@ class LeadSourceDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _partner_with_phone(company, contact_no, exclude_id=None):
+    """The partner in `company` already holding this number, or None.
+
+    Matched on contact_key, the HMAC of the last ten digits, so '98765 43210',
+    '+919876543210' and '9876543210' are the same partner — which is the point,
+    since the same broker gets typed a different way each time.
+
+    An empty key (no digits, or no FIELD_ENCRYPTION_KEY) matches nothing rather
+    than matching every partner whose key is also blank.
+    """
+    key = phone_blind_index(contact_no)
+    if not key:
+        return None
+    qs = ChannelPartner.objects.filter(company=company, contact_key=key)
+    if exclude_id:
+        qs = qs.exclude(pk=exclude_id)
+    return qs.first()
+
+
+class ChannelPartnerLookupView(APIView):
+    """Is this number already a channel partner? Asked while the number is typed.
+
+    Exists so the Add form can say whose number it is before the user fills in the
+    rest and loses the lot to a validation error. The create endpoint enforces the
+    same rule — this is the courtesy, not the control.
+
+    Returns only the name and firm of the match: enough to recognise who it is,
+    without turning a phone box into a way to read out the directory.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        exclude = request.query_params.get('exclude')
+        match = _partner_with_phone(
+            company, request.query_params.get('contact_no', ''),
+            exclude_id=exclude if (exclude or '').isdigit() else None)
+        if not match:
+            return Response({'exists': False})
+        return Response({
+            'exists': True,
+            'id': match.id,
+            'name': match.name or '',
+            'firm_name': match.firm_name or '',
+            'is_active': match.is_active,
+        })
+
+
 class ChannelPartnerListCreateView(APIView):
     """Admin-only directory of external referral partners (CP Details) — distinct
     from a 'CP Executive' employee, who manages the relationship with these."""
@@ -3399,7 +3450,21 @@ class ChannelPartnerListCreateView(APIView):
         ser = ChannelPartnerSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        cp = ser.save(company=_resolve_company(request), created_by=request.user)
+        company = _resolve_company(request)
+        # One partner per number. The form checks as the number is typed, but the
+        # rule has to live here too — the form is not the only way in, and two
+        # people adding the same broker at once would both pass a client check.
+        clash = _partner_with_phone(company, ser.validated_data.get('contact_no'))
+        if clash:
+            who = clash.name or 'Another partner'
+            if clash.firm_name:
+                who += f' ({clash.firm_name})'
+            return Response(
+                {'detail': f'{who} is already registered with this contact number.',
+                 'existing': {'id': clash.id, 'name': clash.name or '',
+                              'firm_name': clash.firm_name or ''}},
+                status=status.HTTP_409_CONFLICT)
+        cp = ser.save(company=company, created_by=request.user)
         # Optional backdate — "when did this partnership actually start" — same
         # override-after-create trick as a Lead's lead_date (created_at is
         # auto_now_add, so it can't be set via the serializer).
@@ -3423,6 +3488,21 @@ class ChannelPartnerDetailView(APIView):
         ser = ChannelPartnerSerializer(cp, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Editing a number onto someone else's is the same collision as creating
+        # one. Itself excluded, or saving a partner without touching the number
+        # would report them as their own duplicate.
+        if 'contact_no' in ser.validated_data:
+            clash = _partner_with_phone(cp.company, ser.validated_data['contact_no'],
+                                        exclude_id=cp.pk)
+            if clash:
+                who = clash.name or 'Another partner'
+                if clash.firm_name:
+                    who += f' ({clash.firm_name})'
+                return Response(
+                    {'detail': f'{who} is already registered with this contact number.',
+                     'existing': {'id': clash.id, 'name': clash.name or '',
+                                  'firm_name': clash.firm_name or ''}},
+                    status=status.HTTP_409_CONFLICT)
         ser.save()
         return Response(ser.data)
 
