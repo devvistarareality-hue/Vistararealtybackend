@@ -365,6 +365,37 @@ class ARReceiptAuditView(APIView):
         } for a in rc.audit.select_related('changed_by')])
 
 
+COMING_MONTHS = 4   # Project-wise "coming due": this month + the next three, then After
+
+
+def _coming_months(as_of, n=COMING_MONTHS):
+    months, y, m = [], as_of.year, as_of.month
+    for _ in range(n):
+        months.append((y, m))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    labels = [date(y, m, 1).strftime('%b-%y') for y, m in months]
+    return months, labels + ['After %s' % labels[-1], 'No date']
+
+
+def _coming_due(r, as_of, months):
+    """Not-yet-due money by month: this month and the next three, then everything
+    later, then lines with no due date. Same remaining amounts the engine's own
+    forecast uses (r.lines), split over four months instead of its three."""
+    out = [ZERO] * (len(months) + 2)
+    for st in r.lines:
+        due = st.line.due
+        if st.remaining <= 0 or (due is not None and due <= as_of):
+            continue
+        if due is None:
+            out[-1] += st.remaining
+            continue
+        key = (due.year, due.month)
+        out[months.index(key) if key in months else len(months)] += st.remaining
+    return out
+
+
 class ARDashboardView(APIView):
     """Portfolio view: totals, ageing, month-wise dues, worst accounts and the
     accounts whose booking data needs fixing."""
@@ -392,6 +423,8 @@ class ARDashboardView(APIView):
         # The same figures, per project — the dashboard's Project-wise view. Summed
         # from the very accounts the totals above are, so the two always agree.
         by_project = {}
+        cm_months, cm_labels = _coming_months(as_of)
+        coming = [ZERO] * len(cm_labels)
         for acct, plan, r, m, _ in _computed(qs, as_of):
             for k in totals:
                 totals[k] += getattr(r, k)
@@ -399,13 +432,16 @@ class ARDashboardView(APIView):
             bp = by_project.get(pid)
             if bp is None:
                 bp = by_project[pid] = {'totals': {k: ZERO for k in totals}, 'ageing': {label: ZERO for label, _, _ in AGEING_BUCKETS},
-                                        'accounts': 0, 'overdue_accounts': 0}
+                                        'accounts': 0, 'overdue_accounts': 0, 'coming': [ZERO] * len(cm_labels)}
             bp['accounts'] += 1
             bp['overdue_accounts'] += 1 if r.overdue > 0 else 0
             for k in totals:
                 bp['totals'][k] += getattr(r, k)
             for k, v in r.ageing.items():
                 bp['ageing'][k] = bp['ageing'].get(k, ZERO) + v
+            for i, v in enumerate(_coming_due(r, as_of, cm_months)):
+                bp['coming'][i] += v
+                coming[i] += v
             for k, v in r.ageing.items():
                 ageing[k] += v
             for lbl, v in r.month_forecast:
@@ -444,7 +480,11 @@ class ARDashboardView(APIView):
                 'totals': {k: rupees(v) for k, v in bp['totals'].items()},
                 'pct_realised': round(float(bp['totals']['received'] / bp['totals']['collectable'] * 100), 1) if bp['totals']['collectable'] else 0,
                 'ageing': {k: rupees(v) for k, v in bp['ageing'].items()},
+                'coming': [rupees(v) for v in bp['coming']],
             } for pid, bp in by_project.items()), key=lambda x: x['totals']['os_with_interest'], reverse=True),
+            # Labels for `coming` (this month … +3, After, No date) and the totals.
+            'coming_labels': cm_labels,
+            'coming': [rupees(v) for v in coming],
         })
 
 

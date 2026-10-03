@@ -432,3 +432,22 @@ class ARProjectWiseDashboardTests(TestCase):
             self.assertEqual(sum(p['totals'][k] for p in d['by_project']), d['totals'][k], k)
         self.assertEqual(sum(sum(p['ageing'].values()) for p in d['by_project']), sum(d['ageing'].values()))
 
+    def test_coming_due_splits_the_next_four_months_and_adds_up(self):
+        co = Company.objects.create(code='CD', name='CD')
+        user = User.objects.create_user('cd@test.local', company=co, user_code='CD1', password='x', name='C',
+                                        role='Employee', modules=['AR'])
+        a = Project.objects.create(company=co, name='Kalrav')
+        make_booking(co, a, plot='1', installments=[
+            {'no': 1, 'date': '2026-10-20', 'amt': 100000},   # this month, not yet due
+            {'no': 2, 'date': '2026-11-12', 'amt': 200000},
+            {'no': 3, 'date': '2027-01-05', 'amt': 300000},   # fourth month
+            {'no': 4, 'date': '2027-03-01', 'amt': 400000},   # after
+            {'no': 5, 'date': '2026-09-01', 'amt': 50000},    # already overdue: not counted
+        ], total_extra=D('0'), final_amount=D('1050000'))
+        api = APIClient(); api.force_authenticate(user)
+        d = api.get('/api/ar/dashboard/?as_of=2026-10-03').json()
+        self.assertEqual(d['coming_labels'][:5], ['Oct-26', 'Nov-26', 'Dec-26', 'Jan-27', 'After Jan-27'])
+        self.assertEqual(d['coming'][:5], [100000, 200000, 0, 300000, 400000])
+        self.assertEqual(d['by_project'][0]['coming'][:5], [100000, 200000, 0, 300000, 400000])
+        self.assertEqual(sum(d['coming']), d['totals']['not_due'])
+
