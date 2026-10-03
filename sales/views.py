@@ -6762,6 +6762,8 @@ BOOKING_EXPORT_COLUMNS = [
     ('Accounts Status',          'accounts_status',     'text'),
     ('Accounts Approved By',     'accounts_by',         'text'),
     ('Accounts Approved On',     'accounts_on',         'text'),
+    # Points at the Payment Schedule sheet, where the instalments themselves are.
+    ('Instalments',              'instalment_count',    'num'),
 ]
 
 
@@ -6780,6 +6782,16 @@ def _unit_sort_key(unit):
     parts = [p for p in re.split(r'(\d+)', text.upper()) if p]
     return (0 if text[:1].isdigit() else 1,
             [(1, int(p)) if p.isdigit() else (0, p) for p in parts])
+
+
+def _as_float(value):
+    """A schedule entry's numbers arrive from JSON and may be '', None or a string."""
+    if value in (None, ''):
+        return 0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class BookingExportView(APIView):
@@ -6823,9 +6835,31 @@ class BookingExportView(APIView):
         # Unit order within each project — what someone reading the sheet expects, and
         # not something the database can do: the unit label is text ("401", "Shop4",
         # "EOI-23") and sorting it as text puts 1004 before 101.
-        rows = sorted((self._row(b) for b in qs),
+        # A Pratishtha flat or shop carries its own price breakdown on the plot —
+        # box price, token, bank loan — and its LOI prints that instead of the
+        # land/construction split. One query for all of them, rather than touching
+        # Plot once per booking.
+        plot_ids = set()
+        bookings = list(qs)
+        for b in bookings:
+            if b.plot_id:
+                plot_ids.add(b.plot_id)
+            plot_ids.update(b.plot_ids or [])
+        books = {}
+        if plot_ids:
+            books = {pid: (pb or {}) for pid, pb in
+                     Plot.objects.filter(id__in=plot_ids)
+                     .values_list('id', 'price_book') if pb}
+
+        rows = sorted((self._row(b, books) for b in bookings),
                       key=lambda r: (r['project_name'], _unit_sort_key(r['unit'])))
         wb = self._workbook(rows, company, project)
+        # The LOI prints three things the flat sheet above cannot hold, because each is
+        # a list of unknown length against one booking: its payment schedules and its
+        # custom terms. They get a sheet each rather than a hundred sparse columns.
+        self._schedule_sheet(wb, rows)
+        self._pricing_sheet(wb, rows)
+        self._terms_sheet(wb, rows)
 
         stamp = timezone.now().strftime('%Y-%m-%d')
         label = (project.name if project else 'All Projects')
@@ -6838,7 +6872,7 @@ class BookingExportView(APIView):
         resp['Content-Disposition'] = f'attachment; filename="Bookings-{safe}-{stamp}.xlsx"'
         return resp
 
-    def _row(self, b):
+    def _row(self, b, books=None):
         """One booking flattened to the column attributes above."""
         def dt(value):
             return timezone.localtime(value).strftime('%d/%m/%Y %I:%M %p') if value else ''
@@ -6883,7 +6917,179 @@ class BookingExportView(APIView):
             'accounts_status': (b.accounts_status or '').title(),
             'accounts_by': b.accounts_approved_by.name if b.accounts_approved_by_id else '',
             'accounts_on': dt(b.accounts_approved_at),
+            # Not columns on the flat sheet — consumed by _schedule_sheet/_terms_sheet.
+            # The LOI's 'Unit Price Payment Schedule', 'Additional Extra Work Amount
+            # Schedule' and its custom terms, which were in the document but in no
+            # column of this workbook.
+            '_installments': b.installments or [],
+            '_extra_work_inst': b.extra_work_inst or [],
+            '_extra_terms': b.extra_terms or [],
+            'instalment_count': len(b.installments or []),
+            # Price books of the units on this booking, in plot order — consumed by
+            # _pricing_sheet. Empty for everything that is not a Pratishtha flat/shop.
+            # plot_id is normally repeated inside plot_ids, so de-duplicate while
+            # keeping order — otherwise a single flat is priced twice on its sheet.
+            '_price_books': [(books or {}).get(pid) for pid in
+                             dict.fromkeys(([b.plot_id] if b.plot_id else [])
+                                           + list(b.plot_ids or []))
+                             if (books or {}).get(pid)],
         }
+
+
+    @staticmethod
+    def _sheet_head(ws, headings, title, subtitle):
+        """Title, subtitle and a frozen navy header row — the same furniture as the
+        main sheet, so the extra sheets do not read as an afterthought."""
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        ws.append([title])
+        ws.append([subtitle])
+        ws.append([])
+        ws['A1'].font = Font(bold=True, size=14, color='FF0F1838')
+        ws['A2'].font = Font(size=10, color='FF8492A6')
+        ws.append(headings)
+        header_row = ws.max_row
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color='FFFFFFFF', size=10)
+            cell.fill = PatternFill('solid', fgColor='FF0F1838')
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        ws.freeze_panes = f'A{header_row + 1}'
+        for idx, heading in enumerate(headings, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = max(13, min(len(heading) + 6, 30))
+        return header_row
+
+    def _schedule_sheet(self, wb, rows):
+        """Every instalment of every booking, one per line.
+
+        The LOI devotes whole sections to these and the flat sheet had none of it —
+        a booking's payment plan was readable only by opening its PDF. One row per
+        instalment rather than Inst-1-Date/Inst-1-Amt/... columns: the count varies
+        per booking, so columns would be as wide as the longest plan and empty for
+        everyone else.
+
+        The Schedule column keeps the LOI's own split between the unit price plan and
+        the extra-work plan, which are separate sections of the document and can carry
+        different dates.
+        """
+        from openpyxl.utils import get_column_letter
+        MONEY = '#,##0.00'
+        headings = ['Project', 'Unit', 'Client', 'Schedule', 'No.', 'Due Date',
+                    'Percent', 'Amount', 'Description']
+        lines = []
+        for r in rows:
+            for label, items in (('Unit Price', r['_installments']),
+                                 ('Extra Work', r['_extra_work_inst'])):
+                for i in items:
+                    if not isinstance(i, dict):
+                        continue
+                    lines.append([
+                        r['project_name'], r['unit'], r['client_name'], label,
+                        i.get('no') or '', i.get('date') or '',
+                        _as_float(i.get('pct')), _as_float(i.get('amt')),
+                        str(i.get('desc') or i.get('title') or ''),
+                    ])
+        if not lines:
+            return
+        ws = wb.create_sheet('Payment Schedule')
+        header_row = self._sheet_head(
+            ws, headings, 'Payment Schedule',
+            f"{len(lines)} instalment{'' if len(lines) == 1 else 's'} across "
+            f"{len({(l[0], l[1], l[2]) for l in lines})} booking(s)")
+        for line in lines:
+            ws.append(line)
+            ws.cell(row=ws.max_row, column=8).number_format = MONEY
+        first, last = header_row + 1, ws.max_row
+        total = ws.max_row + 1
+        ws.cell(row=total, column=1, value='GRAND TOTAL')
+        col = get_column_letter(8)
+        cell = ws.cell(row=total, column=8, value=f'=SUM({col}{first}:{col}{last})')
+        cell.number_format = MONEY
+        from openpyxl.styles import Font, PatternFill
+        for idx in range(1, len(headings) + 1):
+            c = ws.cell(row=total, column=idx)
+            c.font = Font(bold=True, color='FF0F1838', size=10)
+            c.fill = PatternFill('solid', fgColor='FFEEF1F7')
+        ws.column_dimensions['I'].width = 60
+
+
+    def _pricing_sheet(self, wb, rows):
+        """Flat and shop pricing, as the LOI states it for those units.
+
+        A Pratishtha unit's LOI does not show the land/construction split the other
+        projects use — it quotes an all-inclusive box price broken into final unit
+        price, stamp duty + registration, GST and bank processing, then token and
+        bank loan under 'How You Pay'. None of that fits the main sheet's columns,
+        which are built around the land/construction model, and a booking can hold
+        several such units.
+        """
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Font, PatternFill
+        MONEY = '#,##0.00'
+        headings = ['Project', 'Unit', 'Client', 'Kind', 'Flat Area', 'Terrace Area',
+                    'Facing', 'Final Unit Price', 'Stamp Duty + Registration', 'GST',
+                    'Bank Processing', 'Token', 'Bank Loan', 'Total']
+        money_from = 8
+        lines = []
+        for r in rows:
+            for pb in r['_price_books']:
+                lines.append([
+                    r['project_name'], str(pb.get('unit') or r['unit']), r['client_name'],
+                    str(pb.get('kind') or '').title(),
+                    _as_float(pb.get('flat_area')) or _as_float(pb.get('sq_feet')),
+                    _as_float(pb.get('terrace_area')),
+                    str(pb.get('facing') or '').title(),
+                    _as_float(pb.get('dastavej_value')), _as_float(pb.get('stamp_duty_reg')),
+                    _as_float(pb.get('gst')), _as_float(pb.get('bank_processing')),
+                    _as_float(pb.get('token')), _as_float(pb.get('bank_loan')),
+                    _as_float(pb.get('grand_total')) or _as_float(pb.get('total'))
+                    or _as_float(pb.get('box_price')),
+                ])
+        if not lines:
+            return
+        ws = wb.create_sheet('Flat and Shop Pricing')
+        header_row = self._sheet_head(
+            ws, headings, 'Flat and Shop Pricing',
+            f"{len(lines)} unit{'' if len(lines) == 1 else 's'} priced from a price book")
+        for line in lines:
+            ws.append(line)
+            for idx in range(money_from, len(headings) + 1):
+                ws.cell(row=ws.max_row, column=idx).number_format = MONEY
+        first, last = header_row + 1, ws.max_row
+        total = ws.max_row + 1
+        ws.cell(row=total, column=1, value='GRAND TOTAL')
+        for idx in range(1, len(headings) + 1):
+            cell = ws.cell(row=total, column=idx)
+            if idx >= money_from:
+                col = get_column_letter(idx)
+                cell.value = f'=SUM({col}{first}:{col}{last})'
+                cell.number_format = MONEY
+            cell.font = Font(bold=True, color='FF0F1838', size=10)
+            cell.fill = PatternFill('solid', fgColor='FFEEF1F7')
+
+    def _terms_sheet(self, wb, rows):
+        """The booking-specific terms the LOI prints under its standard ones.
+
+        Free text, and sometimes the only record of what was actually agreed — a
+        construction commitment, a GST arrangement — so it belongs in an export that
+        is meant to stand in for reading the documents.
+        """
+        headings = ['Project', 'Unit', 'Client', 'Title', 'Term']
+        lines = [[r['project_name'], r['unit'], r['client_name'],
+                  str(t.get('title') or ''), str(t.get('desc') or '')]
+                 for r in rows for t in r['_extra_terms'] if isinstance(t, dict)]
+        if not lines:
+            return
+        ws = wb.create_sheet('Additional Terms')
+        self._sheet_head(ws, headings, 'Additional Terms',
+                         f"{len(lines)} term{'' if len(lines) == 1 else 's'} "
+                         f"recorded on the bookings in this export")
+        for line in lines:
+            ws.append(line)
+        ws.column_dimensions['E'].width = 90
+        for row in ws.iter_rows(min_row=5, min_col=5, max_col=5):
+            for cell in row:
+                cell.alignment = cell.alignment.copy(wrap_text=True, vertical='top')
+
 
     def _workbook(self, rows, company, project):
         import openpyxl
