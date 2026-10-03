@@ -2841,6 +2841,28 @@ def _notify_project_approvers(company, project, creator):
         logger.exception('Could not notify project approvers for project %s', project.id)
 
 
+def _completion_outcome_error(request, obj, noun):
+    """Marking one done requires saying what happened.
+
+    A follow-up or visit closed with no note is a row that proves a call was made
+    and records nothing about it — which is the opposite of why anyone keeps these.
+    The screen asks for it before sending; this is what makes the rule true rather
+    than merely usual.
+
+    An existing outcome counts: somebody who typed it when scheduling, or on an
+    earlier edit, is not asked again.
+    """
+    if request.data.get('status') != 'completed':
+        return None
+    typed = str(request.data.get('outcome') or '').strip()
+    if typed or str(getattr(obj, 'outcome', '') or '').strip():
+        return None
+    return Response(
+        {'detail': f'Add remarks before marking this {noun} done.',
+         'outcome': ['Required when marking as completed.']},
+        status=status.HTTP_400_BAD_REQUEST)
+
+
 class PartnerFollowUpListCreateView(APIView):
     """Follow-ups with channel partners themselves, not with their leads.
 
@@ -2903,6 +2925,9 @@ class PartnerFollowUpDetailView(APIView):
                                'channel_partner__company').filter(pk=pk).first()
         if not obj:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        err = _completion_outcome_error(request, obj, 'follow-up')
+        if err:
+            return err
         ser = PartnerFollowUpSerializer(obj, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -2982,6 +3007,9 @@ class PartnerSiteVisitDetailView(APIView):
                                'channel_partner__company').filter(pk=pk).first()
         if not obj:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        err = _completion_outcome_error(request, obj, 'site visit')
+        if err:
+            return err
         ser = PartnerSiteVisitSerializer(obj, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)

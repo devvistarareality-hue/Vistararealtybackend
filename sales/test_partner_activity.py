@@ -201,10 +201,99 @@ class PartnerActivityTests(APITestCase):
         auth(self.client, self.cp_exec)
         sv = PartnerSiteVisit.objects.create(channel_partner=self.partner, project=self.project,
                                              scheduled_at='2026-11-05T07:00:00Z')
-        r = self.client.patch(f'{SV}{sv.id}/', {'status': 'completed'}, format='json')
+        r = self.client.patch(f'{SV}{sv.id}/',
+                              {'status': 'completed', 'outcome': 'Walked the plot'},
+                              format='json')
         self.assertEqual(r.status_code, 200, r.data)
         sv.refresh_from_db()
         self.assertIsNotNone(sv.visited_at)
+
+    def test_marking_a_follow_up_done_needs_remarks(self):
+        """A row closed with no note records that a call was scheduled and nothing
+        about how it went — the opposite of why anyone keeps these."""
+        auth(self.client, self.cp_exec)
+        fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
+                                            assigned_to=self.cp_exec,
+                                            scheduled_at='2026-11-02T10:00:00Z')
+        r = self.client.patch(f'{FU}{fu.id}/', {'status': 'completed'}, format='json')
+        self.assertEqual(r.status_code, 400, r.data)
+        fu.refresh_from_db()
+        self.assertEqual(fu.status, 'pending', 'must not have been closed')
+        self.assertIsNone(fu.completed_at)
+
+    def test_whitespace_is_not_remarks(self):
+        auth(self.client, self.cp_exec)
+        fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
+                                            assigned_to=self.cp_exec,
+                                            scheduled_at='2026-11-02T10:00:00Z')
+        r = self.client.patch(f'{FU}{fu.id}/', {'status': 'completed', 'outcome': '   '},
+                              format='json')
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_marking_a_site_visit_done_needs_remarks(self):
+        auth(self.client, self.cp_exec)
+        sv = PartnerSiteVisit.objects.create(channel_partner=self.partner, project=self.project,
+                                             scheduled_at='2026-11-05T07:00:00Z')
+        r = self.client.patch(f'{SV}{sv.id}/', {'status': 'completed'}, format='json')
+        self.assertEqual(r.status_code, 400, r.data)
+        sv.refresh_from_db()
+        self.assertEqual(sv.status, 'scheduled')
+        self.assertIsNone(sv.visited_at)
+
+    def test_done_with_remarks_goes_through_and_keeps_them(self):
+        auth(self.client, self.cp_exec)
+        fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
+                                            assigned_to=self.cp_exec,
+                                            scheduled_at='2026-11-02T10:00:00Z')
+        r = self.client.patch(f'{FU}{fu.id}/',
+                              {'status': 'completed', 'outcome': 'Spoke, sending the price list'},
+                              format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        fu.refresh_from_db()
+        self.assertEqual(fu.status, 'completed')
+        self.assertEqual(fu.outcome, 'Spoke, sending the price list')
+        self.assertIsNotNone(fu.completed_at)
+
+        sv = PartnerSiteVisit.objects.create(channel_partner=self.partner, project=self.project,
+                                             scheduled_at='2026-11-05T07:00:00Z')
+        r = self.client.patch(f'{SV}{sv.id}/',
+                              {'status': 'completed', 'outcome': 'Showed the C block'},
+                              format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        sv.refresh_from_db()
+        self.assertEqual(sv.outcome, 'Showed the C block')
+        self.assertIsNotNone(sv.visited_at)
+
+    def test_remarks_already_on_the_record_are_not_demanded_again(self):
+        # Typed when scheduling, or on an earlier edit — asking again would be noise.
+        auth(self.client, self.cp_exec)
+        fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
+                                            assigned_to=self.cp_exec,
+                                            scheduled_at='2026-11-02T10:00:00Z',
+                                            outcome='Already noted')
+        r = self.client.patch(f'{FU}{fu.id}/', {'status': 'completed'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def test_the_other_statuses_are_unaffected(self):
+        # Only "done" claims something happened; missed and cancelled do not.
+        auth(self.client, self.cp_exec)
+        fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
+                                            assigned_to=self.cp_exec,
+                                            scheduled_at='2026-11-02T10:00:00Z')
+        self.assertEqual(self.client.patch(f'{FU}{fu.id}/', {'status': 'missed'},
+                                           format='json').status_code, 200)
+        sv = PartnerSiteVisit.objects.create(channel_partner=self.partner, project=self.project,
+                                             scheduled_at='2026-11-05T07:00:00Z')
+        self.assertEqual(self.client.patch(f'{SV}{sv.id}/', {'status': 'cancelled'},
+                                           format='json').status_code, 200)
+
+    def test_an_unrelated_edit_is_not_blocked(self):
+        auth(self.client, self.cp_exec)
+        sv = PartnerSiteVisit.objects.create(channel_partner=self.partner, project=self.project,
+                                             scheduled_at='2026-11-05T07:00:00Z')
+        self.assertEqual(self.client.patch(f'{SV}{sv.id}/',
+                                           {'scheduled_at': '2026-11-06T07:00:00Z'},
+                                           format='json').status_code, 200)
 
     def test_one_can_be_removed(self):
         auth(self.client, self.cp_exec)
@@ -287,12 +376,17 @@ class PartnerActivityTests(APITestCase):
         """
         auth(self.client, self.cp_exec)
 
-        # Mirrors FU_STATUS / DROP_STATUS.fu in the web and app components.
+        # Mirrors FU_STATUS / DROP_STATUS.fu in the web and app components. 'completed'
+        # carries remarks because the screen collects them before sending — see
+        # test_marking_a_follow_up_done_needs_remarks for the rule itself.
         for value in ('pending', 'completed', 'missed', 'rescheduled'):
             fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
                                                 assigned_to=self.cp_exec,
                                                 scheduled_at='2026-11-02T10:00:00Z')
-            r = self.client.patch(f'{FU}{fu.id}/', {'status': value}, format='json')
+            body = {'status': value}
+            if value == 'completed':
+                body['outcome'] = 'Spoke to them'
+            r = self.client.patch(f'{FU}{fu.id}/', body, format='json')
             self.assertEqual(r.status_code, 200, f'{value}: {r.data}')
             self.assertEqual(r.data['status'], value)
 
@@ -301,7 +395,10 @@ class PartnerActivityTests(APITestCase):
             sv = PartnerSiteVisit.objects.create(channel_partner=self.partner,
                                                  project=self.project,
                                                  scheduled_at='2026-11-05T07:00:00Z')
-            r = self.client.patch(f'{SV}{sv.id}/', {'status': value}, format='json')
+            body = {'status': value}
+            if value == 'completed':
+                body['outcome'] = 'Showed them around'
+            r = self.client.patch(f'{SV}{sv.id}/', body, format='json')
             self.assertEqual(r.status_code, 200, f'{value}: {r.data}')
             self.assertEqual(r.data['status'], value)
 
