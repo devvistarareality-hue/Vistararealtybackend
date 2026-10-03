@@ -602,7 +602,7 @@ class PartnerSiteVisitSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'channel_partner', 'partner_name', 'partner_firm',
             'project', 'project_name', 'scheduled_at', 'visited_at', 'status',
-            'host', 'host_name', 'remarks', 'created_by', 'created_by_name',
+            'host', 'host_name', 'remarks', 'outcome', 'created_by', 'created_by_name',
             'created_at', 'updated_at',
         ]
         read_only_fields = ['created_by', 'created_at', 'updated_at']

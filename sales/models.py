@@ -445,6 +445,10 @@ class PartnerSiteVisit(models.Model):
     host = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
                              related_name='hosted_partner_visits')
     remarks = EncryptedTextField(blank=True)
+    # What happened on the visit, required to mark it done. Free text, and the same
+    # field name PartnerFollowUp uses for the same job — NOT SiteVisit.outcome, which
+    # is the hot/warm/cold choice this model deliberately does not have.
+    outcome = models.TextField(blank=True)
     created_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='created_partner_site_visits')

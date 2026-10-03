@@ -2884,6 +2884,28 @@ def _notify_project_approvers(company, project, creator):
         logger.exception('Could not notify project approvers for project %s', project.id)
 
 
+def _completion_outcome_error(request, obj, noun):
+    """Marking one done requires saying what happened.
+
+    A follow-up or visit closed with no note is a row that proves a call was made
+    and records nothing about it — which is the opposite of why anyone keeps these.
+    The screen asks for it before sending; this is what makes the rule true rather
+    than merely usual.
+
+    An existing outcome counts: somebody who typed it when scheduling, or on an
+    earlier edit, is not asked again.
+    """
+    if request.data.get('status') != 'completed':
+        return None
+    typed = str(request.data.get('outcome') or '').strip()
+    if typed or str(getattr(obj, 'outcome', '') or '').strip():
+        return None
+    return Response(
+        {'detail': f'Add remarks before marking this {noun} done.',
+         'outcome': ['Required when marking as completed.']},
+        status=status.HTTP_400_BAD_REQUEST)
+
+
 class PartnerFollowUpListCreateView(APIView):
     """Follow-ups with channel partners themselves, not with their leads.
 
@@ -2946,6 +2968,9 @@ class PartnerFollowUpDetailView(APIView):
                                'channel_partner__company').filter(pk=pk).first()
         if not obj:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        err = _completion_outcome_error(request, obj, 'follow-up')
+        if err:
+            return err
         ser = PartnerFollowUpSerializer(obj, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -3025,6 +3050,9 @@ class PartnerSiteVisitDetailView(APIView):
                                'channel_partner__company').filter(pk=pk).first()
         if not obj:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        err = _completion_outcome_error(request, obj, 'site visit')
+        if err:
+            return err
         ser = PartnerSiteVisitSerializer(obj, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -3403,6 +3431,57 @@ class LeadSourceDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _partner_with_phone(company, contact_no, exclude_id=None):
+    """The partner in `company` already holding this number, or None.
+
+    Matched on contact_key, the HMAC of the last ten digits, so '98765 43210',
+    '+919876543210' and '9876543210' are the same partner — which is the point,
+    since the same broker gets typed a different way each time.
+
+    An empty key (no digits, or no FIELD_ENCRYPTION_KEY) matches nothing rather
+    than matching every partner whose key is also blank.
+    """
+    key = phone_blind_index(contact_no)
+    if not key:
+        return None
+    qs = ChannelPartner.objects.filter(company=company, contact_key=key)
+    if exclude_id:
+        qs = qs.exclude(pk=exclude_id)
+    return qs.first()
+
+
+class ChannelPartnerLookupView(APIView):
+    """Is this number already a channel partner? Asked while the number is typed.
+
+    Exists so the Add form can say whose number it is before the user fills in the
+    rest and loses the lot to a validation error. The create endpoint enforces the
+    same rule — this is the courtesy, not the control.
+
+    Returns only the name and firm of the match: enough to recognise who it is,
+    without turning a phone box into a way to read out the directory.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not can_access_cp_module(request.user):
+            return Response({'detail': 'Channel Partner access only.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        company = _resolve_company(request)
+        exclude = request.query_params.get('exclude')
+        match = _partner_with_phone(
+            company, request.query_params.get('contact_no', ''),
+            exclude_id=exclude if (exclude or '').isdigit() else None)
+        if not match:
+            return Response({'exists': False})
+        return Response({
+            'exists': True,
+            'id': match.id,
+            'name': match.name or '',
+            'firm_name': match.firm_name or '',
+            'is_active': match.is_active,
+        })
+
+
 class ChannelPartnerListCreateView(APIView):
     """Admin-only directory of external referral partners (CP Details) — distinct
     from a 'CP Executive' employee, who manages the relationship with these."""
@@ -3445,7 +3524,21 @@ class ChannelPartnerListCreateView(APIView):
         ser = ChannelPartnerSerializer(data=request.data)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
-        cp = ser.save(company=_resolve_company(request), created_by=request.user)
+        company = _resolve_company(request)
+        # One partner per number. The form checks as the number is typed, but the
+        # rule has to live here too — the form is not the only way in, and two
+        # people adding the same broker at once would both pass a client check.
+        clash = _partner_with_phone(company, ser.validated_data.get('contact_no'))
+        if clash:
+            who = clash.name or 'Another partner'
+            if clash.firm_name:
+                who += f' ({clash.firm_name})'
+            return Response(
+                {'detail': f'{who} is already registered with this contact number.',
+                 'existing': {'id': clash.id, 'name': clash.name or '',
+                              'firm_name': clash.firm_name or ''}},
+                status=status.HTTP_409_CONFLICT)
+        cp = ser.save(company=company, created_by=request.user)
         # Optional backdate — "when did this partnership actually start" — same
         # override-after-create trick as a Lead's lead_date (created_at is
         # auto_now_add, so it can't be set via the serializer).
@@ -3469,6 +3562,21 @@ class ChannelPartnerDetailView(APIView):
         ser = ChannelPartnerSerializer(cp, data=request.data, partial=True)
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+        # Editing a number onto someone else's is the same collision as creating
+        # one. Itself excluded, or saving a partner without touching the number
+        # would report them as their own duplicate.
+        if 'contact_no' in ser.validated_data:
+            clash = _partner_with_phone(cp.company, ser.validated_data['contact_no'],
+                                        exclude_id=cp.pk)
+            if clash:
+                who = clash.name or 'Another partner'
+                if clash.firm_name:
+                    who += f' ({clash.firm_name})'
+                return Response(
+                    {'detail': f'{who} is already registered with this contact number.',
+                     'existing': {'id': clash.id, 'name': clash.name or '',
+                                  'firm_name': clash.firm_name or ''}},
+                    status=status.HTTP_409_CONFLICT)
         ser.save()
         return Response(ser.data)
 
@@ -6201,10 +6309,11 @@ class BookingListCreateView(APIView):
                 stm=booking.stm or request.user, stm_status='closed', status='closed')
 
         # Notify the admin-selected approvers (managers) via push.
-        _notify_booking_approvers(company, booking, request.user)
+        asked = _notify_booking_approvers(company, booking, request.user)
         # The rep gets a receipt, and Accounts & Finance follow the money from the
         # moment it is submitted — a revised LOI changes the figure they track.
-        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval', request=request)
+        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
+                              request=request, skip_ids=asked)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -6875,6 +6984,8 @@ BOOKING_EXPORT_COLUMNS = [
     ('Accounts Status',          'accounts_status',     'text'),
     ('Accounts Approved By',     'accounts_by',         'text'),
     ('Accounts Approved On',     'accounts_on',         'text'),
+    # Points at the Payment Schedule sheet, where the instalments themselves are.
+    ('Instalments',              'instalment_count',    'num'),
 ]
 
 
@@ -6895,18 +7006,32 @@ def _unit_sort_key(unit):
             [(1, int(p)) if p.isdigit() else (0, p) for p in parts])
 
 
+def _as_float(value):
+    """A schedule entry's numbers arrive from JSON and may be '', None or a string."""
+    if value in (None, ''):
+        return 0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 class BookingExportView(APIView):
-    """Every approved booking in the company as an .xlsx, for the Sales module.
+    """Every Accounts-approved booking in the company as an .xlsx.
 
-    Sales and Channel Partner in one sheet: the export applies no CP filter at all,
-    which is the point of it — the Sales module's download is the combined picture,
-    and the CP module has no download of its own. A Module column says which side each
-    booking came from.
+    Sales and Channel Partner in one workbook: the export applies no CP filter at all,
+    which is the point of it — one combined picture rather than a download per module.
+    A Module column says which side each booking came from.
 
-    Approved means what the Approved tab means (status='sold'), whether or not Accounts
-    has signed off yet; the Accounts Status column says where each one stands. Only the
-    current version of a revised booking is listed — a superseded revision would
-    double-count its deal in the grand total.
+    Approved means Accounts has signed off (accounts_status='approved'), not merely
+    that Sales has. The two differ: a booking sits at status='sold' from the moment
+    Sales approves it, with Accounts still to check the figures, and those are the
+    deals most likely to move. This sheet is read as the record of what has actually
+    been sold, and totalling money Accounts has not yet accepted overstates it — so
+    anything still pending with them, or rejected by them, is left out.
+
+    Only the current version of a revised booking is listed, for the same reason: a
+    superseded revision would double-count its deal in the grand total.
 
     ?project=<id> narrows it to one project. The last row is a grand total across every
     money column.
@@ -6919,7 +7044,7 @@ class BookingExportView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
 
-        qs = Booking.objects.filter(company=company, status='sold')
+        qs = Booking.objects.filter(company=company, status='sold', accounts_status='approved')
         project = None
         project_id = request.query_params.get('project')
         if project_id and str(project_id).isdigit():
@@ -6936,9 +7061,31 @@ class BookingExportView(APIView):
         # Unit order within each project — what someone reading the sheet expects, and
         # not something the database can do: the unit label is text ("401", "Shop4",
         # "EOI-23") and sorting it as text puts 1004 before 101.
-        rows = sorted((self._row(b) for b in qs),
+        # A Pratishtha flat or shop carries its own price breakdown on the plot —
+        # box price, token, bank loan — and its LOI prints that instead of the
+        # land/construction split. One query for all of them, rather than touching
+        # Plot once per booking.
+        plot_ids = set()
+        bookings = list(qs)
+        for b in bookings:
+            if b.plot_id:
+                plot_ids.add(b.plot_id)
+            plot_ids.update(b.plot_ids or [])
+        books = {}
+        if plot_ids:
+            books = {pid: (pb or {}) for pid, pb in
+                     Plot.objects.filter(id__in=plot_ids)
+                     .values_list('id', 'price_book') if pb}
+
+        rows = sorted((self._row(b, books) for b in bookings),
                       key=lambda r: (r['project_name'], _unit_sort_key(r['unit'])))
         wb = self._workbook(rows, company, project)
+        # The LOI prints three things the flat sheet above cannot hold, because each is
+        # a list of unknown length against one booking: its payment schedules and its
+        # custom terms. They get a sheet each rather than a hundred sparse columns.
+        self._schedule_sheet(wb, rows)
+        self._pricing_sheet(wb, rows)
+        self._terms_sheet(wb, rows)
 
         stamp = timezone.now().strftime('%Y-%m-%d')
         label = (project.name if project else 'All Projects')
@@ -6951,7 +7098,7 @@ class BookingExportView(APIView):
         resp['Content-Disposition'] = f'attachment; filename="Bookings-{safe}-{stamp}.xlsx"'
         return resp
 
-    def _row(self, b):
+    def _row(self, b, books=None):
         """One booking flattened to the column attributes above."""
         def dt(value):
             return timezone.localtime(value).strftime('%d/%m/%Y %I:%M %p') if value else ''
@@ -6996,7 +7143,179 @@ class BookingExportView(APIView):
             'accounts_status': (b.accounts_status or '').title(),
             'accounts_by': b.accounts_approved_by.name if b.accounts_approved_by_id else '',
             'accounts_on': dt(b.accounts_approved_at),
+            # Not columns on the flat sheet — consumed by _schedule_sheet/_terms_sheet.
+            # The LOI's 'Unit Price Payment Schedule', 'Additional Extra Work Amount
+            # Schedule' and its custom terms, which were in the document but in no
+            # column of this workbook.
+            '_installments': b.installments or [],
+            '_extra_work_inst': b.extra_work_inst or [],
+            '_extra_terms': b.extra_terms or [],
+            'instalment_count': len(b.installments or []),
+            # Price books of the units on this booking, in plot order — consumed by
+            # _pricing_sheet. Empty for everything that is not a Pratishtha flat/shop.
+            # plot_id is normally repeated inside plot_ids, so de-duplicate while
+            # keeping order — otherwise a single flat is priced twice on its sheet.
+            '_price_books': [(books or {}).get(pid) for pid in
+                             dict.fromkeys(([b.plot_id] if b.plot_id else [])
+                                           + list(b.plot_ids or []))
+                             if (books or {}).get(pid)],
         }
+
+
+    @staticmethod
+    def _sheet_head(ws, headings, title, subtitle):
+        """Title, subtitle and a frozen navy header row — the same furniture as the
+        main sheet, so the extra sheets do not read as an afterthought."""
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        ws.append([title])
+        ws.append([subtitle])
+        ws.append([])
+        ws['A1'].font = Font(bold=True, size=14, color='FF0F1838')
+        ws['A2'].font = Font(size=10, color='FF8492A6')
+        ws.append(headings)
+        header_row = ws.max_row
+        for cell in ws[header_row]:
+            cell.font = Font(bold=True, color='FFFFFFFF', size=10)
+            cell.fill = PatternFill('solid', fgColor='FF0F1838')
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        ws.freeze_panes = f'A{header_row + 1}'
+        for idx, heading in enumerate(headings, start=1):
+            ws.column_dimensions[get_column_letter(idx)].width = max(13, min(len(heading) + 6, 30))
+        return header_row
+
+    def _schedule_sheet(self, wb, rows):
+        """Every instalment of every booking, one per line.
+
+        The LOI devotes whole sections to these and the flat sheet had none of it —
+        a booking's payment plan was readable only by opening its PDF. One row per
+        instalment rather than Inst-1-Date/Inst-1-Amt/... columns: the count varies
+        per booking, so columns would be as wide as the longest plan and empty for
+        everyone else.
+
+        The Schedule column keeps the LOI's own split between the unit price plan and
+        the extra-work plan, which are separate sections of the document and can carry
+        different dates.
+        """
+        from openpyxl.utils import get_column_letter
+        MONEY = '#,##0.00'
+        headings = ['Project', 'Unit', 'Client', 'Schedule', 'No.', 'Due Date',
+                    'Percent', 'Amount', 'Description']
+        lines = []
+        for r in rows:
+            for label, items in (('Unit Price', r['_installments']),
+                                 ('Extra Work', r['_extra_work_inst'])):
+                for i in items:
+                    if not isinstance(i, dict):
+                        continue
+                    lines.append([
+                        r['project_name'], r['unit'], r['client_name'], label,
+                        i.get('no') or '', i.get('date') or '',
+                        _as_float(i.get('pct')), _as_float(i.get('amt')),
+                        str(i.get('desc') or i.get('title') or ''),
+                    ])
+        if not lines:
+            return
+        ws = wb.create_sheet('Payment Schedule')
+        header_row = self._sheet_head(
+            ws, headings, 'Payment Schedule',
+            f"{len(lines)} instalment{'' if len(lines) == 1 else 's'} across "
+            f"{len({(l[0], l[1], l[2]) for l in lines})} booking(s)")
+        for line in lines:
+            ws.append(line)
+            ws.cell(row=ws.max_row, column=8).number_format = MONEY
+        first, last = header_row + 1, ws.max_row
+        total = ws.max_row + 1
+        ws.cell(row=total, column=1, value='GRAND TOTAL')
+        col = get_column_letter(8)
+        cell = ws.cell(row=total, column=8, value=f'=SUM({col}{first}:{col}{last})')
+        cell.number_format = MONEY
+        from openpyxl.styles import Font, PatternFill
+        for idx in range(1, len(headings) + 1):
+            c = ws.cell(row=total, column=idx)
+            c.font = Font(bold=True, color='FF0F1838', size=10)
+            c.fill = PatternFill('solid', fgColor='FFEEF1F7')
+        ws.column_dimensions['I'].width = 60
+
+
+    def _pricing_sheet(self, wb, rows):
+        """Flat and shop pricing, as the LOI states it for those units.
+
+        A Pratishtha unit's LOI does not show the land/construction split the other
+        projects use — it quotes an all-inclusive box price broken into final unit
+        price, stamp duty + registration, GST and bank processing, then token and
+        bank loan under 'How You Pay'. None of that fits the main sheet's columns,
+        which are built around the land/construction model, and a booking can hold
+        several such units.
+        """
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Font, PatternFill
+        MONEY = '#,##0.00'
+        headings = ['Project', 'Unit', 'Client', 'Kind', 'Flat Area', 'Terrace Area',
+                    'Facing', 'Final Unit Price', 'Stamp Duty + Registration', 'GST',
+                    'Bank Processing', 'Token', 'Bank Loan', 'Total']
+        money_from = 8
+        lines = []
+        for r in rows:
+            for pb in r['_price_books']:
+                lines.append([
+                    r['project_name'], str(pb.get('unit') or r['unit']), r['client_name'],
+                    str(pb.get('kind') or '').title(),
+                    _as_float(pb.get('flat_area')) or _as_float(pb.get('sq_feet')),
+                    _as_float(pb.get('terrace_area')),
+                    str(pb.get('facing') or '').title(),
+                    _as_float(pb.get('dastavej_value')), _as_float(pb.get('stamp_duty_reg')),
+                    _as_float(pb.get('gst')), _as_float(pb.get('bank_processing')),
+                    _as_float(pb.get('token')), _as_float(pb.get('bank_loan')),
+                    _as_float(pb.get('grand_total')) or _as_float(pb.get('total'))
+                    or _as_float(pb.get('box_price')),
+                ])
+        if not lines:
+            return
+        ws = wb.create_sheet('Flat and Shop Pricing')
+        header_row = self._sheet_head(
+            ws, headings, 'Flat and Shop Pricing',
+            f"{len(lines)} unit{'' if len(lines) == 1 else 's'} priced from a price book")
+        for line in lines:
+            ws.append(line)
+            for idx in range(money_from, len(headings) + 1):
+                ws.cell(row=ws.max_row, column=idx).number_format = MONEY
+        first, last = header_row + 1, ws.max_row
+        total = ws.max_row + 1
+        ws.cell(row=total, column=1, value='GRAND TOTAL')
+        for idx in range(1, len(headings) + 1):
+            cell = ws.cell(row=total, column=idx)
+            if idx >= money_from:
+                col = get_column_letter(idx)
+                cell.value = f'=SUM({col}{first}:{col}{last})'
+                cell.number_format = MONEY
+            cell.font = Font(bold=True, color='FF0F1838', size=10)
+            cell.fill = PatternFill('solid', fgColor='FFEEF1F7')
+
+    def _terms_sheet(self, wb, rows):
+        """The booking-specific terms the LOI prints under its standard ones.
+
+        Free text, and sometimes the only record of what was actually agreed — a
+        construction commitment, a GST arrangement — so it belongs in an export that
+        is meant to stand in for reading the documents.
+        """
+        headings = ['Project', 'Unit', 'Client', 'Title', 'Term']
+        lines = [[r['project_name'], r['unit'], r['client_name'],
+                  str(t.get('title') or ''), str(t.get('desc') or '')]
+                 for r in rows for t in r['_extra_terms'] if isinstance(t, dict)]
+        if not lines:
+            return
+        ws = wb.create_sheet('Additional Terms')
+        self._sheet_head(ws, headings, 'Additional Terms',
+                         f"{len(lines)} term{'' if len(lines) == 1 else 's'} "
+                         f"recorded on the bookings in this export")
+        for line in lines:
+            ws.append(line)
+        ws.column_dimensions['E'].width = 90
+        for row in ws.iter_rows(min_row=5, min_col=5, max_col=5):
+            for cell in row:
+                cell.alignment = cell.alignment.copy(wrap_text=True, vertical='top')
+
 
     def _workbook(self, rows, company, project):
         import openpyxl
@@ -7011,9 +7330,9 @@ class BookingExportView(APIView):
         ws = wb.active
         ws.title = 'Approved Bookings'
 
-        title = f"{company.name if company else ''} — Approved Bookings"
+        title = f"{company.name if company else ''} — Accounts-Approved Bookings"
         subtitle = (f"{project.name if project else 'All Projects'}  ·  "
-                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'}  ·  "
+                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'} approved by Accounts  ·  "
                     f"generated {timezone.localtime(timezone.now()).strftime('%d/%m/%Y %I:%M %p')}")
         ws.append([title])
         ws.append([subtitle])
@@ -7162,7 +7481,7 @@ def _notify_booking_approvers(company, booking, submitter):
                 recipients = [u for u in User.objects.filter(company=company, is_active=True)
                               if _is_hard_admin(u) and u.id != sub_id]
         if not recipients:
-            return
+            return set()
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
         # The rep(s) who sold the unit get their own "submitted" notice from
@@ -7179,8 +7498,9 @@ def _notify_booking_approvers(company, booking, submitter):
             if u.id not in seen:
                 seen.add(u.id)
                 notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
+        return seen
     except Exception:
-        pass
+        return set()
 
 
 def _notify_accounts_managers(company, ntype, title, body, data=None):
@@ -7215,31 +7535,37 @@ BOOKING_EVENTS = {
         # Sales approvers get the "approval needed" request from _notify_booking_approvers.
         'sales':    None,
         'accounts': ('accounts_booking_update', 'New booking — pending Sales approval'),
+        'directors': ('booking_update', 'New booking — pending Sales approval'),
     },
     'sales_approved': {
         'owner':    ('booking_approved', 'Booking approved — pending Accounts'),
         'sales':    ('booking_update', 'Booking approved'),
         'accounts': ('accounts_booking_approval', 'Accounts approval needed'),
+        'directors': ('booking_update', 'Booking approved'),
     },
     'sales_rejected': {
         'owner':    ('booking_rejected', 'Booking rejected'),
         'sales':    ('booking_update', 'Booking rejected'),
         'accounts': ('accounts_booking_update', 'Booking rejected by Sales'),
+        'directors': ('booking_update', 'Booking rejected by Sales'),
     },
     'accounts_approved': {
         'owner':    ('accounts_booking_approved', 'Approved by Accounts — booking confirmed'),
         'sales':    ('booking_update', 'Approved by Accounts'),
         'accounts': ('accounts_booking_update', 'Approved by Accounts'),
+        'directors': ('booking_update', 'Approved by Accounts — booking confirmed'),
     },
     'accounts_rejected': {
         'owner':    ('accounts_booking_rejected', 'Rejected by Accounts'),
         'sales':    ('booking_update', 'Rejected by Accounts'),
         'accounts': ('accounts_booking_update', 'Rejected by Accounts'),
+        'directors': ('booking_update', 'Rejected by Accounts'),
     },
     'cancelled': {
         'owner':    ('booking_cancelled', 'Booking cancelled'),
         'sales':    ('booking_cancelled', 'Booking cancelled'),
         'accounts': ('accounts_booking_cancelled', 'Booking cancelled'),
+        'directors': ('booking_cancelled', 'Booking cancelled'),
     },
 }
 
@@ -7249,6 +7575,22 @@ def _booking_owners(booking):
     if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
         owners.append(booking.revision_of.stm)
     return owners
+
+
+def _booking_directors(company):
+    """Every Director in the company, for every booking in every project.
+
+    The other audiences are per-project: you hear about a booking because you
+    approve that project, or you sold the unit, or Accounts named you on it. A
+    Director is told about all of them regardless — the point is company-wide
+    visibility of what is being sold, not a request to do anything.
+
+    Which is why these carry the informational notification types and never the
+    approval ones. An approval prompt sent to a Director who is not an approver
+    on that project would 403 the moment they tapped it; _notify_booking_approvers
+    stays scoped to people who can actually act.
+    """
+    return list(User.objects.filter(company=company, is_active=True, role='Director'))
 
 
 def _booking_sales_side(company, booking):
@@ -7315,7 +7657,8 @@ def _log_booking_event(request, booking, event, detail=''):
         logger.exception('Could not note booking event %s', event)
 
 
-def _notify_booking_event(company, booking, event, actor=None, detail='', request=None):
+def _notify_booking_event(company, booking, event, actor=None, detail='', request=None,
+                          skip_ids=None):
     """Tell the owner, the Sales/CP side and the Accounts side about a booking event
     (see BOOKING_EVENTS). Everyone is told once — the first audience they belong to
     wins — and the person who acted is not told about their own action, except the
@@ -7339,11 +7682,16 @@ def _notify_booking_event(company, booking, event, actor=None, detail='', reques
         data = {'booking_id': booking.id}
         if booking.closure_id:
             data['closure_id'] = booking.closure_id
-        seen = set()
+        # Seeded with anyone _notify_booking_approvers already reached, so a
+        # Director who approves this project gets the actionable request only.
+        seen = set(skip_ids or ())
         groups = (
             ('owner', lambda: _booking_owners(booking)),
             ('sales', lambda: _booking_sales_side(company, booking)),
             ('accounts', lambda: _booking_accounts_side(company, booking)),
+            # Last on purpose: 'seen' means a Director who is also the rep or an
+            # approver keeps that more specific notice rather than this one.
+            ('directors', lambda: _booking_directors(company)),
         )
         for audience, users in groups:
             if not spec.get(audience):

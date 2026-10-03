@@ -18,6 +18,7 @@ urlpatterns = [
     path('sources/',                   views.LeadSourceListView.as_view()),
     path('sources/<int:pk>/',          views.LeadSourceDetailView.as_view()),
     path('channel-partners/',          views.ChannelPartnerListCreateView.as_view()),
+    path('channel-partners/lookup/',   views.ChannelPartnerLookupView.as_view()),
     path('channel-partners/<int:pk>/', views.ChannelPartnerDetailView.as_view()),
     path('partner-follow-ups/',            views.PartnerFollowUpListCreateView.as_view()),
     path('partner-follow-ups/<int:pk>/',   views.PartnerFollowUpDetailView.as_view()),
