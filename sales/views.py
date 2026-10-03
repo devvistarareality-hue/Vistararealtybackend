@@ -6155,10 +6155,11 @@ class BookingListCreateView(APIView):
                 stm=booking.stm or request.user, stm_status='closed', status='closed')
 
         # Notify the admin-selected approvers (managers) via push.
-        _notify_booking_approvers(company, booking, request.user)
+        asked = _notify_booking_approvers(company, booking, request.user)
         # The rep gets a receipt, and Accounts & Finance follow the money from the
         # moment it is submitted — a revised LOI changes the figure they track.
-        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval', request=request)
+        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
+                              request=request, skip_ids=asked)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -7048,7 +7049,7 @@ def _notify_booking_approvers(company, booking, submitter):
                 recipients = [u for u in User.objects.filter(company=company, is_active=True)
                               if _is_hard_admin(u) and u.id != sub_id]
         if not recipients:
-            return
+            return set()
         unit = booking.plot_numbers or (booking.plot.number if booking.plot_id else booking.area)
         rev = (' (R%d)' % booking.revision_no) if booking.revision_no else ''
         # The rep(s) who sold the unit get their own "submitted" notice from
@@ -7065,8 +7066,9 @@ def _notify_booking_approvers(company, booking, submitter):
             if u.id not in seen:
                 seen.add(u.id)
                 notify(u, 'booking_approval', title, msg, {'booking_id': booking.id})
+        return seen
     except Exception:
-        pass
+        return set()
 
 
 def _notify_accounts_managers(company, ntype, title, body, data=None):
@@ -7101,31 +7103,37 @@ BOOKING_EVENTS = {
         # Sales approvers get the "approval needed" request from _notify_booking_approvers.
         'sales':    None,
         'accounts': ('accounts_booking_update', 'New booking — pending Sales approval'),
+        'directors': ('booking_update', 'New booking — pending Sales approval'),
     },
     'sales_approved': {
         'owner':    ('booking_approved', 'Booking approved — pending Accounts'),
         'sales':    ('booking_update', 'Booking approved'),
         'accounts': ('accounts_booking_approval', 'Accounts approval needed'),
+        'directors': ('booking_update', 'Booking approved'),
     },
     'sales_rejected': {
         'owner':    ('booking_rejected', 'Booking rejected'),
         'sales':    ('booking_update', 'Booking rejected'),
         'accounts': ('accounts_booking_update', 'Booking rejected by Sales'),
+        'directors': ('booking_update', 'Booking rejected by Sales'),
     },
     'accounts_approved': {
         'owner':    ('accounts_booking_approved', 'Approved by Accounts — booking confirmed'),
         'sales':    ('booking_update', 'Approved by Accounts'),
         'accounts': ('accounts_booking_update', 'Approved by Accounts'),
+        'directors': ('booking_update', 'Approved by Accounts — booking confirmed'),
     },
     'accounts_rejected': {
         'owner':    ('accounts_booking_rejected', 'Rejected by Accounts'),
         'sales':    ('booking_update', 'Rejected by Accounts'),
         'accounts': ('accounts_booking_update', 'Rejected by Accounts'),
+        'directors': ('booking_update', 'Rejected by Accounts'),
     },
     'cancelled': {
         'owner':    ('booking_cancelled', 'Booking cancelled'),
         'sales':    ('booking_cancelled', 'Booking cancelled'),
         'accounts': ('accounts_booking_cancelled', 'Booking cancelled'),
+        'directors': ('booking_cancelled', 'Booking cancelled'),
     },
 }
 
@@ -7135,6 +7143,22 @@ def _booking_owners(booking):
     if booking.revision_of_id and booking.revision_of and booking.revision_of.stm_id:
         owners.append(booking.revision_of.stm)
     return owners
+
+
+def _booking_directors(company):
+    """Every Director in the company, for every booking in every project.
+
+    The other audiences are per-project: you hear about a booking because you
+    approve that project, or you sold the unit, or Accounts named you on it. A
+    Director is told about all of them regardless — the point is company-wide
+    visibility of what is being sold, not a request to do anything.
+
+    Which is why these carry the informational notification types and never the
+    approval ones. An approval prompt sent to a Director who is not an approver
+    on that project would 403 the moment they tapped it; _notify_booking_approvers
+    stays scoped to people who can actually act.
+    """
+    return list(User.objects.filter(company=company, is_active=True, role='Director'))
 
 
 def _booking_sales_side(company, booking):
@@ -7201,7 +7225,8 @@ def _log_booking_event(request, booking, event, detail=''):
         logger.exception('Could not note booking event %s', event)
 
 
-def _notify_booking_event(company, booking, event, actor=None, detail='', request=None):
+def _notify_booking_event(company, booking, event, actor=None, detail='', request=None,
+                          skip_ids=None):
     """Tell the owner, the Sales/CP side and the Accounts side about a booking event
     (see BOOKING_EVENTS). Everyone is told once — the first audience they belong to
     wins — and the person who acted is not told about their own action, except the
@@ -7225,11 +7250,16 @@ def _notify_booking_event(company, booking, event, actor=None, detail='', reques
         data = {'booking_id': booking.id}
         if booking.closure_id:
             data['closure_id'] = booking.closure_id
-        seen = set()
+        # Seeded with anyone _notify_booking_approvers already reached, so a
+        # Director who approves this project gets the actionable request only.
+        seen = set(skip_ids or ())
         groups = (
             ('owner', lambda: _booking_owners(booking)),
             ('sales', lambda: _booking_sales_side(company, booking)),
             ('accounts', lambda: _booking_accounts_side(company, booking)),
+            # Last on purpose: 'seen' means a Director who is also the rep or an
+            # approver keeps that more specific notice rather than this one.
+            ('directors', lambda: _booking_directors(company)),
         )
         for audience, users in groups:
             if not spec.get(audience):
