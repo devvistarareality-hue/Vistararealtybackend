@@ -105,7 +105,7 @@ class ARCancellationTests(TestCase):
         self.as_clerk.post(f'/api/ar/cancellations/{cid}/refunds/', {'paid_on': '2025-09-02', 'amount': '128308', 'bank': bid}, format='json')
         bank = next(b for b in self.as_clerk.get('/api/ar/banks/').json()['results'] if b['id'] == bid)
         self.assertEqual((bank['paid_out'], bank['balance']), (328308, 5000000 - 328308))
-        st = self.as_clerk.get(f'/api/ar/banks/{bid}/statement/').json()
+        st = self.as_admin.get(f'/api/ar/banks/{bid}/statement/').json()   # statements need Bank Master
         self.assertEqual([r['kind'] for r in st['rows']], ['out', 'out'])
         self.assertEqual(st['closing_balance'], bank['balance'])
         row = next(c for c in self.as_clerk.get('/api/ar/cancellations/').json()['results'] if c['id'] == cid)

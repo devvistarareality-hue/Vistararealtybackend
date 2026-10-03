@@ -25,22 +25,30 @@ def ar_can(user, key):
     return has_ar_access(user) and user_can(user, key)
 
 
-FINANCE_MODULE = 'Accounts & Finance'
+BANK_MODULE = 'Bank Master'
 
 
-def has_finance_access(user):
-    """Bank Master belongs to the Accounts & Finance department — shared by AR now
-    and Accounts Payable next — so the Accounts & Finance module opens it as well
-    as AR does."""
-    if has_ar_access(user):
-        return True
+def has_bank_master_access(user):
+    """Bank Master is its own module, ticked per person in User Management (under
+    Accounts & Finance). Opening it, reading a bank's statement and adding or editing
+    banks need it. Company and platform admins always have it."""
     if not (user and user.is_authenticated):
         return False
-    return bool(FINANCE_MODULE in (user.modules or []) or FINANCE_MODULE in (user.manager_modules or [])
-                or FINANCE_MODULE in (user.admin_modules or []))
+    return bool(
+        user.is_staff or is_platform_admin(user) or getattr(user, 'role', '') == 'Admin'
+        or BANK_MODULE in (user.modules or [])
+        or BANK_MODULE in (user.manager_modules or [])
+        or BANK_MODULE in (user.admin_modules or [])
+    )
+
+
+def has_bank_list_access(user):
+    """The bank list itself: Bank Master, and AR too — Record Payment (Loan) and
+    cancellation refunds pick a bank and show its balance, so AR users need the list
+    without being able to open Bank Master."""
+    return has_bank_master_access(user) or has_ar_access(user)
 
 
 def can_manage_banks(user):
     from accounts.capabilities import user_can
-    return has_finance_access(user) and user_can(user, 'ar.bank.manage')
-
+    return has_bank_master_access(user) and user_can(user, 'ar.bank.manage')

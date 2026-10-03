@@ -16,7 +16,7 @@ from accounts.permissions import is_platform_admin, scope_to_company
 from companies.models import Company
 from .engine import rupees
 from .models import ARBank, ARReceipt, ARRefund
-from .permissions import can_manage_banks, has_finance_access
+from .permissions import can_manage_banks, has_bank_list_access, has_bank_master_access
 from .services import _d, parse_date
 
 ZERO = Decimal('0')
@@ -129,13 +129,16 @@ class ARBankListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        if not has_finance_access(request.user):
+        if not has_bank_list_access(request.user):
             return _deny()
         banks = list(banks_qs(request))
         by_id = bank_rows(banks)
         rows = sorted(by_id.values(),
                       key=lambda r: (not r['is_active'], r['name'].lower()))
-        return Response({'results': rows, 'can_manage': can_manage_banks(request.user)})
+        # can_open: whether this person has Bank Master itself. AR users get the list
+        # for the Record Payment / refund dropdowns, but the Bank Master page is not theirs.
+        return Response({'results': rows, 'can_manage': can_manage_banks(request.user),
+                         'can_open': has_bank_master_access(request.user)})
 
     def post(self, request):
         if not can_manage_banks(request.user):
@@ -204,7 +207,7 @@ class ARBankStatementView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        if not has_finance_access(request.user):
+        if not has_bank_master_access(request.user):
             return _deny()
         b = banks_qs(request).filter(pk=pk).first()
         if not b:

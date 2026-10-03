@@ -19,7 +19,7 @@ class ARBankTests(TestCase):
         self.other = Company.objects.create(code='OTH', name='Other')
         self.project = Project.objects.create(company=self.co, name='Kalrav 2')
         self.user = User.objects.create_user('ar1@test.local', company=self.co, user_code='AR1', password='x',
-                                             name='AR User', role='Employee', modules=['AR'])
+                                             name='AR User', role='Employee', modules=['AR', 'Bank Master'])
         make_booking(self.co, self.project)
         self.api = APIClient()
         self.api.force_authenticate(self.user)
@@ -117,16 +117,30 @@ class ARBankTests(TestCase):
         theirs = ARBank.objects.create(company=self.other, name='Their Bank')
         self.assertEqual(self.api.get(f'/api/ar/banks/{theirs.id}/statement/').status_code, 404)
 
-    def test_accounts_and_finance_users_reach_bank_master(self):
-        fin = User.objects.create_user('fin@test.local', company=self.co, user_code='FN1', password='x', name='Fin',
-                                       role='Employee', modules=['Accounts & Finance'])
-        sales = User.objects.create_user('sl@test.local', company=self.co, user_code='SL1', password='x', name='S',
-                                         role='Employee', modules=['Sales'])
+    def test_bank_master_is_its_own_module(self):
+        """Opening Bank Master, its statements and adding banks need the Bank Master
+        tick. AR keeps the bank list (Record Payment / refunds pick a bank and show
+        its balance) but nothing more; Accounts & Finance alone gets nothing."""
+        mk = lambda code, mods: User.objects.create_user(f'{code}@test.local', company=self.co, user_code=code,
+                                                         password='x', name=code, role='Employee', modules=mods)
+        banker, ar_only, fin_only = mk('BM1', ['Bank Master']), mk('AR2', ['AR']), mk('FN1', ['Accounts & Finance'])
         bid = self.add_bank('HDFC', '0')
-        c = APIClient(); c.force_authenticate(fin)
+        c = APIClient()
+
+        c.force_authenticate(banker)
         self.assertEqual(c.get('/api/ar/banks/').status_code, 200)
+        self.assertTrue(c.get('/api/ar/banks/').data['can_manage'])
         self.assertEqual(c.get(f'/api/ar/banks/{bid}/statement/').status_code, 200)
         self.assertEqual(c.post('/api/ar/banks/', {'name': 'SBI', 'opening_balance': '0'}, format='json').status_code, 201)
-        c.force_authenticate(sales)
-        self.assertEqual(c.get('/api/ar/banks/').status_code, 403, 'outside the department, no banks')
+
+        c.force_authenticate(ar_only)
+        res = c.get('/api/ar/banks/')
+        self.assertEqual(res.status_code, 200, 'AR still picks a bank when recording a payment')
+        self.assertFalse(res.data['can_manage'])
+        self.assertEqual(c.get(f'/api/ar/banks/{bid}/statement/').status_code, 403)
+        self.assertEqual(c.post('/api/ar/banks/', {'name': 'Axis', 'opening_balance': '0'}, format='json').status_code, 403)
+
+        c.force_authenticate(fin_only)
+        self.assertEqual(c.get('/api/ar/banks/').status_code, 403, 'Accounts & Finance alone does not open banks')
+        self.assertEqual(c.get(f'/api/ar/banks/{bid}/statement/').status_code, 403)
 
