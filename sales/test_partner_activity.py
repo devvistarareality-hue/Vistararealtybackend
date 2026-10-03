@@ -376,9 +376,11 @@ class PartnerActivityTests(APITestCase):
         """
         auth(self.client, self.cp_exec)
 
-        # Mirrors FU_STATUS / DROP_STATUS.fu in the web and app components. 'completed'
-        # carries remarks because the screen collects them before sending — see
-        # test_marking_a_follow_up_done_needs_remarks for the rule itself.
+        # The model's own list. The screens no longer offer 'missed' — an overdue
+        # follow-up reads as overdue rather than being classified by hand — but the
+        # status is still valid and rows already carrying it must keep working.
+        # 'completed' carries remarks because the screen collects them before
+        # sending; see test_marking_a_follow_up_done_needs_remarks for that rule.
         for value in ('pending', 'completed', 'missed', 'rescheduled'):
             fu = PartnerFollowUp.objects.create(channel_partner=self.partner,
                                                 assigned_to=self.cp_exec,
