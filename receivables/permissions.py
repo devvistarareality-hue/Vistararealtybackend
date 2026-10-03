@@ -34,12 +34,15 @@ def has_bank_master_access(user):
     banks need it. Company and platform admins always have it."""
     if not (user and user.is_authenticated):
         return False
-    return bool(
-        user.is_staff or is_platform_admin(user) or getattr(user, 'role', '') == 'Admin'
-        or BANK_MODULE in (user.modules or [])
-        or BANK_MODULE in (user.manager_modules or [])
-        or BANK_MODULE in (user.admin_modules or [])
-    )
+    if user.is_staff or is_platform_admin(user) or getattr(user, 'role', '') == 'Admin':
+        return True
+    if not (BANK_MODULE in (user.modules or []) or BANK_MODULE in (user.manager_modules or [])
+            or BANK_MODULE in (user.admin_modules or [])):
+        return False
+    # A designation can hide it from the menu (Designation Master → Permissions → Menu);
+    # hiding it closes the page too.
+    from accounts.capabilities import can_see_screen
+    return can_see_screen(user, 'bank.screen.list')
 
 
 def has_bank_list_access(user):

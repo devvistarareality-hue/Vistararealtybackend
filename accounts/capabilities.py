@@ -105,6 +105,7 @@ SCREENS = [
     ('ar.screen.register', 'Register', 'AR'),
     ('ar.screen.import', 'Import receipts', 'AR'),
     ('ar.screen.cancellations', 'Cancellations', 'AR'),
+    ('bank.screen.list', 'Banks & statements', 'Bank Master'),
     ('club.screen.dashboard', 'Dashboard', 'Club 1000'),
     ('club.screen.leads', 'Leads', 'Club 1000'),
     ('club.screen.followups', 'Follow-Ups', 'Club 1000'),
@@ -174,6 +175,7 @@ _SHARED_DASHBOARDS = [
     ('execution', 'Task Allocation', 'the site desk'),
     ('purchase', 'Purchase', 'the buying desk'),
     ('land', 'Land', 'the land desk'),
+    ('bank', 'Bank Master', 'the bank list'),
 ]
 for _pfx, _module, _what in _SHARED_DASHBOARDS:
     for _role in DASHBOARD_ROLES:
@@ -247,11 +249,7 @@ MODULE_FAMILY = {
 # Every module the system knows, in the order the launcher shows them. Mirrors
 # ALL_MODULES in the web app's lib/moduleAccess.js.
 ALL_MODULES = ['Sales', 'Channel Partner', 'HR', 'Accounts & Finance', 'AR',
-               'Task Allocation', 'Purchase', 'Land', 'Club 1000']
-
-# Modules that are only an access tick — no menu of their own, no dashboard — but a
-# designation can still be made for them (Designation Master) and set their switches.
-GRANT_MODULES = ['Bank Master']
+               'Task Allocation', 'Purchase', 'Land', 'Club 1000', 'Bank Master']
 
 
 def modules_of(module):
