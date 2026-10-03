@@ -35,13 +35,13 @@ class EveryCapabilityTests(TestCase):
         cls.co = Company.objects.create(code='EVC', name='Every Co')
         cls.desigs = {}
         cls.people = {}
-        for module in ('Sales', 'AR', 'Club 1000'):
+        for module in ('Sales', 'AR', 'Club 1000', 'Bank Master'):
             name = f'{module} Person'
             cls.desigs[module] = Designation.objects.create(company=cls.co, name=name, module=module)
             cls.people[module] = User.objects.create_user(
                 f'{module.lower().replace(" ", "")}@x.com', company=cls.co,
                 user_code=f'E-{module[:3].upper()}', password='x', name=name, role='Manager',
-                designation=name, modules=['Sales', 'AR', 'Club 1000'],
+                designation=name, modules=['Sales', 'AR', 'Club 1000', 'Bank Master'],
                 manager_modules=['Club 1000'])
 
     def test_every_capability_can_be_switched_on_and_off(self):

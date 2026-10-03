@@ -39,8 +39,11 @@ CAPABILITIES = [
      'Book a follow-up, assign it, and record what the customer said.'),
     ('ar.legal_date.set', 'Set the Legal & Other due date', 'AR',
      'Decides when interest starts on that line.'),
-    ('ar.bank.manage', 'Manage banks', 'AR',
-     'Add, edit or retire the banks Loan payments are received into.'),
+    # Bank Master is its own module (ticked per person), so its one switch is set
+    # by a Bank Master designation, not an AR one. The key keeps its old name so
+    # every saved designation still means the same thing.
+    ('ar.bank.manage', 'Add and edit banks', 'Bank Master',
+     'Add, edit or retire the banks Loan payments are received into. Without it, Bank Master and its statements are view-only.'),
     ('ar.cancel.request', 'Raise plot cancellations', 'AR',
      'Ask for a non-paying client\'s plot to be cancelled; an approver decides.'),
     ('ar.refund.record', 'Record cancellation refunds', 'AR',
@@ -237,6 +240,7 @@ MODULE_FAMILY = {
     'AR': ('AR',),
     'Accounts Receivable': ('AR',),
     'Club 1000': ('Club 1000',),
+    'Bank Master': ('Bank Master',),
 }
 
 
@@ -244,6 +248,10 @@ MODULE_FAMILY = {
 # ALL_MODULES in the web app's lib/moduleAccess.js.
 ALL_MODULES = ['Sales', 'Channel Partner', 'HR', 'Accounts & Finance', 'AR',
                'Task Allocation', 'Purchase', 'Land', 'Club 1000']
+
+# Modules that are only an access tick — no menu of their own, no dashboard — but a
+# designation can still be made for them (Designation Master) and set their switches.
+GRANT_MODULES = ['Bank Master']
 
 
 def modules_of(module):

@@ -497,7 +497,7 @@ class DesignationDetailView(APIView):
     def patch(self, request, pk):
         """Set what this designation may do, and whose records it sees. Company
         admins only — this decides everyone else's access."""
-        from .capabilities import (ALL_MODULES, CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES,
+        from .capabilities import (ALL_MODULES, CAPABILITY_KEYS, DASHBOARD_KEYS, DATA_SCOPES, GRANT_MODULES,
                                    SCREEN_KEYS, SCREEN_MODULE, modules_of, with_module_defaults)
         if not (is_platform_admin(request.user) or request.user.is_staff or getattr(request.user, 'role', '') == 'Admin'):
             return Response({'detail': 'Only an administrator can change permissions.'}, status=status.HTTP_403_FORBIDDEN)
@@ -527,7 +527,7 @@ class DesignationDetailView(APIView):
             # keeps an older browser saving exactly what it used to.
             mods = request.data.get('screens_modules')
             if isinstance(mods, list):
-                unknown = [m for m in mods if m not in ALL_MODULES]
+                unknown = [m for m in mods if m not in ALL_MODULES + GRANT_MODULES]
                 if unknown:
                     return Response({'screens_modules': f'Unknown: {", ".join(map(str, unknown))}'},
                                     status=status.HTTP_400_BAD_REQUEST)
