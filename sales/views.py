@@ -6795,17 +6795,21 @@ def _as_float(value):
 
 
 class BookingExportView(APIView):
-    """Every approved booking in the company as an .xlsx, for the Sales module.
+    """Every Accounts-approved booking in the company as an .xlsx.
 
-    Sales and Channel Partner in one sheet: the export applies no CP filter at all,
-    which is the point of it — the Sales module's download is the combined picture,
-    and the CP module has no download of its own. A Module column says which side each
-    booking came from.
+    Sales and Channel Partner in one workbook: the export applies no CP filter at all,
+    which is the point of it — one combined picture rather than a download per module.
+    A Module column says which side each booking came from.
 
-    Approved means what the Approved tab means (status='sold'), whether or not Accounts
-    has signed off yet; the Accounts Status column says where each one stands. Only the
-    current version of a revised booking is listed — a superseded revision would
-    double-count its deal in the grand total.
+    Approved means Accounts has signed off (accounts_status='approved'), not merely
+    that Sales has. The two differ: a booking sits at status='sold' from the moment
+    Sales approves it, with Accounts still to check the figures, and those are the
+    deals most likely to move. This sheet is read as the record of what has actually
+    been sold, and totalling money Accounts has not yet accepted overstates it — so
+    anything still pending with them, or rejected by them, is left out.
+
+    Only the current version of a revised booking is listed, for the same reason: a
+    superseded revision would double-count its deal in the grand total.
 
     ?project=<id> narrows it to one project. The last row is a grand total across every
     money column.
@@ -6818,7 +6822,7 @@ class BookingExportView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
 
-        qs = Booking.objects.filter(company=company, status='sold')
+        qs = Booking.objects.filter(company=company, status='sold', accounts_status='approved')
         project = None
         project_id = request.query_params.get('project')
         if project_id and str(project_id).isdigit():
@@ -7104,9 +7108,9 @@ class BookingExportView(APIView):
         ws = wb.active
         ws.title = 'Approved Bookings'
 
-        title = f"{company.name if company else ''} — Approved Bookings"
+        title = f"{company.name if company else ''} — Accounts-Approved Bookings"
         subtitle = (f"{project.name if project else 'All Projects'}  ·  "
-                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'}  ·  "
+                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'} approved by Accounts  ·  "
                     f"generated {timezone.localtime(timezone.now()).strftime('%d/%m/%Y %I:%M %p')}")
         ws.append([title])
         ws.append([subtitle])

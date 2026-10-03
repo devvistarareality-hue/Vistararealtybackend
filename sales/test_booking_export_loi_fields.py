@@ -206,6 +206,42 @@ class BookingExportLoiFieldTests(APITestCase):
         for name in self._wb().sheetnames:
             self.assertFalse(set(name) & set(r'/\?*[]:'), f'illegal sheet name {name!r}')
 
+    # ------------------------------------------------ only what Accounts approved
+
+    def test_a_booking_still_pending_with_accounts_is_left_out(self):
+        """Sales approving a deal is not the same as Accounts accepting the figures.
+
+        A booking is status='sold' from the moment Sales approves it, with Accounts
+        still to check it — and those are the ones most likely to move. Totalling
+        money Accounts has not accepted overstates what has actually been sold.
+        """
+        self._booking(client_name='Signed Off', accounts_status='approved')
+        self._booking(client_name='Still Checking', number='13', accounts_status='pending')
+        names = {r[3] for r in rows_of(self._wb()['Approved Bookings'])}
+        self.assertIn('Signed Off', names)
+        self.assertNotIn('Still Checking', names)
+
+    def test_a_booking_accounts_rejected_is_left_out(self):
+        self._booking(client_name='Turned Down', accounts_status='rejected')
+        self.assertEqual(rows_of(self._wb()['Approved Bookings']), [])
+
+    def test_the_schedule_sheet_follows_the_same_filter(self):
+        # The extra sheets are built from the same rows, so a pending booking must
+        # not leak its instalments in through the side door.
+        self._booking(client_name='Still Checking', accounts_status='pending',
+                      installments=[{'no': 1, 'amt': 999, 'pct': 100, 'date': '2026-02-01'}])
+        wb = self._wb()
+        self.assertNotIn('Payment Schedule', wb.sheetnames)
+
+    def test_the_grand_total_counts_only_accepted_money(self):
+        self._booking(client_name='Counted', final_amount=1000000, accounts_status='approved')
+        self._booking(client_name='Not Counted', number='14', final_amount=9000000,
+                      accounts_status='pending')
+        rows = rows_of(self._wb()['Approved Bookings'])
+        self.assertEqual(len(rows), 1)
+        headers = [c.value for c in self._wb()['Approved Bookings'][4]]
+        self.assertEqual(rows[0][headers.index('Final Amount')], 1000000)
+
     def test_the_export_is_still_refused_without_permission(self):
         nobody = User.objects.create(
             email='bxp_none@x.com', company=self.co, role='Employee', designation='STM',
