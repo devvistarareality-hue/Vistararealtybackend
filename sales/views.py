@@ -692,6 +692,42 @@ def manager_project_ids(user):
     return pids or None
 
 
+# Reps (Employee / Intern — the STMs and telecallers) book only on the projects they
+# are assigned to (Team Users → Assign). Managers keep booking on any project (see
+# manager_project_ids), and Admin / Director / General Manager are never confined.
+BOOKING_SCOPED_ROLES = ('Employee', 'Intern')
+
+
+def booking_project_ids(user):
+    """Projects this rep may book on, or None if they are not restricted.
+
+    Same opt-in as managers: a rep with no project assigned is not restricted, so
+    nobody's Booking screen goes blank — you confine a rep by assigning projects.
+    """
+    if is_platform_admin(user) or getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin':
+        return None
+    if getattr(user, 'role', '') not in BOOKING_SCOPED_ROLES:
+        return None
+    pids = list(
+        UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True)
+    )
+    return pids or None
+
+
+def _unassigned_project_error(request, project_id):
+    """403 if this rep is not assigned to the project they are booking on, else None.
+
+    Hiding the project from Select Project is not enough — the id survives in a
+    tab, a bookmark or a draft — so the write paths refuse it too."""
+    pids = booking_project_ids(request.user)
+    if pids is None or not project_id or not str(project_id).isdigit():
+        return None
+    if int(project_id) not in pids:
+        return Response({'detail': 'You are not assigned to this project, so you cannot book on it.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    return None
+
+
 def scope_leads_to_project(qs, user, lead_prefix=''):
     """Narrow a lead-side queryset to the manager's assigned projects, if any."""
     pids = manager_project_ids(user)
@@ -2435,6 +2471,13 @@ class ProjectListView(APIView):
         pids = manager_project_ids(request.user)
         if pids is not None:
             projects = projects.filter(id__in=pids)
+        # Booking's Select Project asks for ?for_booking=1: a rep assigned to some
+        # projects picks from those only (the leads/site-visit filters don't ask, so
+        # a lead on another project still shows there).
+        if request.query_params.get('for_booking') == '1':
+            bpids = booking_project_ids(request.user)
+            if bpids is not None:
+                projects = projects.filter(id__in=bpids)
         # A locked project is not pickable, and this endpoint is what every "pick a
         # project" screen calls.
         projects = _visible_projects(
@@ -3128,6 +3171,9 @@ class PlotHoldView(APIView):
                     plot = scope_to_company(Plot.objects.select_for_update(), request.user, 'project__company').get(pk=pid)
                 except Plot.DoesNotExist:
                     failed.append({'id': pid, 'reason': 'not_found'})
+                    continue
+                if _unassigned_project_error(request, plot.project_id):
+                    failed.append({'id': pid, 'number': plot.number, 'reason': 'not_assigned'})
                     continue
                 _release_expired_holds(Plot.objects.filter(pk=pid))
                 plot.refresh_from_db()
@@ -5831,7 +5877,7 @@ class BookingListCreateView(APIView):
 
         # Hiding a locked project is not the same as closing it: the id survives in
         # an open tab, a bookmark, or a draft saved before the lock. Refuse here too.
-        lock_err = _locked_project_error(request, data.get('project'))
+        lock_err = _locked_project_error(request, data.get('project')) or _unassigned_project_error(request, data.get('project'))
         if lock_err:
             return lock_err
         pids = [x for x in ([data.get('plot')] + list(data.get('plot_ids') or [])) if str(x).isdigit()]
@@ -6272,7 +6318,7 @@ class BookingDraftView(APIView):
 
         # Hiding a locked project is not the same as closing it: the id survives in
         # an open tab, a bookmark, or a draft saved before the lock. Refuse here too.
-        lock_err = _locked_project_error(request, data.get('project'))
+        lock_err = _locked_project_error(request, data.get('project')) or _unassigned_project_error(request, data.get('project'))
         if lock_err:
             return lock_err
         pids = [x for x in ([data.get('plot')] + list(data.get('plot_ids') or [])) if str(x).isdigit()]
