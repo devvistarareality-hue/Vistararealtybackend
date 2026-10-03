@@ -6727,8 +6727,76 @@ class BookingAllView(APIView):
                 'rejected': sold.filter(accounts_status='rejected').count(),
                 'total':    sold.count(),
             })
+        if request.query_params.get('summary') == 'true':
+            return Response(_accounts_summary(qs.filter(status='sold')))
         # context: can_accounts_approve is per-viewer, so the serializer needs the request.
         return Response(BookingSerializer(qs[:1000], many=True, context={'request': request}).data)
+
+
+def _accounts_summary(sold):
+    """The Accounts & Finance dashboard: the four counts, what they are worth, how
+    they split by project, the bookings waiting longest, and six months of sign-offs.
+
+    Same rule as counts_only — only what Sales or CP approved (status='sold') — so
+    every figure agrees with the tiles and the Approvals tabs. Amounts are encrypted,
+    so they are added up here rather than in the database."""
+    from collections import OrderedDict
+    now = timezone.now()
+    state = lambda b: ('rejected' if b.accounts_status == 'rejected'
+                       else 'pending' if b.accounts_status == 'pending' else 'approved')
+    counts = {'pending': 0, 'approved': 0, 'rejected': 0}
+    values = {'pending': Decimal('0'), 'approved': Decimal('0'), 'rejected': Decimal('0')}
+    projects = OrderedDict()
+    waiting = []
+    # Six calendar months ending this one, oldest first.
+    months, y, m = [], now.year, now.month
+    for _ in range(6):
+        months.insert(0, (y, m))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    trend = {k: {'count': 0, 'value': Decimal('0')} for k in months}
+
+    for b in sold.select_related('project', 'stm'):
+        st = state(b)
+        amt = Decimal(str(b.final_amount or 0))
+        counts[st] += 1
+        values[st] += amt
+        pid = b.project_id or 0
+        row = projects.setdefault(pid, {'id': b.project_id, 'name': (b.project.name if b.project else '—'),
+                                        'pending': 0, 'approved': 0, 'rejected': 0,
+                                        'pending_value': Decimal('0'), 'approved_value': Decimal('0')})
+        row[st] += 1
+        if st in ('pending', 'approved'):
+            row[st + '_value'] += amt
+        if st == 'pending':
+            since = b.approved_at or b.created_at
+            waiting.append({'id': b.id, 'client': b.client_name or '', 'project': row['name'],
+                            'plots': b.plot_numbers or '', 'amount': float(amt),
+                            'stm': (b.stm.name if b.stm else '') or '',
+                            'since': since.isoformat() if since else None,
+                            'days': (now - since).days if since else None})
+        if st == 'approved':
+            when = b.accounts_approved_at or b.approved_at
+            if when:
+                key = (timezone.localtime(when).year, timezone.localtime(when).month)
+                if key in trend:
+                    trend[key]['count'] += 1
+                    trend[key]['value'] += amt
+
+    waiting.sort(key=lambda w: w['since'] or '')
+    by_project = sorted(projects.values(), key=lambda r: -(r['pending'] + r['approved'] + r['rejected']))
+    for r in by_project:
+        r['pending_value'] = float(r['pending_value'])
+        r['approved_value'] = float(r['approved_value'])
+    return {
+        **counts, 'total': sum(counts.values()),
+        'values': {k: float(v) for k, v in values.items()},
+        'by_project': by_project,
+        'oldest_pending': waiting[:6],
+        'trend': [{'month': datetime(y, m, 1).strftime('%b-%y'), 'count': trend[(y, m)]['count'],
+                   'value': float(trend[(y, m)]['value'])} for (y, m) in months],
+    }
 
 
 def _can_export_bookings(user):
