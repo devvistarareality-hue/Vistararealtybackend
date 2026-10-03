@@ -15,6 +15,12 @@ import re
 logger = logging.getLogger(__name__)
 
 WRITE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
+# Reads that are themselves an event. Normally a GET changes nothing and logging
+# every one would bury the log, but taking a copy of the data out of the system is
+# an act in its own right — the row it leaves is the only record that it happened.
+# Deliberately a short, named list: this is an exception to "GETs are not actions",
+# not an invitation to log reads generally.
+READ_ACTIONS = re.compile(r'^/api/sales/bookings/export/')
 # Housekeeping calls that are not anyone "doing" something: signing in, token
 # refresh, reading notifications, autosaves, uploads, searches, webhooks.
 SKIP = re.compile(
@@ -177,7 +183,9 @@ class ActivityLogMiddleware:
 
     def __call__(self, request):
         body = None
-        watch = request.method in WRITE_METHODS and request.path.startswith('/api/') and not SKIP.match(request.path)
+        watch = (request.method in WRITE_METHODS
+                 or (request.method == 'GET' and READ_ACTIONS.match(request.path))) \
+            and request.path.startswith('/api/') and not SKIP.match(request.path)
         if watch:
             try:
                 ctype = request.META.get('CONTENT_TYPE', '')

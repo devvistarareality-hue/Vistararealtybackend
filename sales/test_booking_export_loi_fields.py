@@ -242,6 +242,68 @@ class BookingExportLoiFieldTests(APITestCase):
         headers = [c.value for c in self._wb()['Approved Bookings'][4]]
         self.assertEqual(rows[0][headers.index('Final Amount')], 1000000)
 
+    # --------------------------------------------------------------- the log
+
+    def test_a_download_leaves_a_log_entry(self):
+        """Taking every approved booking out of the system — client names, phone
+        numbers, the whole price breakdown — is an act in its own right, and this
+        row is the only record that it happened.
+
+        It is also the one GET the activity log watches: a read changes nothing, so
+        logging them generally would bury the log, but a copy leaving the building
+        is not an ordinary read.
+        """
+        from activity.models import ActivityLog
+        self._booking(client_name='Counted')
+        before = ActivityLog.objects.count()
+
+        r = self.client.get(URL)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(ActivityLog.objects.count(), before + 1)
+
+        row = ActivityLog.objects.order_by('-id').first()
+        self.assertEqual(row.actor_id, self.admin.id)
+        self.assertEqual(row.action, 'downloaded')
+        self.assertIn('Downloaded booking Excel', row.summary)
+        self.assertIn('All Projects', row.summary)
+        self.assertIn('1 booking', row.summary, 'how much left, not just that something did')
+        self.assertEqual(row.method, 'GET')
+        self.assertEqual(row.status_code, 200)
+        self.assertEqual(row.company_id, self.co.id)
+        # Accounts & Finance, not Sales: the Log someone opens to retrace this is
+        # the one on the module whose screen carries the button. By path alone it
+        # would file under Sales, where nobody would look for it.
+        self.assertEqual(row.module, 'Accounts & Finance')
+
+    def test_the_entry_names_the_project_when_one_is_chosen(self):
+        from activity.models import ActivityLog
+        self._booking()
+        self.client.get(f'{URL}?project={self.project.id}')
+        row = ActivityLog.objects.order_by('-id').first()
+        self.assertIn('Kalrav', row.summary)
+        self.assertEqual(row.target_id, str(self.project.id))
+
+    def test_a_refused_download_is_not_logged_as_one(self):
+        # A 403 took nothing, and a log full of attempts that failed makes the
+        # entries that matter harder to find.
+        from activity.models import ActivityLog
+        nobody = User.objects.create(
+            email='bxp_nolog@x.com', company=self.co, role='Employee', designation='STM',
+            user_code='X8', name='No Access')
+        auth(self.client, nobody)
+        before = ActivityLog.objects.count()
+        self.assertEqual(self.client.get(URL).status_code, 403)
+        self.assertEqual(ActivityLog.objects.count(), before)
+
+    def test_ordinary_reads_are_still_not_logged(self):
+        # The exception is this one path, not GETs in general.
+        from activity.models import ActivityLog
+        self._booking()
+        before = ActivityLog.objects.count()
+        self.client.get('/api/sales/bookings/all/')
+        self.client.get('/api/sales/projects/')
+        self.assertEqual(ActivityLog.objects.count(), before)
+
     def test_the_export_is_still_refused_without_permission(self):
         nobody = User.objects.create(
             email='bxp_none@x.com', company=self.co, role='Employee', designation='STM',

@@ -7090,6 +7090,27 @@ class BookingExportView(APIView):
         stamp = timezone.now().strftime('%Y-%m-%d')
         label = (project.name if project else 'All Projects')
         safe  = re.sub(r'[^A-Za-z0-9]+', '-', label).strip('-') or 'All-Projects'
+
+        # Taking a copy of every approved booking — client names, phone numbers and
+        # the whole price breakdown — out of the system is an act in its own right,
+        # and this row is the only record that it happened. The middleware watches
+        # this path specifically (activity.recorder.READ_ACTIONS); GETs are not
+        # logged otherwise.
+        from activity.recorder import note
+        note(request,
+             'Downloaded booking Excel — %s · %d booking%s'
+             % (label, len(rows), '' if len(rows) == 1 else 's'),
+             action='downloaded', target_type='booking export',
+             target_id=str(project.id) if project else '',
+             # Filed under Accounts & Finance, not Sales, even though the data is
+             # sales bookings on a /api/sales/ path: the button lives on that
+             # module's Bookings screen, so that is the Log someone retracing the
+             # download will open. Without this the row lands in the Sales Log by
+             # path, which is not where anyone would think to look for it.
+             module='Accounts & Finance',
+             details={'project': label, 'bookings': len(rows),
+                      'scope': 'Accounts-approved, Sales + CP'})
+
         buf = BytesIO()
         wb.save(buf)
         resp = HttpResponse(
