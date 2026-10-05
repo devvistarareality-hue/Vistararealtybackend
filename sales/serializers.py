@@ -505,6 +505,18 @@ class SiteVisitSerializer(serializers.ModelSerializer):
             return obj.referred_by_telecaller.name
         return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
 
+    # Whether the viewer may correct this completed visit (date, outcome, remarks) —
+    # the STM who did it, anyone above them, or an admin. The list view passes who
+    # that is as context; elsewhere it reads False (see SiteVisitEditView).
+    can_edit = serializers.SerializerMethodField()
+
+    def get_can_edit(self, obj):
+        if obj.status != 'completed':
+            return False
+        if self.context.get('edit_all'):
+            return True
+        return obj.stm_id is not None and obj.stm_id in (self.context.get('edit_ids') or ())
+
     class Meta:
         model = SiteVisit
         fields = '__all__'

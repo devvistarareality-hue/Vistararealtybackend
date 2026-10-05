@@ -3790,7 +3790,8 @@ class SiteVisitListView(APIView):
             from django.db.models import Count
             rows = qs.values('status').annotate(n=Count('id'))
             return Response({r['status']: r['n'] for r in rows})
-        return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), SiteVisitSerializer)
+        return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), SiteVisitSerializer,
+                              context=_visit_edit_context(request.user))
 
     def post(self, request):
         ser = SiteVisitSerializer(data=request.data)
@@ -3823,6 +3824,92 @@ class SiteVisitListView(APIView):
                        (f'{sv.lead.name} · {sched}').strip(' ·'),
                        {'lead_id': sv.lead_id, 'sv_id': sv.id})
         return Response(SiteVisitSerializer(sv).data, status=status.HTTP_201_CREATED)
+
+
+def _visit_edit_context(user):
+    """Who this user may correct completed visits for: everyone (an admin), or the
+    STMs in their own reporting tree, themselves included."""
+    if _is_hard_admin(user):
+        return {'edit_all': True}
+    return {'edit_ids': _visible_user_ids(user)}
+
+
+def _can_edit_visit(user, sv):
+    ctx = _visit_edit_context(user)
+    return bool(ctx.get('edit_all') or (sv.stm_id is not None and sv.stm_id in ctx['edit_ids']))
+
+
+class SiteVisitEditView(APIView):
+    """Correct a completed visit — a wrong visit date, outcome or remarks.
+
+    The STM who did the visit, anyone above them in the reporting chain, or an
+    admin. The date cannot be in the future and a reason is required; the change
+    goes on the lead's history and the Activity Log, old value → new."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            sv = scope_to_company(SiteVisit.objects.select_related('lead'), request.user,
+                                  'lead__company').get(pk=pk)
+        except SiteVisit.DoesNotExist:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if sv.status != 'completed':
+            return Response({'detail': 'Only a completed visit can be edited here.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not _can_edit_visit(request.user, sv):
+            return Response({'detail': 'Only the STM who did this visit, their managers or an admin can edit it.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        data = request.data
+        reason = str(data.get('reason') or '').strip()
+        if not reason:
+            return Response({'reason': ['Say why the visit is being changed.']}, status=status.HTTP_400_BAD_REQUEST)
+        changes, fields = [], []
+        if data.get('visited_at'):
+            when = _parse_visited_at(data.get('visited_at'))
+            if not when:
+                return Response({'visited_at': ['Pick the date of the visit.']}, status=status.HTTP_400_BAD_REQUEST)
+            if timezone.localtime(when).date() > timezone.localdate():
+                return Response({'visited_at': ['The visit date cannot be in the future.']},
+                                status=status.HTTP_400_BAD_REQUEST)
+            old = sv.visited_at
+            if not old or timezone.localtime(old).date() != timezone.localtime(when).date():
+                changes.append('Visit date %s → %s' % (timezone.localtime(old).strftime('%d-%m-%Y') if old else '—',
+                                                       timezone.localtime(when).strftime('%d-%m-%Y')))
+                sv.visited_at = when
+                fields.append('visited_at')
+                # A visit logged as already done was "scheduled" for the same moment;
+                # keep the two together so the card does not show two different days.
+                if old and sv.scheduled_at and abs((sv.scheduled_at - old).total_seconds()) < 60:
+                    sv.scheduled_at = when
+                    fields.append('scheduled_at')
+        if 'outcome' in data and data.get('outcome') != sv.outcome:
+            outcome = str(data.get('outcome') or '')
+            if outcome not in dict(SV_OUTCOME):
+                return Response({'outcome': ['Pick Hot, Warm, Cold or Not Interested.']},
+                                status=status.HTTP_400_BAD_REQUEST)
+            labels = dict(SV_OUTCOME)
+            changes.append('Outcome %s → %s' % (labels.get(sv.outcome, sv.outcome or '—'), labels[outcome]))
+            sv.outcome = outcome
+            fields.append('outcome')
+        if 'remarks' in data and str(data.get('remarks') or '').strip() != (sv.remarks or '').strip():
+            sv.remarks = str(data.get('remarks') or '').strip()
+            changes.append('Remarks changed')
+            fields.append('remarks')
+        if not changes:
+            return Response({'detail': 'Nothing was changed.'}, status=status.HTTP_400_BAD_REQUEST)
+        sv.save(update_fields=fields)
+        summary = '; '.join(changes)
+        LeadStatusHistory.objects.create(
+            lead=sv.lead, changed_by=request.user, field_changed='site_visit',
+            old_value='', new_value=('Visit edited · ' + summary)[:100], remarks=reason[:500],
+        )
+        try:
+            from activity.recorder import note
+            note(request, 'Edited site visit — %s (%s). Reason: %s' % (sv.lead.name, summary, reason),
+                 action='updated', target_type='site_visit', target_id=str(sv.pk), module='Sales')
+        except Exception:
+            pass
+        return Response(SiteVisitSerializer(sv, context=_visit_edit_context(request.user)).data)
 
 
 class SiteVisitDetailView(APIView):
