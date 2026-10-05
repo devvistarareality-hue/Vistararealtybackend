@@ -178,8 +178,9 @@ class BookingBackfillsSiteVisitTests(APITestCase):
         existing.refresh_from_db()
         self.assertEqual(existing.name, 'Ramesh K', 'existing history must not be overwritten')
         self.assertEqual(existing.stm_id, self.stm.id, 'an unowned lead picks up the booking STM')
-        sv = SiteVisit.objects.get(lead_id=existing.id)
-        self.assertEqual(sv.referred_by_telecaller_id, self.tc.id)
+        # The lead was already on file, so its visits are the STM's to log — the
+        # approval adds none (owner's rule, 2026-10-05; see test_booking_auto_visit).
+        self.assertFalse(SiteVisit.objects.filter(lead_id=existing.id).exists())
 
     def test_matching_ignores_country_code_and_spacing(self):
         existing = Lead.objects.create(company=self.co, name='Meena', phone='+91 98765 00002',

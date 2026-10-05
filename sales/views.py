@@ -7931,7 +7931,16 @@ def _ensure_lead_and_site_visit_for_booking(b):
     if not b.booking_date:
         return None, None                     # nothing to date the visit by
 
+    # Whether this client is new to us on this project — the booking brought the
+    # number in. Only then is a visit recorded here: a lead that was already on file
+    # was being worked, and its real visit (or its absence) is the STM's to log, not
+    # this backfill's (the owner's rule, 2026-10-05).
     lead_id = b.lead_id
+    fresh = False
+    if lead_id:
+        born = Lead.objects.filter(pk=lead_id).values_list('created_at', flat=True).first()
+        # Born with this booking: created when it (or its draft) was first saved.
+        fresh = bool(born and b.created_at and born >= b.created_at - timedelta(minutes=2))
     if not lead_id:
         name  = (b.client_name or '').strip()
         phone = (b.phone or '').strip()
@@ -7944,7 +7953,11 @@ def _ensure_lead_and_site_visit_for_booking(b):
         existing = None
         key = phone_blind_index(phone) if phone else ''
         if key:
+            # Same project only — a different project is a separate deal with its own
+            # lead (see _existing_lead_for_booking).
+            # A lead with no project yet is the same person too.
             existing = (Lead.objects.filter(company_id=b.company_id, phone_key=key)
+                        .filter(Q(project_id=b.project_id) | Q(project__isnull=True))
                         .order_by('id').first())
         if existing:
             lead_id = existing.id
@@ -7961,8 +7974,12 @@ def _ensure_lead_and_site_visit_for_booking(b):
                 project_id=b.project_id, stm=b.stm, stm_status='closed',
             )
             lead_id = lead.id
+            fresh = True
         Booking.objects.filter(pk=b.pk).update(lead_id=lead_id)
         b.lead_id = lead_id
+
+    if not fresh:
+        return lead_id, None
 
     # The guard is the booking DATE, not merely "this lead has been on a visit".
     # A repeat buyer visited once per unit they bought, so a visit already logged on
