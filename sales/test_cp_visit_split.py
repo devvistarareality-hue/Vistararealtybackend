@@ -53,3 +53,52 @@ class CpVisitSplitTests(TestCase):
         self.assertNotIn(self.cp_on_cp.id, self._ids(self.other_manager))
         # …and their own chain still sees it, as before.
         self.assertIn(self.cp_on_cp.id, self._ids(self.director))
+
+
+class SourceFilterTests(TestCase):
+    """The Sales / CP / All filter (?book=) on leads, visits and the dashboard:
+    Sales + CP equals All for an STM, a manager and a director alike."""
+
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='BKF', name='Bkf Co')
+        self.p = Project.objects.create(company=self.co, name='Pratishtha')
+        cp_src = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        meta = LeadSource.objects.create(company=self.co, name='Meta')
+        mk = lambda code, role, desig, boss=None: User.objects.create(
+            name=code, email=f'{code}@x.com', phone='9' + code + '00000', user_code=code, role=role,
+            designation=desig, company=self.co, modules=['Sales', 'Channel Partner'], reporting_manager=boss)
+        self.director = mk('BD', 'Director', 'CMO')
+        self.manager = mk('BM', 'Manager', 'Cluster Head')
+        self.stm = mk('BS', 'Employee', 'STM', self.manager)
+        n = 0
+        for src, count in ((meta, 3), (cp_src, 2)):
+            for _ in range(count):
+                n += 1
+                lead = Lead.objects.create(company=self.co, project=self.p, source=src, name=f'L{n}',
+                                           phone=f'98{n:08d}', stm=self.stm)
+                SiteVisit.objects.create(lead=lead, project=self.p, stm=self.stm, status='completed',
+                                         scheduled_at='2026-10-01T10:00:00Z', visited_at='2026-10-01T10:00:00Z')
+
+    def _counts(self, user, extra=''):
+        from rest_framework.test import APIClient
+        c = APIClient(); c.force_authenticate(user)
+        out = {}
+        for b in ('sales', 'cp', 'all'):
+            leads = c.get(f'/api/sales/leads/?page=1&book={b}{extra}').json()
+            svs = c.get(f'/api/sales/site-visits/?counts_only=true&book={b}{extra}').json()
+            tile = c.get(f'/api/sales/stats/?book={b}{extra}').json()
+            out[b] = (leads.get('count', len(leads.get('results', []))), svs.get('completed', 0), tile.get('sv_done'))
+        return out
+
+    def test_sales_plus_cp_is_all_for_every_role(self):
+        for u in (self.stm, self.manager, self.director):
+            got = self._counts(u)
+            self.assertEqual(got['sales'], (3, 3, 3), u.name)
+            self.assertEqual(got['cp'], (2, 2, 2), u.name)
+            self.assertEqual(got['all'], (5, 5, 5), u.name)
+
+    def test_cp_module_can_see_sales_and_all(self):
+        got = self._counts(self.director, '&cp_only=true')
+        self.assertEqual(got['sales'][:2], (3, 3))
+        self.assertEqual(got['all'][:2], (5, 5))

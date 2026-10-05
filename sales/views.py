@@ -211,6 +211,37 @@ def sales_handled_visit_q(company_id, prefix=''):
     return Q(**{f'{prefix}stm__isnull': False}) & ~Q(**{f'{prefix}stm__in': _cp_people_ids(company_id)})
 
 
+BOOKS = ('sales', 'cp', 'all')
+
+
+def requested_book(request):
+    """The Source filter a screen asked for — 'sales', 'cp' or 'all' — or None.
+
+    Leads, Site Visits, Closures, My Bookings and both dashboards offer it, in the
+    Sales module and the Channel Partner module alike. It splits strictly by where
+    the lead came from (cp_lead_q): Sales = not partner-sourced, CP = partner-
+    sourced, All = both, so Sales + CP always equals All for whoever is looking —
+    the STM, their manager or the director. None (an older app that never sends
+    it) keeps each module's long-standing split exactly as it was."""
+    b = str(request.query_params.get('book') or '').lower()
+    if b not in BOOKS:
+        return None
+    # CP in the Channel Partner module is that module's own view: left to its
+    # existing rules (the partner desk each CP person answers for), unchanged.
+    if b == 'cp' and (request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user)):
+        return None
+    return b
+
+
+def split_book(qs, book, cp_q):
+    """Narrow qs to the book asked for, given the Q that marks its partner rows."""
+    if book == 'cp':
+        return qs.filter(cp_q)
+    if book == 'sales':
+        return qs.exclude(cp_q)
+    return qs
+
+
 def cp_lead_q(prefix=''):
     """A lead belongs to the Channel Partner module if EITHER it was added
     through the CP module itself (channel_partner FK set) OR it was added
@@ -934,7 +965,7 @@ class StatsView(APIView):
         _pv = permissions_version(getattr(request.user, 'company_id', None))
         cache_key = (f'sales_stats:{request.user.id}:{company_id or "own"}:{date_from or ""}:'
                      f'{date_to or ""}:{"admin" if admin_view else "own"}:'
-                     f'{"cp" if cp_only else "all"}:{f_project}:{f_partner}:{f_person}:{_pv}')
+                     f'{"cp" if cp_only else "all"}:{requested_book(request) or "-"}:{f_project}:{f_partner}:{f_person}:{_pv}')
         cached = cache.get(cache_key)
         if cached is not None:
             return Response(cached)
@@ -954,7 +985,10 @@ class StatsView(APIView):
         # otherwise a transferred lead vanished from both the CP dashboard (no
         # longer CP-owned) and the Sales one (blanket-excluded), stranding it
         # nowhere and leaving "To Call" undercounted for the person who has it.
-        if cp_only:
+        _book = requested_book(request)
+        if _book:
+            leads_qs = split_book(leads_qs, _book, cp_lead_q())
+        elif cp_only:
             leads_qs = leads_qs.filter(cp_lead_q())
         else:
             leads_qs = leads_qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
@@ -1138,7 +1172,12 @@ class StatsView(APIView):
         # same cp_lead_q filter applied directly or the CP dashboard's Site
         # Visits/Closures tiles would silently show the whole company's numbers.
         _not_sold, _awaiting_accounts, _cp_cl = _closure_books(_stats_company_id(request, company_id))
-        if cp_only:
+        if _book:
+            # The Source filter: strictly by where the lead came from (see
+            # requested_book); visibility is still this person's own scope below.
+            sv_qs = split_book(sv_qs, _book, cp_lead_q(prefix='lead__'))
+            cl_qs = split_book(cl_qs, _book, _cp_cl)
+        elif cp_only:
             sv_qs = sv_qs.filter(cp_lead_q(prefix='lead__'))
             # Strictly the partner book, and only this person's partner desk — the
             # same deals the CP module's My Bookings lists (see _cp_desk_ids).
@@ -1194,7 +1233,9 @@ class StatsView(APIView):
         # The same two books as the leads, visits and closures above — the tiles
         # had been counting both, which is why they never contradicted the
         # Follow-Ups list: it counted both as well.
-        if cp_only:
+        if _book:
+            fu_qs = split_book(fu_qs, _book, cp_lead_q(prefix='lead__'))
+        elif cp_only:
             fu_qs = fu_qs.filter(cp_lead_q(prefix='lead__'))
         else:
             fu_qs = fu_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=own_ids))
@@ -1426,7 +1467,9 @@ class StatsTrendView(APIView):
             cl_qs = cl_qs.filter(company_id=company_id)
         # The same two books the tile above splits into, or the chart contradicts it.
         _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, company_id))
-        if cp_only:
+        if requested_book(request):
+            cl_qs = split_book(cl_qs, requested_book(request), _cp_cl)
+        elif cp_only:
             cl_qs = cl_qs.filter(_cp_cl).filter(_cp_desk_closure_q(
                 _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
         else:
@@ -1772,7 +1815,9 @@ class LeadListView(APIView):
         # otherwise show it, since ownership is what actually governs visibility.
         # Only exempts leads owned by the viewer or their own reporting chain, not
         # every CP lead in the company — the pool stays disjoint for everyone else.
-        if not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
+        if requested_book(request) and not request.query_params.get('channel_partner_id'):
+            qs = split_book(qs, requested_book(request), cp_lead_q())
+        elif not (request.query_params.get('cp_only') == 'true' or request.query_params.get('channel_partner_id')
                 or is_cp_designated(request.user)):
             own_ids = _visible_user_ids(request.user)
             qs = qs.exclude(cp_lead_q() & ~Q(stm__in=own_ids) & ~Q(telecaller__in=own_ids))
@@ -1902,6 +1947,8 @@ class LeadListView(APIView):
             qs = qs.filter(source_id=request.query_params['source_id'])
         if request.query_params.get('channel_partner_id'):
             qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif requested_book(request):
+            pass    # the Source filter has already decided the book (above)
         elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # The Channel Partner section's "CP Leads" tab — every lead referred
             # by any channel partner, OR added via the regular Sales flow with
@@ -1972,6 +2019,8 @@ class LeadListView(APIView):
         # company for a platform admin picking it (mirrors the filters in get()).
         if request.query_params.get('channel_partner_id'):
             qs = qs.filter(channel_partner_id=request.query_params['channel_partner_id'])
+        elif requested_book(request):
+            qs = split_book(qs, requested_book(request), cp_lead_q())
         elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q())
         if request.query_params.get('company_id') and is_platform_admin(request.user):
@@ -3634,7 +3683,9 @@ class FollowUpListView(APIView):
             qs = qs.filter(lead_id=request.query_params['lead_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+        if requested_book(request):
+            qs = split_book(qs, requested_book(request), cp_lead_q(prefix='lead__'))
+        elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             qs = qs.filter(cp_lead_q(prefix='lead__'))
         else:
             # The Sales module's book, the last of the five to be split. A follow-up
@@ -3707,7 +3758,9 @@ def _site_visit_scope(request):
         qs = qs.filter(lead__company_id=cid)
     if request.query_params.get('lead_id'):
         qs = qs.filter(lead_id=request.query_params['lead_id'])
-    if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+    if requested_book(request):
+        qs = split_book(qs, requested_book(request), cp_lead_q(prefix='lead__'))
+    elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
         qs = qs.filter(cp_lead_q(prefix='lead__'))
     else:
         # The Sales module's book. A partner-sourced visit belongs to Channel
@@ -3848,7 +3901,9 @@ class ClosureListView(APIView):
         if cid and is_platform_admin(request.user):
             qs = qs.filter(company_id=cid)
         _not_sold, _awaiting, _cp_cl = _closure_books(_stats_company_id(request, cid))
-        if request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
+        if requested_book(request):
+            qs = split_book(qs, requested_book(request), _cp_cl)
+        elif request.query_params.get('cp_only') == 'true' or is_cp_designated(request.user):
             # The Channel Partner book — see _closure_books for what counts as one —
             # and only this person's partner desk (see _cp_desk_ids).
             qs = qs.filter(_cp_cl).filter(_cp_desk_closure_q(
@@ -5911,7 +5966,14 @@ class BookingListCreateView(APIView):
             # the explicit flag rather than the viewer's designation, so a CP manager
             # looking at Sales My Bookings still sees their own and their team's work
             # there.
-            if request.query_params.get('cp_only') == 'true':
+            if request.query_params.get('cp_only') == 'true' and requested_book(request) in ('sales', 'all'):
+                # The Source filter asked for Sales or All from the CP module: their
+                # partner desk plus their own and their team's bookings, the Source
+                # split below then keeping only the book asked for.
+                _desk = _cp_desk_ids(request.user)
+                cp_part = is_cp_booking_q if _desk is None else (Q(stm_id__in=_desk) & is_cp_booking_q)
+                mine_q = cp_part | Q(stm_id__in=own_and_team)
+            elif request.query_params.get('cp_only') == 'true':
                 # Plus this person's OWN bookings from any source — but not their
                 # reportees' non-partner ones: the CP module is the partner book, and
                 # a team member's walk-in belongs on Sales My Bookings, not here
@@ -5952,7 +6014,7 @@ class BookingListCreateView(APIView):
         # list. A booking counts as partner-sourced by its own Source, falling back
         # to its lead — the same rule the CP module's scoping uses, so the two
         # always agree and no booking lands in both.
-        source = (request.query_params.get('source') or '').lower()
+        source = (requested_book(request) or request.query_params.get('source') or '').lower()
         if source == 'cp':
             qs = qs.filter(is_cp_booking_q)
         elif source == 'sales':
