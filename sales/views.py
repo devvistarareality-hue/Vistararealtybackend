@@ -2059,6 +2059,14 @@ class LeadListView(APIView):
         if not ser.is_valid():
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        # Source "Channel Partner" names the partner it came from — picked from the
+        # CP module's directory, in the Sales module's Add Lead as in the CP one.
+        # Without it the lead counts as partner-sourced with no partner behind it.
+        _src = ser.validated_data.get('source')
+        if _src and (_src.name or '').strip().lower() == 'channel partner' and not ser.validated_data.get('channel_partner'):
+            return Response({'channel_partner': ['Pick the channel partner this lead came from.']},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         # Added straight at SV Done → the visit comes with it (see _sv_done_visit).
         sv_visit = None
         if data.get('stm_status') == 'sv_done':

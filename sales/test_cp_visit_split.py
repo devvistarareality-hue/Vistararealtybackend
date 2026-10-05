@@ -102,3 +102,37 @@ class SourceFilterTests(TestCase):
         got = self._counts(self.director, '&cp_only=true')
         self.assertEqual(got['sales'][:2], (3, 3))
         self.assertEqual(got['all'][:2], (5, 5))
+
+
+class CpSourceNeedsPartnerTests(TestCase):
+    """Add Lead with Source = Channel Partner must name the partner (from the CP
+    module's directory); other sources need none."""
+
+    def setUp(self):
+        from sales.models import ChannelPartner
+        cache.clear()
+        self.co = Company.objects.create(code='CPN', name='Cpn Co')
+        self.p = Project.objects.create(company=self.co, name='Kalrav')
+        self.cp_src = LeadSource.objects.create(company=self.co, name='Channel Partner')
+        self.meta = LeadSource.objects.create(company=self.co, name='Meta')
+        self.partner = ChannelPartner.objects.create(company=self.co, name='Shah Realty', contact_no='9000000001')
+        self.admin = User.objects.create(name='A', email='a@cpn.com', phone='9000000009', user_code='CPN-A',
+                                         role='Admin', company=self.co)
+
+    def _add(self, **extra):
+        from rest_framework.test import APIClient
+        c = APIClient(); c.force_authenticate(self.admin)
+        body = {'name': 'Tejas', 'phone': '9726737708', 'project': self.p.id, **extra}
+        return c.post('/api/sales/leads/', body, format='json')
+
+    def test_channel_partner_source_without_partner_is_refused(self):
+        res = self._add(source=self.cp_src.id)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('channel_partner', res.json())
+
+    def test_with_the_partner_it_is_saved(self):
+        res = self._add(source=self.cp_src.id, channel_partner=self.partner.id)
+        self.assertIn(res.status_code, (200, 201), res.content)
+
+    def test_other_sources_need_no_partner(self):
+        self.assertIn(self._add(source=self.meta.id).status_code, (200, 201))
