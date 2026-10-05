@@ -7162,6 +7162,8 @@ BOOKING_EXPORT_COLUMNS = [
     ('GST Applied',              'apply_gst',           'text'),
 
     ('Revision No',              'revision_no',         'num'),
+    # The export spans every stage now, so each row has to say which one it is at.
+    ('Booking Status',           'booking_status',      'text'),
     ('Approval Status',          'approval_status',     'text'),
     ('Approved By',              'approved_by_name',    'text'),
     ('Approved On',              'approved_on',         'text'),
@@ -7201,24 +7203,29 @@ def _as_float(value):
 
 
 class BookingExportView(APIView):
-    """Every Accounts-approved booking in the company as an .xlsx.
+    """Every booking in the company as an .xlsx, at whatever stage it has reached.
 
-    Sales and Channel Partner in one workbook: the export applies no CP filter at all,
-    which is the point of it — one combined picture rather than a download per module.
-    A Module column says which side each booking came from.
+    Downloaded from Approvals, and scoped to match it: the whole pipeline, not only
+    the deals that came out the far end. Sold, pending, rejected and draft all
+    appear, with Booking Status, Sales Approval and Accounts Status saying where
+    each one stands — so the sheet answers "what is stuck with whom" as well as
+    "what has been sold". Filter on those columns in Excel for a narrower view.
 
-    Approved means Accounts has signed off (accounts_status='approved'), not merely
-    that Sales has. The two differ: a booking sits at status='sold' from the moment
-    Sales approves it, with Accounts still to check the figures, and those are the
-    deals most likely to move. This sheet is read as the record of what has actually
-    been sold, and totalling money Accounts has not yet accepted overstates it — so
-    anything still pending with them, or rejected by them, is left out.
+    This did list only Accounts-approved bookings, when the button lived on the
+    Bookings screen, which shows exactly those. It moved to Approvals, so its scope
+    moved with it; otherwise a download from a screen full of pending deals would
+    quietly omit every one of them.
 
-    Only the current version of a revised booking is listed, for the same reason: a
-    superseded revision would double-count its deal in the grand total.
+    Sales and Channel Partner in one workbook: the export applies no CP filter at
+    all, which is the point of it — one combined picture rather than a download per
+    module. A Module column says which side each booking came from.
 
-    ?project=<id> narrows it to one project. The last row is a grand total across every
-    money column.
+    Only the current version of a revised booking is listed: a superseded revision
+    would double-count its deal in the grand total.
+
+    ?project=<id> narrows it to one project. The last row is a grand total across
+    every money column — which now spans every stage, so read it alongside Booking
+    Status rather than as a figure for money earned.
     """
     permission_classes = [IsAuthenticated]
 
@@ -7228,7 +7235,7 @@ class BookingExportView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         company = _resolve_company(request)
 
-        qs = Booking.objects.filter(company=company, status='sold', accounts_status='approved')
+        qs = Booking.objects.filter(company=company)
         project = None
         project_id = request.query_params.get('project')
         if project_id and str(project_id).isdigit():
@@ -7293,7 +7300,7 @@ class BookingExportView(APIView):
              # path, which is not where anyone would think to look for it.
              module='Accounts & Finance',
              details={'project': label, 'bookings': len(rows),
-                      'scope': 'Accounts-approved, Sales + CP'})
+                      'scope': 'all stages, Sales + CP'})
 
         buf = BytesIO()
         wb.save(buf)
@@ -7342,10 +7349,18 @@ class BookingExportView(APIView):
             'apply_reg_fee': b.apply_reg_fee or '', 'apply_page_fee': b.apply_page_fee or '',
             'apply_stamp_duty': b.apply_stamp_duty or '', 'apply_gst': b.apply_gst or '',
             'revision_no': b.revision_no or 0,
+            'booking_status': dict(Booking.STATUS).get(b.status, b.status or ''),
             'approval_status': b.approval_status or '',
             'approved_by_name': b.approved_by.name if b.approved_by_id else '',
             'approved_on': dt(b.approved_at),
-            'accounts_status': (b.accounts_status or '').title(),
+            # accounts_status defaults to 'approved' on every new booking, so a draft
+            # or a Sales-rejected deal reads "Approved" for a stage Accounts never
+            # saw. Harmless while this sheet was sold-only; plainly wrong now that it
+            # spans every stage. Blank unless the booking actually got to Accounts —
+            # Sales approving it (status='sold') or a decision already recorded.
+            'accounts_status': ((b.accounts_status or '').title()
+                                if (b.status == 'sold' or b.accounts_approved_at
+                                    or b.accounts_rejected_at) else ''),
             'accounts_by': b.accounts_approved_by.name if b.accounts_approved_by_id else '',
             'accounts_on': dt(b.accounts_approved_at),
             # Not columns on the flat sheet — consumed by _schedule_sheet/_terms_sheet.
@@ -7535,9 +7550,9 @@ class BookingExportView(APIView):
         ws = wb.active
         ws.title = 'Approved Bookings'
 
-        title = f"{company.name if company else ''} — Accounts-Approved Bookings"
+        title = f"{company.name if company else ''} — All Bookings"
         subtitle = (f"{project.name if project else 'All Projects'}  ·  "
-                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'} approved by Accounts  ·  "
+                    f"{len(rows)} booking{'' if len(rows) == 1 else 's'}, every stage  ·  "
                     f"generated {timezone.localtime(timezone.now()).strftime('%d/%m/%Y %I:%M %p')}")
         ws.append([title])
         ws.append([subtitle])

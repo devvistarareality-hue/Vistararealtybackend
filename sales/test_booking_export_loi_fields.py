@@ -206,41 +206,87 @@ class BookingExportLoiFieldTests(APITestCase):
         for name in self._wb().sheetnames:
             self.assertFalse(set(name) & set(r'/\?*[]:'), f'illegal sheet name {name!r}')
 
-    # ------------------------------------------------ only what Accounts approved
+    # ------------------------------------------------------ every stage, not one
 
-    def test_a_booking_still_pending_with_accounts_is_left_out(self):
-        """Sales approving a deal is not the same as Accounts accepting the figures.
+    def test_a_booking_at_any_stage_is_included(self):
+        """The export is downloaded from Approvals, so it is scoped to Approvals.
 
-        A booking is status='sold' from the moment Sales approves it, with Accounts
-        still to check it — and those are the ones most likely to move. Totalling
-        money Accounts has not accepted overstates what has actually been sold.
+        It once listed only Accounts-approved deals, which suited the Bookings
+        screen it used to live on. From a screen full of pending ones, a download
+        that quietly omitted them would be worse than no download at all.
         """
         self._booking(client_name='Signed Off', accounts_status='approved')
         self._booking(client_name='Still Checking', number='13', accounts_status='pending')
+        self._booking(client_name='Turned Down', number='14', accounts_status='rejected')
+        self._booking(client_name='Not Yet Sales', number='15', status='pending')
+        self._booking(client_name='Half Typed', number='16', status='draft')
         names = {r[3] for r in rows_of(self._wb()['Approved Bookings'])}
-        self.assertIn('Signed Off', names)
-        self.assertNotIn('Still Checking', names)
+        self.assertEqual(names, {'Signed Off', 'Still Checking', 'Turned Down',
+                                 'Not Yet Sales', 'Half Typed'})
 
-    def test_a_booking_accounts_rejected_is_left_out(self):
-        self._booking(client_name='Turned Down', accounts_status='rejected')
-        self.assertEqual(rows_of(self._wb()['Approved Bookings']), [])
+    def test_each_row_says_which_stage_it_is_at(self):
+        # Spanning every stage is only useful if the sheet distinguishes them —
+        # otherwise a draft and a confirmed sale read identically.
+        self._booking(client_name='Sold One', status='sold', accounts_status='approved')
+        self._booking(client_name='Pending One', number='13', status='pending',
+                      accounts_status='pending')
+        ws = self._wb()['Approved Bookings']
+        headers = [c.value for c in ws[4]]
+        self.assertIn('Booking Status', headers)
+        by_name = {r[3]: r for r in rows_of(ws)}
+        self.assertEqual(by_name['Sold One'][headers.index('Booking Status')], 'Sold')
+        self.assertEqual(by_name['Pending One'][headers.index('Booking Status')],
+                         'Pending Approval')
+        self.assertFalse(by_name['Pending One'][headers.index('Accounts Status')],
+                         'still with Sales, so no Accounts stage to report')
 
-    def test_the_schedule_sheet_follows_the_same_filter(self):
-        # The extra sheets are built from the same rows, so a pending booking must
-        # not leak its instalments in through the side door.
+    def test_accounts_status_is_blank_for_a_deal_accounts_never_saw(self):
+        """The column defaults to 'approved' on every new booking.
+
+        While this sheet was sold-only that never showed; spanning every stage it
+        would have labelled 135 of VRL's drafts and Sales-rejected deals as
+        "Approved" by Accounts, for a stage they never reached.
+        """
+        self._booking(client_name='Half Typed', status='draft')
+        self._booking(client_name='Sales Said No', number='13', status='rejected')
+        self._booking(client_name='Real Sale', number='14', status='sold',
+                      accounts_status='approved')
+        ws = self._wb()['Approved Bookings']
+        headers = [c.value for c in ws[4]]
+        ai = headers.index('Accounts Status')
+        by_name = {r[3]: r for r in rows_of(ws)}
+        self.assertFalse(by_name['Half Typed'][ai], 'a draft never reached Accounts')
+        self.assertFalse(by_name['Sales Said No'][ai], 'Sales stopped it before Accounts')
+        self.assertEqual(by_name['Real Sale'][ai], 'Approved')
+
+    def test_a_recorded_accounts_decision_shows_even_if_sales_later_rejected(self):
+        # Accounts did see it, so the column should say so.
+        from django.utils import timezone
+        self._booking(client_name='Decided Then Pulled', status='rejected',
+                      accounts_status='rejected', accounts_rejected_at=timezone.now())
+        ws = self._wb()['Approved Bookings']
+        headers = [c.value for c in ws[4]]
+        self.assertEqual(rows_of(ws)[0][headers.index('Accounts Status')], 'Rejected')
+
+    def test_the_schedule_sheet_spans_every_stage_too(self):
+        # The extra sheets are built from the same rows, so they follow the scope.
         self._booking(client_name='Still Checking', accounts_status='pending',
                       installments=[{'no': 1, 'amt': 999, 'pct': 100, 'date': '2026-02-01'}])
-        wb = self._wb()
-        self.assertNotIn('Payment Schedule', wb.sheetnames)
-
-    def test_the_grand_total_counts_only_accepted_money(self):
-        self._booking(client_name='Counted', final_amount=1000000, accounts_status='approved')
-        self._booking(client_name='Not Counted', number='14', final_amount=9000000,
-                      accounts_status='pending')
-        rows = rows_of(self._wb()['Approved Bookings'])
+        rows = rows_of(self._wb()['Payment Schedule'])
         self.assertEqual(len(rows), 1)
-        headers = [c.value for c in self._wb()['Approved Bookings'][4]]
-        self.assertEqual(rows[0][headers.index('Final Amount')], 1000000)
+        self.assertEqual(rows[0][2], 'Still Checking')
+
+    def test_the_grand_total_spans_every_stage(self):
+        # Which is why it is read alongside Booking Status, not as money earned.
+        self._booking(client_name='Approved', final_amount=1000000,
+                      accounts_status='approved')
+        self._booking(client_name='Pending', number='14', final_amount=9000000,
+                      accounts_status='pending')
+        ws = self._wb()['Approved Bookings']
+        self.assertEqual(len(rows_of(ws)), 2)
+        headers = [c.value for c in ws[4]]
+        amounts = {r[3]: r[headers.index('Final Amount')] for r in rows_of(ws)}
+        self.assertEqual(amounts, {'Approved': 1000000, 'Pending': 9000000})
 
     # --------------------------------------------------------------- the log
 
