@@ -193,6 +193,24 @@ def can_access_cp_module(user):
     return bool(has_cp_access(user) or _is_hard_admin(user) or is_cp_manager(user) or is_cp(user))
 
 
+def _cp_people_ids(company_id):
+    """Everyone in the company whose designation puts them on the Channel Partner
+    side (CP Executive or CP Manager). Decided by designation, so worked out here
+    once per request rather than per row."""
+    users = User.objects.filter(company_id=company_id) if company_id else User.objects.all()
+    return [u.id for u in users.only('id', 'role', 'designation', 'company_id') if is_cp_designated(u)]
+
+
+def sales_handled_visit_q(company_id, prefix=''):
+    """A site visit on a partner-sourced lead that a Sales person did — its STM is
+    someone outside the Channel Partner side. That visit is Sales work, so the Sales
+    book shows it to everyone who can see the project, not only the STM's own chain
+    (before this a Director saw 929 Pratishtha visits and the project's Cluster Head
+    935, the difference being partner leads each one's own team had visited). It
+    still counts under Channel Partner too."""
+    return Q(**{f'{prefix}stm__isnull': False}) & ~Q(**{f'{prefix}stm__in': _cp_people_ids(company_id)})
+
+
 def cp_lead_q(prefix=''):
     """A lead belongs to the Channel Partner module if EITHER it was added
     through the CP module itself (channel_partner FK set) OR it was added
@@ -1128,7 +1146,10 @@ class StatsView(APIView):
                 _stats_company_id(request, company_id), _cp_desk_ids(request.user))).distinct()
         else:
             # Same ownership exception as leads_qs above.
-            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids))
+            # A partner-sourced visit a Sales STM did is Sales work for everyone who
+            # sees the project (sales_handled_visit_q) — the list does the same.
+            sv_qs = sv_qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=own_ids) & ~Q(referred_by_telecaller__in=own_ids)
+                                  & ~sales_handled_visit_q(_stats_company_id(request, company_id)))
             # A closure with a booking follows that booking, and the booking lists
             # split the two books strictly — so this does too, or the tile counts
             # partner deals the list it opens can never show. A Regional Head read
@@ -1143,7 +1164,10 @@ class StatsView(APIView):
         # same one the leads above use — otherwise the tiles disagree with each
         # other and the conversion rate compares two different populations.
         owners = ('stm', 'referred_by_telecaller')
-        sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'lead__project', request)
+        # A visit's project is the visit's own (where it happened), as the Site Visits
+        # list scopes it — not its lead's: a Pratishtha lead visited at Anahata put
+        # one visit on a Cluster Head's tile that his list could never show.
+        sv_qs = scope_owned_to_role(sv_qs, request.user, owners, 'project', request)
         cl_qs = scope_owned_to_role(cl_qs, request.user, owners, 'project', request)
         # The deals this book has closed but Accounts has not signed off yet. Taken
         # before the line below removes them, because that is exactly what it
@@ -3693,7 +3717,10 @@ def _site_visit_scope(request):
         # without it this list said 1,623 completed visits where the tile said
         # 1,563, the 60 partner visits being the whole of the difference.
         _own = _visible_user_ids(request.user)
-        qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own))
+        # A partner-sourced visit a Sales STM did is Sales work: shown to everyone who
+        # sees the project, not only the STM's chain (see sales_handled_visit_q).
+        qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(stm__in=_own) & ~Q(referred_by_telecaller__in=_own)
+                        & ~sales_handled_visit_q(_stats_company_id(request, request.query_params.get('company_id'))))
     return qs
 
 

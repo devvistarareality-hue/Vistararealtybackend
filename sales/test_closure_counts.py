@@ -141,10 +141,12 @@ class ClosureCountsAgree(TestCase):
         api = self._api()
         tile = api.get('/api/sales/stats/').json()['sv_done']
         listed = api.get('/api/sales/site-visits/?counts_only=true').json()
-        # Seven visits were recorded, one of them the partner's. Unlike closures,
-        # a visit is not folded into a revision chain — each is its own visit.
-        self.assertEqual(tile, 6, 'the dashboard tile')
-        self.assertEqual(listed.get('completed'), 6, 'the Site Visits list')
+        # Seven visits were recorded, one of them on the partner's lead. Unlike
+        # closures, a visit is not folded into a revision chain — each is its own
+        # visit. A Sales STM did that partner visit, so it is Sales work too and the
+        # Sales book counts all seven (sales_handled_visit_q); tile and list agree.
+        self.assertEqual(tile, 7, 'the dashboard tile')
+        self.assertEqual(listed.get('completed'), 7, 'the Site Visits list')
 
         cp_tile = api.get('/api/sales/stats/?cp_only=true').json()['sv_done']
         cp_listed = api.get('/api/sales/site-visits/?counts_only=true&cp_only=true').json()
