@@ -3935,13 +3935,15 @@ class SiteVisitListView(APIView):
                     continue
                 tc = v.referred_by_telecaller or (lead.telecaller if lead else None)
                 yield [
-                    _local(v.visited_at), lead.name or '', lead.phone or '', v.project.name if v.project_id else '',
+                    _local(v.visited_at), lead.name or '', lead.phone or '', lead.alt_phone or '',
+                    v.project.name if v.project_id else '',
                     lead.source.name if lead.source_id else '', lead.channel_partner.name if lead.channel_partner_id else '',
+                    lead.meta_campaign_name or '', lead.meta_adset_name or '', lead.meta_ad_name or '',
                     v.stm.name if v.stm_id else '', tc.name if tc else '', v.get_outcome_display() if v.outcome else '',
                     v.remarks or '', _local(v.scheduled_at),
                 ]
-        headings = ['Visited', 'Client', 'Phone', 'Project', 'Source', 'Channel Partner', 'STM', 'Telecaller',
-                    'Outcome', 'Remarks', 'Scheduled']
+        headings = ['Visited', 'Client', 'Phone', 'Alt. Phone', 'Project', 'Source', 'Channel Partner',
+                    'Campaign', 'Ad Set', 'Ad Name', 'STM', 'Telecaller', 'Outcome', 'Remarks', 'Scheduled']
         return _start_export(request, 'Site Visits', 'site visit', qs.order_by().count(), rows, headings,
                              note_extra='completed ')
 
