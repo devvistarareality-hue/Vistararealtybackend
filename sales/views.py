@@ -1783,6 +1783,59 @@ def _merge_into_existing_lead(existing, validated, user, can_assign):
     return existing
 
 
+def _can_export_leads(user):
+    """Who may download the Leads and Site Visits lists as Excel: granted per person
+    in User Management (can_export_leads), plus real admins. The file holds exactly
+    what that person can see on the screen, with the filters they have set."""
+    return bool(_is_hard_admin(user) or getattr(user, 'can_export_leads', False))
+
+
+def _list_workbook(title, subtitle, headings, rows, filename):
+    """A one-sheet Excel of a list: title, subtitle, a header row, then the rows."""
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    NAVY = 'FF0F1838'
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = title[:31]
+    ws.append([title])
+    ws.append([subtitle])
+    ws['A1'].font = Font(bold=True, size=14, color=NAVY)
+    ws['A2'].font = Font(size=10, color='FF8492A6')
+    ws.append(headings)
+    hdr = ws.max_row
+    for cell in ws[hdr]:
+        cell.font = Font(bold=True, color='FFFFFFFF', size=10)
+        cell.fill = PatternFill('solid', fgColor=NAVY)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws.freeze_panes = f'A{hdr + 1}'
+    for r in rows:
+        ws.append(r)
+    for idx, h in enumerate(headings, start=1):
+        width = max([len(str(h))] + [len(str(r[idx - 1])) for r in rows[:500] if r[idx - 1] is not None])
+        ws.column_dimensions[get_column_letter(idx)].width = min(48, max(12, width + 2))
+    buf = BytesIO()
+    wb.save(buf)
+    resp = HttpResponse(buf.getvalue(),
+                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+def _local(dt, fmt='%d/%m/%Y %I:%M %p'):
+    return timezone.localtime(dt).strftime(fmt) if dt else ''
+
+
+def _book_label(request):
+    b = requested_book(request) or ('cp' if request.query_params.get('cp_only') == 'true' else 'sales')
+    return {'sales': 'Sales', 'cp': 'Channel Partner', 'all': 'Sales + CP'}[b]
+
+
+def _export_module(request):
+    return 'Channel Partner' if request.query_params.get('cp_only') == 'true' else 'Sales'
+
+
 class LeadListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -2003,6 +2056,9 @@ class LeadListView(APIView):
         if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at', 'stm_assigned_at', '-stm_assigned_at'):
             qs = qs.order_by(ordering)
 
+        if request.query_params.get('export') == 'xlsx':
+            return self._export(request, qs)
+
         total = qs.count()
         page = int(request.query_params.get('page', 1))
         offset = (page - 1) * PAGE_SIZE
@@ -2012,6 +2068,38 @@ class LeadListView(APIView):
             'count': total,
             'results': LeadListSerializer(leads, many=True).data,
         })
+
+    @staticmethod
+    def _export(request, qs):
+        """The leads on screen — this person's, with the filters they set — as Excel."""
+        if not _can_export_leads(request.user):
+            return Response({'detail': 'You do not have access to download leads.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        rows = []
+        for l in qs.select_related('project', 'source', 'telecaller', 'stm', 'channel_partner'):
+            rows.append([
+                _local(l.created_at), l.name or '', l.phone or '', l.alt_phone or '', l.email or '',
+                l.project.name if l.project_id else '', l.source.name if l.source_id else '',
+                l.channel_partner.name if l.channel_partner_id else '',
+                l.meta_campaign_name or '',
+                l.telecaller.name if l.telecaller_id else '', l.get_telecaller_status_display() if l.telecaller_status else '',
+                l.telecaller_remarks or '',
+                l.stm.name if l.stm_id else '', l.get_stm_status_display() if l.stm_status else '',
+                l.stm_remarks or '', l.get_status_display() if l.status else '',
+                l.city or '', l.get_budget_bucket_display() if l.budget_bucket else '', ', '.join(l.purpose or []) if isinstance(l.purpose, list) else (l.purpose or ''),
+            ])
+        headings = ['Received', 'Name', 'Phone', 'Alt. Phone', 'Email', 'Project', 'Source', 'Channel Partner',
+                    'Campaign', 'Telecaller', 'TC Status', 'TC Remarks', 'STM', 'STM Status', 'STM Remarks',
+                    'Overall Status', 'City', 'Budget', 'Purpose']
+        book = _book_label(request)
+        stamp = timezone.localdate().strftime('%Y-%m-%d')
+        from activity.recorder import note
+        note(request, 'Downloaded leads Excel — %s · %d lead%s' % (book, len(rows), '' if len(rows) == 1 else 's'),
+             action='downloaded', target_type='lead export', module=_export_module(request),
+             details={'leads': len(rows), 'source': book, 'filters': {k: v for k, v in request.query_params.items()
+                                                                      if k not in ('export', 'page', 'page_size')}})
+        return _list_workbook('Leads', f'{book} · {len(rows)} leads · as on {timezone.localdate().strftime("%d/%m/%Y")}',
+                              headings, rows, f'Leads-{book.replace(" ", "")}-{stamp}.xlsx')
 
     @staticmethod
     def _facets(request, qs):
@@ -3790,6 +3878,8 @@ class SiteVisitListView(APIView):
 
     def get(self, request):
         qs = _site_visit_scope(request)
+        if request.query_params.get('export') == 'xlsx':
+            return self._export(request, qs)
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         # Headline counts without shipping the rows: the app's stat tiles used to
@@ -3800,6 +3890,64 @@ class SiteVisitListView(APIView):
             return Response({r['status']: r['n'] for r in rows})
         return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), SiteVisitSerializer,
                               context=_visit_edit_context(request.user))
+
+    @staticmethod
+    def _export(request, qs):
+        """Completed visits only, as Excel — this person's, with the filters the Site
+        Visits screen has set (it filters on the device, so it sends them along)."""
+        if not _can_export_leads(request.user):
+            return Response({'detail': 'You do not have access to download site visits.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        p = request.query_params
+        qs = qs.filter(status='completed').select_related('lead__source', 'lead__channel_partner')
+        from django.utils.dateparse import parse_date
+        from django.db.models.functions import Coalesce, TruncDate
+        # The same filters the screen applies, the same way: the day is the visit's
+        # (or, failing that, its scheduled) day; people by id; projects by name.
+        d_from, d_to = parse_date(p.get('date_from') or ''), parse_date(p.get('date_to') or '')
+        if d_from or d_to:
+            qs = qs.annotate(_day=TruncDate(Coalesce('visited_at', 'scheduled_at')))
+            if d_from:
+                qs = qs.filter(_day__gte=d_from)
+            if d_to:
+                qs = qs.filter(_day__lte=d_to)
+        split = lambda k: [x for x in (p.get(k) or '').split('||') if x]
+        ids = lambda k: [int(x) for x in (p.get(k) or '').split(',') if x.strip().isdigit()]
+        if split('projects'):
+            names = split('projects')
+            qs = qs.filter(Q(project__name__in=[n for n in names if n != '—'])
+                           | (Q(project__isnull=True) if '—' in names else Q(pk__in=[])))
+        if ids('stm_ids'):
+            qs = qs.filter(stm_id__in=ids('stm_ids'))
+        if ids('telecaller_ids'):
+            qs = qs.filter(referred_by_telecaller_id__in=ids('telecaller_ids'))
+        if p.get('outcome'):
+            qs = qs.filter(outcome=p['outcome'])
+        needle = (p.get('q') or '').strip().lower()
+        rows = []
+        for v in qs.order_by('-visited_at', '-id'):
+            lead = v.lead
+            if needle and not any(needle in str(x or '').lower() for x in (lead.name, lead.phone)):
+                continue
+            tc = v.referred_by_telecaller or (lead.telecaller if lead else None)
+            rows.append([
+                _local(v.visited_at), lead.name or '', lead.phone or '', v.project.name if v.project_id else '',
+                lead.source.name if lead.source_id else '', lead.channel_partner.name if lead.channel_partner_id else '',
+                v.stm.name if v.stm_id else '', tc.name if tc else '', v.get_outcome_display() if v.outcome else '',
+                v.remarks or '', _local(v.scheduled_at),
+            ])
+        headings = ['Visited', 'Client', 'Phone', 'Project', 'Source', 'Channel Partner', 'STM', 'Telecaller',
+                    'Outcome', 'Remarks', 'Scheduled']
+        book = _book_label(request)
+        stamp = timezone.localdate().strftime('%Y-%m-%d')
+        from activity.recorder import note
+        note(request, 'Downloaded site visits Excel — %s · %d completed visit%s'
+             % (book, len(rows), '' if len(rows) == 1 else 's'),
+             action='downloaded', target_type='site visit export', module=_export_module(request),
+             details={'visits': len(rows), 'source': book})
+        return _list_workbook('Site Visits', f'Completed visits · {book} · {len(rows)} visits · as on '
+                              f'{timezone.localdate().strftime("%d/%m/%Y")}', headings, rows,
+                              f'Site-Visits-{book.replace(" ", "")}-{stamp}.xlsx')
 
     def post(self, request):
         ser = SiteVisitSerializer(data=request.data)

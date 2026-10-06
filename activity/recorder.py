@@ -184,7 +184,9 @@ class ActivityLogMiddleware:
     def __call__(self, request):
         body = None
         watch = (request.method in WRITE_METHODS
-                 or (request.method == 'GET' and READ_ACTIONS.match(request.path))) \
+                 or (request.method == 'GET' and (READ_ACTIONS.match(request.path)
+                                                  # A list downloaded as Excel (Leads, Site Visits).
+                                                  or request.GET.get('export') == 'xlsx'))) \
             and request.path.startswith('/api/') and not SKIP.match(request.path)
         if watch:
             try:

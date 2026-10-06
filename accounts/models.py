@@ -55,6 +55,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     # which crosses the Sales/CP line and carries every commercial figure of a deal, so
     # it is not implied by having the Sales module. Real admins always have it.
     can_export_bookings = models.BooleanField(default=False)
+    # Download the Leads and (completed) Site Visits lists as Excel — granted per
+    # person in User Management, like can_export_bookings; admins always may.
+    can_export_leads = models.BooleanField(default=False)
     is_active         = models.BooleanField(default=True)
     is_staff          = models.BooleanField(default=False)
     date_joined       = models.DateTimeField(auto_now_add=True)
