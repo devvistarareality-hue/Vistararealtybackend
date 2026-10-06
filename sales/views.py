@@ -1790,39 +1790,6 @@ def _can_export_leads(user):
     return bool(_is_hard_admin(user) or getattr(user, 'can_export_leads', False))
 
 
-def _list_workbook(title, subtitle, headings, rows, filename):
-    """A one-sheet Excel of a list: title, subtitle, a header row, then the rows."""
-    import openpyxl
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
-    NAVY = 'FF0F1838'
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = title[:31]
-    ws.append([title])
-    ws.append([subtitle])
-    ws['A1'].font = Font(bold=True, size=14, color=NAVY)
-    ws['A2'].font = Font(size=10, color='FF8492A6')
-    ws.append(headings)
-    hdr = ws.max_row
-    for cell in ws[hdr]:
-        cell.font = Font(bold=True, color='FFFFFFFF', size=10)
-        cell.fill = PatternFill('solid', fgColor=NAVY)
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws.freeze_panes = f'A{hdr + 1}'
-    for r in rows:
-        ws.append(r)
-    for idx, h in enumerate(headings, start=1):
-        width = max([len(str(h))] + [len(str(r[idx - 1])) for r in rows[:500] if r[idx - 1] is not None])
-        ws.column_dimensions[get_column_letter(idx)].width = min(48, max(12, width + 2))
-    buf = BytesIO()
-    wb.save(buf)
-    resp = HttpResponse(buf.getvalue(),
-                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
-    return resp
-
-
 def _local(dt, fmt='%d/%m/%Y %I:%M %p'):
     return timezone.localtime(dt).strftime(fmt) if dt else ''
 
@@ -1834,6 +1801,53 @@ def _book_label(request):
 
 def _export_module(request):
     return 'Channel Partner' if request.query_params.get('cp_only') == 'true' else 'Sales'
+
+
+def _start_export(request, title, noun, total, rows, headings, note_extra=''):
+    """Start a background Excel build (see sales/exports.py) and log the download."""
+    from . import exports
+    book = _book_label(request)
+    stamp = timezone.localdate().strftime('%Y-%m-%d')
+    filename = f'{title.replace(" ", "-")}-{book.replace(" ", "").replace("+", "-")}-{stamp}.xlsx'
+    subtitle = (f'{"Completed visits · " if note_extra else ""}{book} · {total} '
+                f'{noun}{"" if total == 1 else "s"} · as on {timezone.localdate().strftime("%d/%m/%Y")}')
+    job = exports.start(request.user.id, total, rows, headings, title, subtitle, filename)
+    from activity.recorder import note
+    note(request, 'Downloaded %s Excel — %s · %d %s%s%s' % (title.lower(), book, total, note_extra, noun,
+                                                           '' if total == 1 else 's'),
+         action='downloaded', target_type=f'{noun} export', module=_export_module(request),
+         details={'rows': total, 'source': book, 'filters': {k: v for k, v in request.query_params.items()
+                                                             if k not in ('export', 'page', 'page_size')}})
+    return Response({'job': job, 'total': total, 'filename': filename}, status=status.HTTP_202_ACCEPTED)
+
+
+class ExportJobView(APIView):
+    """A background download's progress (GET), or with /file/ the finished workbook."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, job, file=False):
+        from django.http import FileResponse
+        from . import exports
+        st = exports.read_status(job)
+        if not st or st.get('owner') != request.user.id:
+            return Response({'detail': 'That download has expired — start it again.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        if not file:
+            return Response({k: st.get(k) for k in ('status', 'done', 'total', 'filename', 'detail')})
+        if st.get('status') != 'done':
+            return Response({'detail': 'Not ready yet.'}, status=status.HTTP_409_CONFLICT)
+        path = exports.file_path(job)
+        try:
+            fh = open(path, 'rb')
+        except OSError:
+            return Response({'detail': 'That download has expired — start it again.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        # Read into memory, then delete: one person, one fetch.
+        data = fh.read(); fh.close()
+        exports.remove(job)
+        resp = HttpResponse(data, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = f'attachment; filename="{st.get("filename") or "export.xlsx"}"'
+        return resp
 
 
 class LeadListView(APIView):
@@ -2075,31 +2089,24 @@ class LeadListView(APIView):
         if not _can_export_leads(request.user):
             return Response({'detail': 'You do not have access to download leads.'},
                             status=status.HTTP_403_FORBIDDEN)
-        rows = []
-        for l in qs.select_related('project', 'source', 'telecaller', 'stm', 'channel_partner'):
-            rows.append([
-                _local(l.created_at), l.name or '', l.phone or '', l.alt_phone or '', l.email or '',
-                l.project.name if l.project_id else '', l.source.name if l.source_id else '',
-                l.channel_partner.name if l.channel_partner_id else '',
-                l.meta_campaign_name or '',
-                l.telecaller.name if l.telecaller_id else '', l.get_telecaller_status_display() if l.telecaller_status else '',
-                l.telecaller_remarks or '',
-                l.stm.name if l.stm_id else '', l.get_stm_status_display() if l.stm_status else '',
-                l.stm_remarks or '', l.get_status_display() if l.status else '',
-                l.city or '', l.get_budget_bucket_display() if l.budget_bucket else '', ', '.join(l.purpose or []) if isinstance(l.purpose, list) else (l.purpose or ''),
-            ])
+        def rows():
+            for l in qs.select_related('project', 'source', 'telecaller', 'stm', 'channel_partner').iterator(chunk_size=2000):
+                yield [
+                    _local(l.created_at), l.name or '', l.phone or '', l.alt_phone or '', l.email or '',
+                    l.project.name if l.project_id else '', l.source.name if l.source_id else '',
+                    l.channel_partner.name if l.channel_partner_id else '',
+                    l.meta_campaign_name or '',
+                    l.telecaller.name if l.telecaller_id else '',
+                    l.get_telecaller_status_display() if l.telecaller_status else '', l.telecaller_remarks or '',
+                    l.stm.name if l.stm_id else '', l.get_stm_status_display() if l.stm_status else '',
+                    l.stm_remarks or '', l.get_status_display() if l.status else '',
+                    l.city or '', l.get_budget_bucket_display() if l.budget_bucket else '',
+                    ', '.join(l.purpose or []) if isinstance(l.purpose, list) else (l.purpose or ''),
+                ]
         headings = ['Received', 'Name', 'Phone', 'Alt. Phone', 'Email', 'Project', 'Source', 'Channel Partner',
                     'Campaign', 'Telecaller', 'TC Status', 'TC Remarks', 'STM', 'STM Status', 'STM Remarks',
                     'Overall Status', 'City', 'Budget', 'Purpose']
-        book = _book_label(request)
-        stamp = timezone.localdate().strftime('%Y-%m-%d')
-        from activity.recorder import note
-        note(request, 'Downloaded leads Excel — %s · %d lead%s' % (book, len(rows), '' if len(rows) == 1 else 's'),
-             action='downloaded', target_type='lead export', module=_export_module(request),
-             details={'leads': len(rows), 'source': book, 'filters': {k: v for k, v in request.query_params.items()
-                                                                      if k not in ('export', 'page', 'page_size')}})
-        return _list_workbook('Leads', f'{book} · {len(rows)} leads · as on {timezone.localdate().strftime("%d/%m/%Y")}',
-                              headings, rows, f'Leads-{book.replace(" ", "")}-{stamp}.xlsx')
+        return _start_export(request, 'Leads', 'lead', qs.order_by().count(), rows, headings)
 
     @staticmethod
     def _facets(request, qs):
@@ -3924,30 +3931,23 @@ class SiteVisitListView(APIView):
         if p.get('outcome'):
             qs = qs.filter(outcome=p['outcome'])
         needle = (p.get('q') or '').strip().lower()
-        rows = []
-        for v in qs.order_by('-visited_at', '-id'):
-            lead = v.lead
-            if needle and not any(needle in str(x or '').lower() for x in (lead.name, lead.phone)):
-                continue
-            tc = v.referred_by_telecaller or (lead.telecaller if lead else None)
-            rows.append([
-                _local(v.visited_at), lead.name or '', lead.phone or '', v.project.name if v.project_id else '',
-                lead.source.name if lead.source_id else '', lead.channel_partner.name if lead.channel_partner_id else '',
-                v.stm.name if v.stm_id else '', tc.name if tc else '', v.get_outcome_display() if v.outcome else '',
-                v.remarks or '', _local(v.scheduled_at),
-            ])
+
+        def rows():
+            for v in qs.order_by('-visited_at', '-id').iterator(chunk_size=2000):
+                lead = v.lead
+                if needle and not any(needle in str(x or '').lower() for x in (lead.name, lead.phone)):
+                    continue
+                tc = v.referred_by_telecaller or (lead.telecaller if lead else None)
+                yield [
+                    _local(v.visited_at), lead.name or '', lead.phone or '', v.project.name if v.project_id else '',
+                    lead.source.name if lead.source_id else '', lead.channel_partner.name if lead.channel_partner_id else '',
+                    v.stm.name if v.stm_id else '', tc.name if tc else '', v.get_outcome_display() if v.outcome else '',
+                    v.remarks or '', _local(v.scheduled_at),
+                ]
         headings = ['Visited', 'Client', 'Phone', 'Project', 'Source', 'Channel Partner', 'STM', 'Telecaller',
                     'Outcome', 'Remarks', 'Scheduled']
-        book = _book_label(request)
-        stamp = timezone.localdate().strftime('%Y-%m-%d')
-        from activity.recorder import note
-        note(request, 'Downloaded site visits Excel — %s · %d completed visit%s'
-             % (book, len(rows), '' if len(rows) == 1 else 's'),
-             action='downloaded', target_type='site visit export', module=_export_module(request),
-             details={'visits': len(rows), 'source': book})
-        return _list_workbook('Site Visits', f'Completed visits · {book} · {len(rows)} visits · as on '
-                              f'{timezone.localdate().strftime("%d/%m/%Y")}', headings, rows,
-                              f'Site-Visits-{book.replace(" ", "")}-{stamp}.xlsx')
+        return _start_export(request, 'Site Visits', 'site visit', qs.order_by().count(), rows, headings,
+                             note_extra='completed ')
 
     def post(self, request):
         ser = SiteVisitSerializer(data=request.data)

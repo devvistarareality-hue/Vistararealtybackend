@@ -4,7 +4,7 @@ from io import BytesIO
 
 import openpyxl
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from accounts.models import User
@@ -13,6 +13,7 @@ from companies.models import Company
 from sales.models import Lead, LeadSource, Project, SiteVisit
 
 
+@override_settings(EXPORTS_INLINE=True)
 class ListExportTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -34,8 +35,17 @@ class ListExportTests(TestCase):
                             stm=self.other)
 
     def _get(self, user, url):
+        """Start the export, check its status, fetch the file — as the screen does."""
         c = APIClient(); c.force_authenticate(user)
-        return c.get(url)
+        res = c.get(url)
+        if res.status_code != 202:
+            return res
+        job = res.json()['job']
+        st = c.get(f'/api/sales/exports/{job}/').json()
+        assert st['status'] == 'done', st
+        other = APIClient(); other.force_authenticate(self.other)
+        assert other.get(f'/api/sales/exports/{job}/').status_code == 404   # only its owner
+        return c.get(f'/api/sales/exports/{job}/file/')
 
     def _rows(self, res):
         ws = openpyxl.load_workbook(BytesIO(res.content)).active

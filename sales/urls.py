@@ -29,6 +29,8 @@ urlpatterns = [
     path('site-visits/',               views.SiteVisitListView.as_view()),
     path('site-visits/<int:pk>/',      views.SiteVisitDetailView.as_view()),
     path('site-visits/<int:pk>/edit/', views.SiteVisitEditView.as_view()),
+    path('exports/<str:job>/',         views.ExportJobView.as_view()),
+    path('exports/<str:job>/file/',    views.ExportJobView.as_view(), {'file': True}),
     path('closures/',                  views.ClosureListView.as_view()),
     path('closures/<int:pk>/cancel/',  views.ClosureCancelView.as_view()),
     path('lead-transfers/',            views.LeadTransferListCreateView.as_view()),
