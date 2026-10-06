@@ -2091,17 +2091,17 @@ class LeadListView(APIView):
                             status=status.HTTP_403_FORBIDDEN)
         # Only the columns asked for, read straight from the table: loading whole Lead
         # rows (with their project's stored plans and maps) took ~2 minutes for 39k
-        # leads; this takes seconds. Name, phone, ad set and ad are decrypted on read.
+        # leads; this takes seconds. Name, phones, ad set and ad are decrypted on read.
         from .models import TC_STATUS, STM_STATUS
         tc_label, stm_label = dict(TC_STATUS), dict(STM_STATUS)
 
         def rows():
-            for (name, phone, project, campaign, adset, ad, tc, stm) in qs.values_list(
-                    'name', 'phone', 'project__name', 'meta_campaign_name', 'meta_adset_name',
+            for (name, phone, alt, project, campaign, adset, ad, tc, stm) in qs.values_list(
+                    'name', 'phone', 'alt_phone', 'project__name', 'meta_campaign_name', 'meta_adset_name',
                     'meta_ad_name', 'telecaller_status', 'stm_status').iterator(chunk_size=5000):
-                yield [name or '', phone or '', project or '', campaign or '', adset or '', ad or '',
+                yield [name or '', phone or '', alt or '', project or '', campaign or '', adset or '', ad or '',
                        tc_label.get(tc, tc or ''), stm_label.get(stm, stm or '')]
-        headings = ['Name', 'Phone', 'Project', 'Campaign', 'Ad Set', 'Ad Name', 'TC Status', 'STM Status']
+        headings = ['Name', 'Phone', 'Alt. Phone', 'Project', 'Campaign', 'Ad Set', 'Ad Name', 'TC Status', 'STM Status']
         return _start_export(request, 'Leads', 'lead', qs.order_by().count(), rows, headings)
 
     @staticmethod
