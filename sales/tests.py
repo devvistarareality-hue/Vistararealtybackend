@@ -1088,7 +1088,12 @@ class ReviseOwnNonCPBookingTests(APITestCase):
 
 
 class BookingExportTests(APITestCase):
-    """The approved-bookings workbook: who may download it, and what is in it."""
+    """The bookings workbook: who may download it, and what is in it.
+
+    It covers every stage, not only the approved deals it once held — it is
+    downloaded from Approvals, where most of what you are looking at is precisely
+    the stuff that has not been approved yet.
+    """
 
     def _seed(self):
         from datetime import date
@@ -1151,7 +1156,7 @@ class BookingExportTests(APITestCase):
         auth(self.client, admin)
         self.assertEqual(self.client.get('/api/sales/bookings/export/').status_code, 200)
 
-    def test_it_holds_sales_and_cp_together_and_only_approved(self):
+    def test_it_holds_sales_and_cp_together_at_every_stage(self):
         co, admin, stm, p1, p2, sales_b, cp_b, other, pending = self._seed()
         auth(self.client, admin)
         ws = self._sheet(self.client.get('/api/sales/bookings/export/').content)
@@ -1159,7 +1164,12 @@ class BookingExportTests(APITestCase):
         self.assertIn('Sales Client', clients)
         self.assertIn('Partner Client', clients)          # CP side included
         self.assertIn('Other Project', clients)
-        self.assertNotIn('Not Approved Yet', clients)     # pending is left out
+        # A deal still awaiting approval belongs here now: this is downloaded from
+        # Approvals, and leaving out the pending ones would empty the screen's
+        # whole subject out of its own export.
+        self.assertIn('Not Approved Yet', clients)
+        self.assertEqual(self._column(ws, 'Booking Status')[clients.index('Not Approved Yet')],
+                         'Pending Approval', 'and the row says which stage it is at')
         modules = dict(zip(clients, self._column(ws, 'Module')))
         self.assertEqual(modules['Partner Client'], 'Channel Partner')
         self.assertEqual(modules['Sales Client'], 'Sales')
@@ -1168,7 +1178,8 @@ class BookingExportTests(APITestCase):
         co, admin, stm, p1, p2, *_ = self._seed()
         auth(self.client, admin)
         ws = self._sheet(self.client.get(f'/api/sales/bookings/export/?project={p1.id}').content)
-        self.assertEqual(sorted(self._column(ws, 'Client Name')), ['Partner Client', 'Sales Client'])
+        self.assertEqual(sorted(self._column(ws, 'Client Name')),
+                         ['Not Approved Yet', 'Partner Client', 'Sales Client'])
         self.assertNotIn('Other Project', self._column(ws, 'Client Name'))
 
     def test_the_grand_total_sums_the_rows_above_it(self):
@@ -1182,7 +1193,10 @@ class BookingExportTests(APITestCase):
         col = ws.cell(row=total[0].row, column=idx)
         # A SUM formula, not a frozen number, so it stays right if the sheet is filtered.
         self.assertEqual(col.value, f'=SUM({col.column_letter}{first}:{col.column_letter}{last})')
-        self.assertEqual(sum(self._column(ws, 'Final Amount')), 3000000)
+        # 10L + 20L sold, plus the 80L still awaiting approval. The total spans
+        # every stage now, which is why it is read beside Booking Status rather
+        # than as a figure for money earned.
+        self.assertEqual(sum(self._column(ws, 'Final Amount')), 11000000)
 
     def test_a_superseded_revision_is_not_listed_twice(self):
         from datetime import date
@@ -1198,16 +1212,15 @@ class BookingExportTests(APITestCase):
         ws = self._sheet(self.client.get(f'/api/sales/bookings/export/?project={p1.id}').content)
         clients = self._column(ws, 'Client Name')
         self.assertEqual(clients.count('Sales Client'), 1, 'the superseded version is still listed')
-        # and the total counts the revision, not the original
-        self.assertEqual(sum(self._column(ws, 'Final Amount')), 3500000)
+        # and the total counts the revision, not the original (plus the 80L pending)
+        self.assertEqual(sum(self._column(ws, 'Final Amount')), 11500000)
 
     def test_it_is_the_whole_company_not_just_the_downloader_s_own(self):
-        """The sheet is every approved booking in the company, whoever booked it.
+        """The sheet is every booking in the company, whoever booked it.
 
-        The button sits on My Bookings (Approvals is manager-only, so an ordinary
-        employee could not reach it there) — but the export applies none of that
-        screen's scoping. No `mine`, no reporting tree, no CP filter: a rep granted
-        the permission downloads the same rows an admin would.
+        The export applies none of the hosting screen's scoping. No `mine`, no
+        reporting tree, no CP filter: a rep granted the permission downloads the
+        same rows an admin would.
         """
         from datetime import date
         from sales.models import Booking
@@ -1227,7 +1240,7 @@ class BookingExportTests(APITestCase):
         self.assertIn("Another Rep's Client", clients)   # not their own booking
         self.assertIn('Sales Client', clients)
         self.assertIn('Partner Client', clients)
-        self.assertEqual(len(clients), 4)
+        self.assertEqual(len(clients), 5, 'four sold plus the one awaiting approval')
         # and the same rep's own My Bookings list shows only their own — the export
         # is deliberately not that list.
         mine = self.client.get('/api/sales/bookings/?mine=1').json()
