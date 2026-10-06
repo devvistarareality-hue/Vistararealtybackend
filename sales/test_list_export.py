@@ -57,9 +57,9 @@ class ListExportTests(TestCase):
 
     def test_leads_hold_what_the_person_sees_with_the_source_filter(self):
         self.stm.can_export_leads = True; self.stm.save()
-        names = sorted(r[1] for r in self._rows(self._get(self.stm, '/api/sales/leads/?export=xlsx&book=all')))
+        names = sorted(r[0] for r in self._rows(self._get(self.stm, '/api/sales/leads/?export=xlsx&book=all')))
         self.assertEqual(names, ['Client 0', 'Client 1', 'Client 2'])        # not the other STM's
-        names = sorted(r[1] for r in self._rows(self._get(self.stm, '/api/sales/leads/?export=xlsx&book=sales')))
+        names = sorted(r[0] for r in self._rows(self._get(self.stm, '/api/sales/leads/?export=xlsx&book=sales')))
         self.assertEqual(names, ['Client 0', 'Client 1'])
         self.assertTrue(ActivityLog.objects.filter(action='downloaded', target_type='lead export').exists())
 

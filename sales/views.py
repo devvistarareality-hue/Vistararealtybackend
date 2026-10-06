@@ -2089,23 +2089,19 @@ class LeadListView(APIView):
         if not _can_export_leads(request.user):
             return Response({'detail': 'You do not have access to download leads.'},
                             status=status.HTTP_403_FORBIDDEN)
+        # Only the columns asked for, read straight from the table: loading whole Lead
+        # rows (with their project's stored plans and maps) took ~2 minutes for 39k
+        # leads; this takes seconds. Name, phone, ad set and ad are decrypted on read.
+        from .models import TC_STATUS, STM_STATUS
+        tc_label, stm_label = dict(TC_STATUS), dict(STM_STATUS)
+
         def rows():
-            for l in qs.select_related('project', 'source', 'telecaller', 'stm', 'channel_partner').iterator(chunk_size=2000):
-                yield [
-                    _local(l.created_at), l.name or '', l.phone or '', l.alt_phone or '', l.email or '',
-                    l.project.name if l.project_id else '', l.source.name if l.source_id else '',
-                    l.channel_partner.name if l.channel_partner_id else '',
-                    l.meta_campaign_name or '',
-                    l.telecaller.name if l.telecaller_id else '',
-                    l.get_telecaller_status_display() if l.telecaller_status else '', l.telecaller_remarks or '',
-                    l.stm.name if l.stm_id else '', l.get_stm_status_display() if l.stm_status else '',
-                    l.stm_remarks or '', l.get_status_display() if l.status else '',
-                    l.city or '', l.get_budget_bucket_display() if l.budget_bucket else '',
-                    ', '.join(l.purpose or []) if isinstance(l.purpose, list) else (l.purpose or ''),
-                ]
-        headings = ['Received', 'Name', 'Phone', 'Alt. Phone', 'Email', 'Project', 'Source', 'Channel Partner',
-                    'Campaign', 'Telecaller', 'TC Status', 'TC Remarks', 'STM', 'STM Status', 'STM Remarks',
-                    'Overall Status', 'City', 'Budget', 'Purpose']
+            for (name, phone, project, campaign, adset, ad, tc, stm) in qs.values_list(
+                    'name', 'phone', 'project__name', 'meta_campaign_name', 'meta_adset_name',
+                    'meta_ad_name', 'telecaller_status', 'stm_status').iterator(chunk_size=5000):
+                yield [name or '', phone or '', project or '', campaign or '', adset or '', ad or '',
+                       tc_label.get(tc, tc or ''), stm_label.get(stm, stm or '')]
+        headings = ['Name', 'Phone', 'Project', 'Campaign', 'Ad Set', 'Ad Name', 'TC Status', 'STM Status']
         return _start_export(request, 'Leads', 'lead', qs.order_by().count(), rows, headings)
 
     @staticmethod
