@@ -29,6 +29,26 @@ def _log(request, summary, action=None, target_id=None):
         pass
 
 
+def _list_for_new_task(company, requested):
+    """The list a new task belongs to, with or without one being named.
+
+    Task.task_list is NOT NULL, but the create form no longer asks which list —
+    it was a dropdown with a single option, and picking it was work that told
+    nobody anything. So an unspecified task falls to the company's first open
+    list, and to a created one if the company has none at all; a task can always
+    be moved afterwards.
+
+    A list named explicitly is still honoured, and still has to belong to this
+    company — the picker going away does not make the id safe to trust.
+    """
+    if requested:
+        return TaskList.objects.filter(pk=requested, company=company).first()
+    existing = TaskList.objects.filter(company=company, archived=False).order_by('id').first()
+    if existing:
+        return existing
+    return TaskList.objects.create(company=company, name='Tasks')
+
+
 def _task_list_qs(request):
     return tasks_qs(request, TaskList.objects.all())
 
@@ -192,7 +212,7 @@ class TasksView(APIView):
         company = request_company(request)
         if not company:
             return Response({'detail': 'No company on this account.'}, status=status.HTTP_400_BAD_REQUEST)
-        task_list = TaskList.objects.filter(pk=d.get('task_list'), company=company).first()
+        task_list = _list_for_new_task(company, d.get('task_list'))
         if not task_list:
             return Response({'detail': 'Invalid task list.'}, status=status.HTTP_400_BAD_REQUEST)
         status_val = d.get('status') or 'todo'
