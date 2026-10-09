@@ -95,3 +95,85 @@ class TaskCreatedWithoutAListTests(APITestCase):
     def test_a_title_is_still_required(self):
         TaskList.objects.create(company=self.co, name='Ours')
         self.assertEqual(self._create(title='   ').status_code, 400)
+
+
+class TaskCodeTests(APITestCase):
+    """Every task carries a reference — TSK-001 — so it can be quoted and found.
+
+    Numbered per company, not platform-wide: the numbers stay small, and nobody
+    can read another company's volume off their own.
+    """
+
+    def setUp(self):
+        self.co = Company.objects.create(code='TCD', name='Code Co')
+        self.other = Company.objects.create(code='TCE', name='Other Co')
+        self.admin = User.objects.create(email='tcd_admin@x.com', company=self.co,
+                                         role='Admin', user_code='TC1')
+        TaskList.objects.create(company=self.co, name='Ours')
+        auth(self.client, self.admin)
+
+    def _create(self, title='Fix the lift'):
+        r = self.client.post('/api/tasks/', {'title': title}, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+        return r.data
+
+    def test_a_new_task_is_given_a_reference(self):
+        self.assertEqual(self._create()['code'], 'TSK-001')
+
+    def test_references_run_in_sequence(self):
+        self.assertEqual([self._create(f'Job {i}')['code'] for i in range(3)],
+                         ['TSK-001', 'TSK-002', 'TSK-003'])
+
+    def test_each_company_counts_from_one(self):
+        self._create()
+        TaskList.objects.create(company=self.other, name='Theirs')
+        mate = User.objects.create(email='tce_admin@x.com', company=self.other,
+                                   role='Admin', user_code='TC2')
+        auth(self.client, mate)
+        self.assertEqual(self._create('Their job')['code'], 'TSK-001')
+
+    def test_a_deleted_task_does_not_hand_its_number_on(self):
+        # Counting rows would reuse the number of anything removed, and two tasks
+        # with one reference is worse than a gap in the sequence.
+        first = self._create('One')
+        self._create('Two')
+        self.client.delete(f"/api/tasks/{first['id']}/")
+        self.assertEqual(self._create('Three')['code'], 'TSK-003')
+
+    # ------------------------------------------------------------- searching
+
+    def test_a_task_is_found_by_its_reference(self):
+        self._create('One')
+        wanted = self._create('Needle')
+        r = self.client.get(f"/api/tasks/?search={wanted['code']}")
+        self.assertEqual([t['id'] for t in r.json()['results']], [wanted['id']])
+
+    def test_the_padding_and_the_hash_are_optional(self):
+        # Nobody types TSK-002 when they mean "number 2".
+        self._create('One')
+        wanted = self._create('Needle')
+        for term in ('TSK-002', 'tsk-2', '002', '2', '#TSK-002'):
+            r = self.client.get(f'/api/tasks/?search={term}')
+            ids = [t['id'] for t in r.json()['results']]
+            self.assertIn(wanted['id'], ids, f'{term!r} did not find it')
+
+    def test_searching_by_title_still_works(self):
+        self._create('Repair the roof')
+        self._create('Something else')
+        r = self.client.get('/api/tasks/?search=roof')
+        self.assertEqual([t['title'] for t in r.json()['results']], ['Repair the roof'])
+
+    def test_a_search_matching_nothing_returns_nothing(self):
+        self._create('One')
+        self.assertEqual(self.client.get('/api/tasks/?search=TSK-999').json()['results'], [])
+
+    def test_the_reference_does_not_leak_across_companies(self):
+        self._create('Ours')
+        TaskList.objects.create(company=self.other, name='Theirs')
+        mate = User.objects.create(email='tce2@x.com', company=self.other,
+                                   role='Admin', user_code='TC3')
+        auth(self.client, mate)
+        theirs = self._create('Theirs')
+        # Both are TSK-001; each company sees only its own.
+        r = self.client.get('/api/tasks/?search=TSK-001')
+        self.assertEqual([t['id'] for t in r.json()['results']], [theirs['id']])

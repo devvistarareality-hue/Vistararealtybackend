@@ -7,6 +7,8 @@ active user in the company with no module/role gate.
 """
 from datetime import timedelta
 
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -27,6 +29,26 @@ def _log(request, summary, action=None, target_id=None):
         note(request, summary, action=action, target_type='task', target_id=target_id, module='Task Allocation')
     except Exception:
         pass
+
+
+def _next_task_code(company):
+    """Next per-company task reference, e.g. 'TSK-001'.
+
+    Numbered per company rather than platform-wide so the numbers stay small and
+    nobody can infer another company's volume from their own. Mirrors how
+    user_code and the Club 1000 LOI numbers are made.
+
+    The caller holds a lock on the company row, so two tasks created at the same
+    moment cannot read the same count and claim the same code. The while loop is
+    the belt to that braces: a deleted task leaves a gap, and counting rows would
+    otherwise hand its number to the next one.
+    """
+    n = Task.objects.filter(company=company).count() + 1
+    code = f'TSK-{n:03d}'
+    while Task.objects.filter(company=company, code=code).exists():
+        n += 1
+        code = f'TSK-{n:03d}'
+    return code
 
 
 def _list_for_new_task(company, requested):
@@ -70,7 +92,7 @@ def serialize_task_list(tl):
 def serialize_task(t, detail=False):
     items = list(t.checklist_items.all())
     out = {
-        'id': t.id, 'title': t.title, 'status': t.status, 'priority': t.priority,
+        'id': t.id, 'code': t.code, 'title': t.title, 'status': t.status, 'priority': t.priority,
         'task_list': t.task_list_id, 'task_list_name': t.task_list.name if t.task_list_id else '',
         'due_date': t.due_date.isoformat() if t.due_date else None,
         'start_date': t.start_date.isoformat() if t.start_date else None,
@@ -195,7 +217,15 @@ class TasksView(APIView):
             qs = qs.filter(due_date__lt=timezone.localdate()).exclude(status='done')
         search = (p.get('search') or '').strip()
         if search:
-            qs = qs.filter(title__icontains=search)
+            # By reference as well as title — quoting TSK-014 is the point of
+            # having it. 'tsk-14' and '14' find TSK-014 too: nobody types the
+            # padding, and a bare number is the obvious thing to try.
+            bare = search.lstrip('#').strip()
+            codes = Q(code__icontains=bare)
+            digits = ''.join(c for c in bare if c.isdigit())
+            if digits and digits.isdigit():
+                codes |= Q(code__iexact=f'TSK-{int(digits):03d}')
+            qs = qs.filter(Q(title__icontains=search) | codes)
         ordering = p.get('ordering') or 'position'
         allowed_order = {'position', '-position', 'due_date', '-due_date', 'created_at', '-created_at', 'priority', '-priority'}
         if ordering not in allowed_order:
@@ -221,8 +251,13 @@ class TasksView(APIView):
         priority_val = d.get('priority') or 'normal'
         if priority_val not in dict(Task.PRIORITY):
             priority_val = 'normal'
+        # Lock the company row, as user-code generation does, so two tasks created
+        # at the same instant cannot read the same count and claim one reference.
+        with transaction.atomic():
+            company.__class__.objects.select_for_update().get(pk=company.pk)
+            code = _next_task_code(company)
         task = Task.objects.create(
-            company=company, task_list=task_list, title=title,
+            company=company, task_list=task_list, title=title, code=code,
             description=(d.get('description') or '').strip(),
             status=status_val, priority=priority_val,
             due_date=d.get('due_date') or None, start_date=d.get('start_date') or None,

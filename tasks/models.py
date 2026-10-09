@@ -57,6 +57,12 @@ class Task(models.Model):
 
     company = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='tasks')
     task_list = models.ForeignKey(TaskList, on_delete=models.CASCADE, related_name='tasks')
+    # Human-facing reference — TSK-001, numbered per company, generated on create
+    # (see tasks.views._next_task_code). The primary key is a platform-wide number
+    # that means nothing to anyone; this is what gets quoted in a message or
+    # searched for. Blank only for the instant between __init__ and the save that
+    # fills it, and on rows that predate the field.
+    code = models.CharField(max_length=20, blank=True, db_index=True)
     title = models.CharField(max_length=255)
     description = EncryptedTextField(blank=True)
     status = models.CharField(max_length=20, choices=STATUS, default='todo')
@@ -74,6 +80,10 @@ class Task(models.Model):
 
     class Meta:
         ordering = ['position', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'code'], name='uniq_task_code_per_company',
+                                    condition=models.Q(code__gt='')),
+        ]
         indexes = [
             models.Index(fields=['company', 'status']),
             models.Index(fields=['task_list', 'status']),
