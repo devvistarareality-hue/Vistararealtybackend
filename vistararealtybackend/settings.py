@@ -43,7 +43,6 @@ INSTALLED_APPS = [
     'receivables',
     'activity',
     'tasks',
-    'ai',
 ]
 
 MIDDLEWARE = [
