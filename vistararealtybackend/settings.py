@@ -214,6 +214,9 @@ if _cors_origins:
     CORS_ALLOWED_ORIGIN_REGEXES = [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$']
 else:
     CORS_ALLOW_ALL_ORIGINS = True
+# X-Nexora-Module: which module's screen made the call (activity/recorder.py).
+from corsheaders.defaults import default_headers  # noqa: E402
+CORS_ALLOW_HEADERS = (*default_headers, 'x-nexora-module')
 
 # ── Cache ─────────────────────────────────────────────────────────────
 # Uses Redis when REDIS_URL is set (shared across gunicorn workers → makes the
