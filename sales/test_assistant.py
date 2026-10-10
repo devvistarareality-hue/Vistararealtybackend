@@ -128,3 +128,58 @@ class AskViewTests(TestCase):
             os.environ.pop('ANTHROPIC_API_KEY', None)
             _, res = self._ask(self.admin)
         self.assertEqual(res.status_code, 503)
+
+
+class OtherModuleTests(TestCase):
+    """Ask Nexora reads every module the asker holds, and only those."""
+    def setUp(self):
+        cache.clear()
+        from tasks.models import Task, TaskList
+        from attendance.models import LeaveApplication
+        self.co = Company.objects.create(code='AIM', name='Aim Co')
+        self.admin = User.objects.create(name='Boss', email='b@aim.com', phone='9200000001', user_code='AM-A',
+                                         role='Admin', company=self.co)
+        self.stm = User.objects.create(name='Stm', email='s@aim.com', phone='9200000002', user_code='AM-S',
+                                       role='Employee', designation='STM', company=self.co, modules=['Sales'],
+                                       reporting_manager=self.admin)
+        tl = TaskList.objects.create(company=self.co, name='Site work')
+        for i, st in enumerate(['todo', 'done', 'todo']):
+            t = Task.objects.create(company=self.co, task_list=tl, title=f'T{i}', code=f'TSK-00{i}', status=st,
+                                    due_date=timezone.localdate())
+            t.assignees.set([self.stm])
+        LeaveApplication.objects.create(user=self.stm, leave_type='sick_leave', from_date=timezone.localdate())
+
+    def test_modules_follow_user_management(self):
+        self.assertIn('tasks', assistant.available(self.admin))
+        self.assertIn('ar_accounts', assistant.available(self.admin))
+        got = assistant.available(self.stm)
+        self.assertIn('leads', got)
+        self.assertIn('my_leaves', got)          # everyone has their own HR records
+        self.assertNotIn('tasks', got)
+        self.assertNotIn('ar_accounts', got)
+        with self.assertRaises(ValueError):
+            assistant.run_query(self.stm, None, {'entity': 'tasks', 'mode': 'count'})
+        tool = assistant.tool_for(got)
+        self.assertNotIn('ar_accounts', tool['description'])
+
+    def test_tasks_and_leaves(self):
+        out = assistant.run_query(self.admin, None, {'entity': 'tasks', 'mode': 'count', 'group_by': ['status']})
+        self.assertEqual({g['status']: g['count'] for g in out['groups']}, {'todo': 2, 'done': 1})
+        self.assertEqual(assistant.run_query(self.admin, None, {'entity': 'team_leaves', 'mode': 'count'})['total'], 1)
+        self.assertEqual(assistant.run_query(self.stm, None, {'entity': 'my_leaves', 'mode': 'count'})['total'], 1)
+        self.assertEqual(assistant.run_query(self.stm, None, {'entity': 'team_leaves', 'mode': 'count'})['total'], 0)
+
+    def test_computed_rows(self):
+        rows = [{'project': 'Kalrav', 'overdue': '1000.00', 'booking_date': '2026-09-01'},
+                {'project': 'Kalrav', 'overdue': '500.00', 'booking_date': '2026-10-01'},
+                {'project': 'Tundav', 'overdue': '0', 'booking_date': None}]
+        fields = assistant._entities()['ar_accounts']['fields']
+        out = assistant._run_rows(rows, fields, {'mode': 'sum', 'sum_field': 'overdue', 'group_by': ['project'],
+                                                 'filters': [{'field': 'overdue', 'op': 'gte', 'value': 1}]},
+                                  'booking_date')
+        self.assertEqual(out['grand_total'], 1500.0)
+        self.assertEqual(out['groups'], [{'project': 'Kalrav', 'total': 1500.0}])
+        out = assistant._run_rows(rows, fields, {'mode': 'count', 'group_by': ['booking_date:month']}, 'booking_date')
+        self.assertEqual(out['total'], 3)
+        # The AR register hands its computed rows over (an admin has AR).
+        self.assertEqual(assistant.run_query(self.admin, None, {'entity': 'ar_accounts', 'mode': 'count'})['total'], 0)

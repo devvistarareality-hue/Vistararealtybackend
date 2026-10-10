@@ -5,6 +5,7 @@ from decimal import Decimal
 from django.utils import timezone
 
 from rest_framework.views import APIView
+from sales.ai_capture import ai_capture
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
@@ -355,6 +356,8 @@ class TeamLeaveRequestsView(APIView):
             qs = qs.filter(user__company=user.company)
         else:
             qs = qs.filter(user__reporting_manager=user)
+        if ai_capture(request, qs=qs):
+            return Response({})
 
         status_param = request.query_params.get('status')
         if status_param:

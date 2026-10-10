@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status
+from sales.ai_capture import ai_capture
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -407,6 +408,8 @@ class ARFollowUpListView(APIView):
             return _deny()
         now = timezone.now()
         qs = _followup_qs(request)
+        if ai_capture(request, qs=qs):
+            return Response({})
         if request.query_params.get('scope') != 'all':
             qs = qs.filter(assigned_to=request.user)
         when = request.query_params.get('when') or 'open'

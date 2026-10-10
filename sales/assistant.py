@@ -1,12 +1,14 @@
 """Ask Nexora — an AI assistant that answers questions from the asker's own data.
 
+It covers every module the asker holds (Sales, Channel Partner, AR, Task Allocation,
+HR, Club 1000) and works out from the question which one is meant.
+
 How it reads data: one flexible tool, `query_records`, that Claude fills in for any
 question (which records, which filters, grouped by what, counted or summed, or a
-short list). The tool does not query tables directly. It calls the real list view
-(Leads, Site Visits, Follow-Ups, Closures, Bookings) in-process as the asker, and
-the view hands back its already-scoped queryset (see views._ai_capture) — so every
-answer is limited by exactly the same company, role, reporting-tree, project and
-Sales/CP rules as the screens. It is read-only, row-capped, and encrypted fields
+short list). The tool does not query tables directly. It calls the module's real
+list view in-process as the asker, and the view hands back its already-scoped
+queryset or rows (see sales/ai_capture.py) — so every answer is limited by exactly
+the same company, role, reporting-tree, project and Sales/CP rules as the screens. It is read-only, row-capped, and encrypted fields
 (names, phones, amounts) are decrypted on read and filtered/summed in Python.
 
 Answers take several model calls, longer than one web request may run, so a
@@ -40,7 +42,7 @@ LIST_LIMIT = 100          # rows a list may return to the model
 SCAN_LIMIT = 20000        # rows read when filtering/summing encrypted fields
 DAILY_LIMIT = 60          # questions per person per day
 JOB_DIR = os.path.join('/tmp', 'nexora-ai')
-# Opus 5.5 list prices, USD per million tokens, and a rupee rate for the log.
+# Sonnet 5.5 list prices, USD per million tokens, and a rupee rate for the log.
 PRICE_IN, PRICE_OUT, PRICE_CACHE_READ, PRICE_CACHE_WRITE = 2.0, 10.0, 0.20, 2.50
 USD_INR = 85.0
 
@@ -53,13 +55,48 @@ def can_use_ai(user):
 
 
 # ── What can be asked about ──────────────────────────────────────────────────
-# Per entity: the list view that scopes it, and its fields as
-#   alias: (orm path, kind)   kind: text | choice | date | datetime | bool | enc | enc_money
-# 'enc' fields are encrypted: listed and filtered in Python, never grouped.
+# Every module registers its records here. Per entity:
+#   module  the User Management module(s) that open it (None = everyone, the view
+#           itself limits what they see, e.g. their own attendance)
+#   view    the module's list view, called in-process as the asker; it hands back
+#           its scoped queryset (or computed rows) through sales.ai_capture
+#   own     instead of a view: a function(user) → queryset of the asker's own records
+#   rows    True when the view hands back computed rows (dicts), not a queryset
+#   company the company path, to narrow a platform admin to the company they view
+#   fields  alias: (orm path or row key, kind)
+#           kind: text | choice | date | datetime | bool | number | money | enc | enc_money
+#           'enc' fields are encrypted: listed and filtered in Python, never grouped.
+#   note    one line for the model on what the entity means
+# A new module adds its entities here (and an ai_capture call in its list view) —
+# see the "new module goes everywhere" checklist.
+SALES_MODULES = ('Sales', 'Channel Partner')
+
+
+def _own_attendance(user):
+    from attendance.models import AttendanceRecord
+    return AttendanceRecord.objects.filter(user=user)
+
+
+def _own_leaves(user):
+    from attendance.models import LeaveApplication
+    return LeaveApplication.objects.filter(user=user)
+
+
 def _entities():
     from . import views as v
+    from attendance.views import TeamLeaveRequestsView
+    from club1000.views import InvestorListCreateView, PayoutListView
+    from receivables.collections import ARFollowUpListView
+    from receivables.views import ARRegisterView
+    from tasks.views import TasksView
+    leave_fields = {
+        'applied': ('applied_on', 'datetime'), 'from': ('from_date', 'date'), 'to': ('to_date', 'date'),
+        'type': ('leave_type', 'choice'), 'work_type': ('work_type', 'choice'),
+        'day_type': ('day_type', 'choice'), 'status': ('status', 'choice'),
+    }
     return {
-        'leads': {'view': v.LeadListView, 'date': 'received', 'fields': {
+        # ── Sales / Channel Partner ──
+        'leads': {'module': SALES_MODULES, 'view': v.LeadListView, 'date': 'received', 'sales': True, 'fields': {
             'received': ('created_at', 'datetime'), 'name': ('name', 'enc'), 'phone': ('phone', 'enc'),
             'project': ('project__name', 'text'), 'source': ('source__name', 'text'),
             'status': ('status', 'choice'), 'tc_status': ('telecaller_status', 'choice'),
@@ -69,7 +106,9 @@ def _entities():
             'ad': ('meta_ad_name', 'enc'), 'city': ('city', 'text'), 'budget': ('budget_bucket', 'choice'),
             'duplicate': ('is_duplicate', 'bool'), 'stm_assigned': ('stm_assigned_at', 'datetime'),
         }},
-        'site_visits': {'view': v.SiteVisitListView, 'date': 'visited', 'fields': {
+        'site_visits': {'module': SALES_MODULES, 'view': v.SiteVisitListView, 'date': 'visited', 'sales': True,
+                        'note': 'status scheduled/completed/no_show/cancelled; outcome hot/warm/cold/not_interested',
+                        'fields': {
             'scheduled': ('scheduled_at', 'datetime'), 'visited': ('visited_at', 'datetime'),
             'status': ('status', 'choice'), 'outcome': ('outcome', 'choice'),
             'project': ('project__name', 'text'), 'stm': ('stm__name', 'text'),
@@ -78,14 +117,16 @@ def _entities():
             'source': ('lead__source__name', 'text'), 'campaign': ('lead__meta_campaign_name', 'text'),
             'remarks': ('remarks', 'enc'),
         }},
-        'follow_ups': {'view': v.FollowUpListView, 'date': 'scheduled', 'fields': {
+        'follow_ups': {'module': SALES_MODULES, 'view': v.FollowUpListView, 'date': 'scheduled', 'sales': True,
+                       'note': 'Sales lead follow-ups', 'fields': {
             'scheduled': ('scheduled_at', 'datetime'), 'completed': ('completed_at', 'datetime'),
             'status': ('status', 'choice'), 'assigned_to': ('assigned_to__name', 'text'),
             'role': ('role_context', 'text'), 'project': ('lead__project__name', 'text'),
             'client': ('lead__name', 'enc'), 'phone': ('lead__phone', 'enc'),
             'remarks': ('remarks', 'enc'),
         }},
-        'closures': {'view': v.ClosureListView, 'date': 'closure_date', 'fields': {
+        'closures': {'module': SALES_MODULES, 'view': v.ClosureListView, 'date': 'closure_date', 'sales': True,
+                     'fields': {
             'closure_date': ('closure_date', 'date'), 'status': ('status', 'choice'),
             'project': ('project__name', 'text'), 'stm': ('stm__name', 'text'),
             'telecaller': ('referred_by_telecaller__name', 'text'), 'unit': ('unit_no', 'text'),
@@ -93,74 +134,156 @@ def _entities():
             'total_amount': ('total_amount', 'enc_money'), 'booking_amount': ('booking_amount', 'enc_money'),
             'source': ('lead__source__name', 'text'),
         }},
-        'bookings': {'view': v.BookingListCreateView, 'date': 'booking_date',
-                     'params': {'mine': '1', 'scope': 'visible'}, 'fields': {
+        'bookings': {'module': SALES_MODULES, 'view': v.BookingListCreateView, 'date': 'booking_date', 'sales': True,
+                     'params': {'mine': '1', 'scope': 'visible'},
+                     'note': 'status sold = approved by Sales/CP; accounts_status pending/approved/rejected',
+                     'fields': {
             'booking_date': ('booking_date', 'date'), 'status': ('status', 'choice'),
             'accounts_status': ('accounts_status', 'choice'), 'project': ('project__name', 'text'),
             'stm': ('stm__name', 'text'), 'source': ('source', 'text'), 'units': ('plot_numbers', 'text'),
             'client': ('client_name', 'enc'), 'amount': ('final_amount', 'enc_money'),
         }},
+        # ── Accounts Receivable ──
+        'ar_accounts': {'module': ('AR',), 'view': ARRegisterView, 'rows': True, 'date': 'booking_date',
+                        'note': 'one row per approved booking with its collection position as of today '
+                                '(₹): collectable, received, outstanding, overdue (due and unpaid), not_due',
+                        'fields': {
+            'project': ('project', 'text'), 'units': ('plots', 'text'), 'client': ('client_name', 'text'),
+            'phone': ('phone', 'text'), 'booking_date': ('booking_date', 'date'), 'status': ('status', 'choice'),
+            'total_deal': ('total_deal', 'money'), 'collectable': ('collectable', 'money'),
+            'received': ('received', 'money'), 'pct_realised': ('pct_realised', 'number'),
+            'outstanding': ('outstanding', 'money'), 'overdue': ('overdue', 'money'),
+            'not_due': ('not_due', 'money'), 'interest': ('net_interest', 'money'),
+        }},
+        'ar_followups': {'module': ('AR',), 'view': ARFollowUpListView, 'date': 'scheduled',
+                         'company': 'account__company_id',
+                         'note': 'collection follow-up calls/visits; status pending/done',
+                         'fields': {
+            'scheduled': ('scheduled_at', 'datetime'), 'done': ('done_at', 'datetime'),
+            'status': ('status', 'choice'), 'channel': ('channel', 'choice'),
+            'assigned_to': ('assigned_to__name', 'text'), 'project': ('account__booking__project__name', 'text'),
+            'units': ('account__booking__plot_numbers', 'text'), 'client': ('account__booking__client_name', 'enc'),
+            'promised_amount': ('promised_amount', 'enc_money'), 'note': ('note', 'enc'), 'outcome': ('outcome', 'enc'),
+        }},
+        # ── Task Allocation ──
+        'tasks': {'module': ('Task Allocation',), 'view': TasksView, 'date': 'created', 'company': 'company_id',
+                  'note': 'status todo/in_progress/in_review/done/blocked; priority urgent/high/normal/low; '
+                          'overdue = due before today and not done',
+                  'fields': {
+            'code': ('code', 'text'), 'title': ('title', 'text'), 'status': ('status', 'choice'),
+            'priority': ('priority', 'choice'), 'due': ('due_date', 'date'), 'start': ('start_date', 'date'),
+            'completed': ('completed_at', 'datetime'), 'created': ('created_at', 'datetime'),
+            'list': ('task_list__name', 'text'), 'assignee': ('assignees__name', 'text'),
+            'created_by': ('created_by__name', 'text'),
+        }},
+        # ── HR ──
+        'my_attendance': {'module': None, 'own': _own_attendance, 'date': 'date',
+                          'note': "the asker's own sign-in days", 'fields': {
+            'date': ('date', 'date'), 'in_time': ('in_time', 'text'), 'out_time': ('out_time', 'text'),
+            'hours': ('total_hours', 'number'),
+        }},
+        'my_leaves': {'module': None, 'own': _own_leaves, 'date': 'from',
+                      'note': "the asker's own leave / WFH applications", 'fields': leave_fields},
+        'team_leaves': {'module': None, 'view': TeamLeaveRequestsView, 'date': 'from', 'company': 'user__company_id',
+                        'note': 'leave / WFH requests of the people who report to the asker (all for an admin)',
+                        'fields': {**leave_fields, 'employee': ('user__name', 'text')}},
+        # ── Club 1000 ──
+        'investors': {'module': ('Club 1000',), 'view': InvestorListCreateView, 'date': 'invested',
+                      'company': 'company_id', 'note': 'drafts and rejected left out', 'fields': {
+            'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'scheme': ('scheme__name', 'text'),
+            'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
+            'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),
+            'interest_payout': ('interest_payout', 'choice'), 'return_pct': ('total_return_pct', 'number'),
+            'status': ('status', 'choice'), 'approval': ('approval_status', 'choice'),
+            'added_by': ('added_by__name', 'text'),
+        }},
+        'payouts': {'module': ('Club 1000',), 'view': PayoutListView, 'date': 'due',
+                    'company': 'investor__company_id', 'note': 'interest / principal payouts to investors',
+                    'fields': {
+            'type': ('payout_type', 'choice'), 'due': ('due_date', 'date'), 'amount_due': ('amount_due', 'enc_money'),
+            'status': ('status', 'choice'), 'paid_amount': ('paid_amount', 'enc_money'),
+            'paid_date': ('paid_date', 'date'), 'investor': ('investor__name', 'enc'),
+            'scheme': ('investor__scheme__name', 'text'),
+        }},
     }
 
 
-TOOL = {
-    'name': 'query_records',
-    'description': (
-        "Read the asker's own CRM records — only what their screens show them. Call it as many "
-        "times as a question needs (e.g. this month and last month, then compare).\n"
-        "Entities and fields:\n"
-        "- leads: received, name*, phone*, project, source, status, tc_status, stm_status, telecaller, "
-        "stm, channel_partner*, campaign, adset*, ad*, city, budget, duplicate, stm_assigned\n"
-        "- site_visits: scheduled, visited, status (scheduled/completed/no_show/cancelled), outcome "
-        "(hot/warm/cold/not_interested), project, stm, telecaller, client*, phone*, source, campaign, remarks*\n"
-        "- follow_ups: scheduled, completed, status, assigned_to, role, project, client*, phone*, remarks*\n"
-        "- closures: closure_date, status, project, stm, telecaller, unit, unit_type, client*, "
-        "total_amount*, booking_amount*, source\n"
-        "- bookings: booking_date, status (sold = approved by Sales/CP), accounts_status "
-        "(pending/approved/rejected), project, stm, source, units, client*, amount*\n"
-        "Fields marked * are encrypted: they can be listed, filtered with eq/contains and summed "
-        "(amounts), but not grouped. Dates accept 'today', 'yesterday', 'this_week', 'this_month', "
-        "'last_month', or YYYY-MM-DD. `book` picks partner-sourced (cp), non-partner (sales) or both "
-        "(all, the default). Use mode 'count' or 'sum' with group_by for breakdowns, 'list' for rows."
-    ),
-    'input_schema': {
-        'type': 'object',
-        'properties': {
-            'entity': {'type': 'string', 'enum': ['leads', 'site_visits', 'follow_ups', 'closures', 'bookings']},
-            'mode': {'type': 'string', 'enum': ['count', 'sum', 'list'],
-                     'description': 'count rows, sum a money field, or list rows'},
-            'filters': {'type': 'array', 'description': 'All must match.', 'items': {
-                'type': 'object',
-                'properties': {
-                    'field': {'type': 'string'},
-                    'op': {'type': 'string', 'enum': ['eq', 'ne', 'in', 'contains', 'gte', 'lte', 'isnull']},
-                    'value': {'description': 'string, number, boolean, or a list for "in"'},
-                },
-                'required': ['field', 'op'],
-            }},
-            'group_by': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 2,
-                         'description': 'Up to two non-encrypted fields. Dates group by day; use '
-                                        '"<date field>:month" or ":week" for coarser buckets.'},
-            'sum_field': {'type': 'string', 'description': 'The money field for mode "sum".'},
-            'fields': {'type': 'array', 'items': {'type': 'string'},
-                       'description': 'Columns for mode "list" (default: a sensible few).'},
-            'order_by': {'type': 'string', 'description': 'A field, "-field" for newest/largest first.'},
-            'limit': {'type': 'integer', 'description': f'Rows for mode "list" (max {LIST_LIMIT}).'},
-            'book': {'type': 'string', 'enum': ['sales', 'cp', 'all']},
+def _entity_module(spec):
+    m = spec.get('module')
+    return 'HR' if m is None else ('Sales' if m == SALES_MODULES else m[0])
+
+
+def available(user):
+    """The entities this person may ask about: those of the modules they hold."""
+    from .views import _is_hard_admin
+    admin = _is_hard_admin(user) or getattr(user, 'role', '') == 'Admin' or getattr(user, 'is_staff', False)
+    held = set(getattr(user, 'modules', None) or []) | set(getattr(user, 'manager_modules', None) or []) \
+        | set(getattr(user, 'admin_modules', None) or [])
+    return {k: s for k, s in _entities().items()
+            if s.get('module') is None or admin or held & set(s['module'])}
+
+
+def tool_for(ents):
+    lines = []
+    for name, s in ents.items():
+        cols = ', '.join(a + ('*' if k in ('enc', 'enc_money') else '') for a, (_, k) in s['fields'].items())
+        lines.append(f"- {name} [{_entity_module(s)}]: {cols}" + (f" — {s['note']}" if s.get('note') else ''))
+    return {
+        'name': 'query_records',
+        'description': (
+            "Read the asker's own records in Nexora — only what their screens show them. Call it as many "
+            "times as a question needs (e.g. this month and last month, then compare).\n"
+            "Entities [module] and fields:\n" + '\n'.join(lines) + "\n"
+            "Fields marked * are encrypted: they can be listed, filtered with eq/contains and summed "
+            "(amounts), but not grouped. Dates accept 'today', 'yesterday', 'this_week', 'this_month', "
+            "'last_month', or YYYY-MM-DD. For Sales entities `book` picks partner-sourced (cp), "
+            "non-partner (sales) or both (all, the default). Use mode 'count' or 'sum' with group_by for "
+            "breakdowns, 'list' for rows."
+        ),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'entity': {'type': 'string', 'enum': list(ents)},
+                'mode': {'type': 'string', 'enum': ['count', 'sum', 'list'],
+                         'description': 'count rows, sum an amount field, or list rows'},
+                'filters': {'type': 'array', 'description': 'All must match.', 'items': {
+                    'type': 'object',
+                    'properties': {
+                        'field': {'type': 'string'},
+                        'op': {'type': 'string', 'enum': ['eq', 'ne', 'in', 'contains', 'gte', 'lte', 'isnull']},
+                        'value': {'description': 'string, number, boolean, or a list for "in"'},
+                    },
+                    'required': ['field', 'op'],
+                }},
+                'group_by': {'type': 'array', 'items': {'type': 'string'}, 'maxItems': 2,
+                             'description': 'Up to two non-encrypted fields. Dates group by day; use '
+                                            '"<date field>:month" or ":week" for coarser buckets.'},
+                'sum_field': {'type': 'string', 'description': 'The amount field for mode "sum".'},
+                'fields': {'type': 'array', 'items': {'type': 'string'},
+                           'description': 'Columns for mode "list" (default: a sensible few).'},
+                'order_by': {'type': 'string', 'description': 'A field, "-field" for newest/largest first.'},
+                'limit': {'type': 'integer', 'description': f'Rows for mode "list" (max {LIST_LIMIT}).'},
+                'book': {'type': 'string', 'enum': ['sales', 'cp', 'all']},
+            },
+            'required': ['entity', 'mode'],
         },
-        'required': ['entity', 'mode'],
-    },
-}
+    }
+
 
 SYSTEM = (
-    "You are Ask Nexora, the analytics assistant inside Nexora, the CRM of a real-estate developer "
-    "in Gujarat, India. You answer the signed-in person's questions about leads, site visits (SV), "
-    "follow-ups, closures and bookings, using the query_records tool — never invent numbers.\n\n"
+    "You are Ask Nexora, the analytics assistant inside Nexora, the ERP of a real-estate developer "
+    "in Gujarat, India. You answer the signed-in person's questions about any module they have — "
+    "Sales and Channel Partner (leads, site visits (SV), follow-ups, closures, bookings), Accounts "
+    "Receivable (collections, dues, overdue, follow-ups), Task Allocation (tasks), HR (attendance, "
+    "leaves) and Club 1000 (investors, payouts) — using the query_records tool; never invent numbers. "
+    "Work out from the question which module and entity it is about; the tool lists only what this "
+    "person may open.\n\n"
     "How the business works: leads arrive (Meta ads, walk-ins, channel partners, references); a "
     "telecaller (TC) calls them and passes interested ones to an STM (sales executive), who books a "
     "site visit; a visit ends Hot/Warm/Cold/Not Interested; a deal becomes a closure and a booking, "
     "which Sales/CP approve (status sold) and then Accounts signs off (accounts_status approved). "
-    "Projects include Pratishtha, Kalrav, Anahata Florenza, Tundav and others.\n\n"
+    "An approved booking becomes an AR account whose instalments are collected. Projects include "
+    "Pratishtha, Kalrav, Anahata Florenza, Tundav and others.\n\n"
     "Answering:\n"
     "- Query before you answer; for comparisons or 'why' questions run several queries (periods, "
     "projects, people, funnel steps) and compute rates yourself.\n"
@@ -170,27 +293,35 @@ SYSTEM = (
     "- Only list client names or phone numbers when the person asks for a list of records.\n"
     "- The data is already limited to what this person may see; if a number looks small, say it "
     "covers their scope. If data looks inconsistent (missing dates, future dates), point it out.\n"
-    "- If a question is outside this data (AR, HR, accounts ledgers), say so plainly."
+    "- If the question is about a module that is not in the tool (not given to this person, or not "
+    "built yet — Purchase, Land, Accounts Payable), say so plainly."
 )
 
 
 # ── Running a query ──────────────────────────────────────────────────────────
-def _scoped_qs(request_user, entity, book, company_id):
-    """The entity's queryset exactly as the asker's list screen would scope it."""
+def _scoped(request_user, spec, book, company_id):
+    """The entity's queryset (or rows) exactly as the asker's list screen would scope it."""
+    if spec.get('own'):
+        return spec['own'](request_user), None
     from rest_framework.test import APIRequestFactory, force_authenticate
-    spec = _entities()[entity]
     params = dict(spec.get('params', {}))
-    params['book'] = book or 'all'
+    if spec.get('sales'):
+        params['book'] = book or 'all'
     if company_id:
         params['company_id'] = str(company_id)
     req = APIRequestFactory().get('/ai/', params)
     force_authenticate(req, user=request_user)
     req._ai_capture = {}
     spec['view'].as_view()(req)
-    qs = req._ai_capture.get('qs')
+    box = req._ai_capture
+    if 'rows' in box:
+        return None, box['rows']
+    qs = box.get('qs')
     if qs is None:
         raise ValueError('That list is not available to you.')
-    return qs.order_by()
+    if company_id and spec.get('company'):
+        qs = qs.filter(**{spec['company']: company_id})
+    return qs.order_by(), None
 
 
 def _range(value):
@@ -296,23 +427,126 @@ def _fmt(value, kind):
     return value
 
 
+def _row_value(v, kind):
+    if v in (None, ''):
+        return None
+    if kind == 'date':
+        return parse_date(str(v)[:10])
+    if kind in ('number', 'money'):
+        try:
+            return Decimal(str(v))
+        except Exception:
+            return None
+    return v
+
+
+def _run_rows(rows, fields, args, date_alias):
+    """query_records over computed rows (dicts), all in Python."""
+    def ok(r):
+        for f in args.get('filters') or []:
+            alias, op, value = f.get('field'), f.get('op'), f.get('value')
+            if alias not in fields:
+                raise ValueError(f'Unknown field {alias!r}.')
+            key, kind = fields[alias]
+            got = _row_value(r.get(key), kind)
+            if op == 'isnull':
+                if bool(value) != (got is None):
+                    return False
+                continue
+            if kind == 'date':
+                start, end = _range(value)
+                if got is None or (op == 'eq' and not start <= got <= end) or (op == 'gte' and got < start) \
+                        or (op == 'lte' and got > end):
+                    return False
+                continue
+            if kind in ('number', 'money'):
+                try:
+                    want = Decimal(str(value))
+                except Exception:
+                    raise ValueError(f'{alias} needs a number.')
+                g = got or Decimal('0')
+                if (op == 'eq' and g != want) or (op == 'ne' and g == want) or (op == 'gte' and g < want) \
+                        or (op == 'lte' and g > want):
+                    return False
+                continue
+            g = str(got or '').lower()
+            vals = [str(x).lower() for x in (value if isinstance(value, list) else [value])]
+            if (op == 'eq' and g != vals[0]) or (op == 'ne' and g == vals[0]) or (op == 'in' and g not in vals) \
+                    or (op == 'contains' and vals[0] not in g):
+                return False
+        return True
+
+    rows = [r for r in rows if ok(r)]
+    mode = args.get('mode') or 'count'
+    if mode == 'list':
+        cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
+        limit = max(1, min(LIST_LIMIT, int(args.get('limit') or 25)))
+        order = args.get('order_by') or ('-' + date_alias)
+        oalias = order.lstrip('-')
+        if oalias in fields:
+            key, kind = fields[oalias]
+            rows = sorted(rows, key=lambda r: (_row_value(r.get(key), kind) is None,
+                                               _row_value(r.get(key), kind) or 0 if kind in ('number', 'money')
+                                               else str(r.get(key) or '')), reverse=order.startswith('-'))
+        return {'rows': [{c: r.get(fields[c][0]) for c in cols} for r in rows[:limit]],
+                'shown': min(limit, len(rows)), 'total_matching': len(rows)}
+    groups = args.get('group_by') or []
+
+    def gkey(r):
+        out = []
+        for g in groups:
+            alias, _, unit = g.partition(':')
+            if alias not in fields:
+                raise ValueError(f'Cannot group by {alias!r}.')
+            key, kind = fields[alias]
+            v = r.get(key)
+            if kind == 'date' and v:
+                d = _row_value(v, 'date')
+                v = (d.replace(day=1) if unit == 'month' else d - timedelta(days=d.weekday()) if unit == 'week'
+                     else d).isoformat() if d else None
+            out.append(v)
+        return tuple(out)
+
+    if mode == 'sum':
+        sf = args.get('sum_field')
+        if sf not in fields or fields[sf][1] not in ('money', 'number'):
+            raise ValueError('sum_field must be an amount field.')
+        key = fields[sf][0]
+        totals = {}
+        for r in rows:
+            k = gkey(r)
+            totals[k] = totals.get(k, Decimal('0')) + (_row_value(r.get(key), 'money') or Decimal('0'))
+        out = [dict(zip(groups, k), total=float(v)) for k, v in sorted(totals.items(), key=lambda kv: -kv[1])]
+        return {'groups': out[:200] if groups else None, 'rows_summed': len(rows),
+                'grand_total': float(sum(totals.values()))}
+    counts = {}
+    for r in rows:
+        k = gkey(r)
+        counts[k] = counts.get(k, 0) + 1
+    out = [dict(zip(groups, k), count=v) for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
+    return {'groups': out[:200] if groups else None, 'total': len(rows)}
+
+
 def run_query(user, company_id, args):
     """Execute one query_records call; returns a JSON-able dict for the model."""
     from django.db.models import Count, F
     from django.db.models.functions import TruncDate, TruncMonth, TruncWeek
-    ents = _entities()
+    ents = available(user)
     entity = args.get('entity')
     if entity not in ents:
-        raise ValueError(f'Unknown entity {entity!r}.')
-    fields = ents[entity]['fields']
+        raise ValueError(f'{entity!r} is not something you can open.')
+    spec = ents[entity]
+    fields = spec['fields']
     mode = args.get('mode') or 'count'
-    qs = _scoped_qs(user, entity, args.get('book'), company_id)
+    qs, rows = _scoped(user, spec, args.get('book'), company_id)
+    if rows is not None:
+        return _run_rows(rows, fields, args, spec['date'])
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
     if mode == 'list':
         cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
         limit = max(1, min(LIST_LIMIT, int(args.get('limit') or 25)))
-        order = args.get('order_by') or ('-' + ents[entity]['date'])
+        order = args.get('order_by') or ('-' + spec['date'])
         desc = order.startswith('-')
         oalias = order.lstrip('-')
         if oalias in fields and fields[oalias][1] not in ('enc', 'enc_money'):
@@ -343,8 +577,8 @@ def run_query(user, company_id, args):
 
     if mode == 'sum':
         sf = args.get('sum_field')
-        if sf not in fields or fields[sf][1] != 'enc_money':
-            raise ValueError('sum_field must be a money field (total_amount, booking_amount, amount).')
+        if sf not in fields or fields[sf][1] not in ('enc_money', 'money', 'number'):
+            raise ValueError('sum_field must be an amount field.')
         money = fields[sf][0]
         need = dict.fromkeys([money] + [p for p, _, _ in checks])
         totals, n = {}, 0
@@ -400,15 +634,27 @@ def _cost(usage):
     return round(usd * USD_INR, 2)
 
 
-def answer(user, company_id, question, history, module='sales'):
+# Where the question was asked from (the panel says), as a hint to the model, and
+# the module the question is logged under.
+SCREENS = {'sales': 'Sales', 'ar': 'Accounts Receivable', 'execution': 'Task Allocation', 'hr': 'HR',
+           'club1000': 'Club 1000', 'accounts': 'Accounts & Finance', 'purchase': 'Purchase', 'land': 'Land'}
+LOG_MODULE = {'sales': 'Sales', 'cp': 'Channel Partner', 'ar': 'AR', 'execution': 'Task Allocation',
+              'hr': 'HR', 'club1000': 'Club 1000', 'accounts': 'Accounts & Finance',
+              'purchase': 'Purchase', 'land': 'Land'}
+
+
+def answer(user, company_id, question, history, module='dashboard'):
     """Run the tool loop for one question. Returns (text, usage, queries)."""
     client = _client()
     who = f"{user.name or 'User'} ({user.role or ''}{', ' + user.designation if user.designation else ''})"
     today = timezone.localdate()
+    where = SCREENS.get(module)
     context = (f"[Today is {today:%A, %d %B %Y} (India). Asked by {who}. "
                f"Data is limited to what this person can see."
                + (" They are in the Channel Partner module: use book 'cp' unless they ask about Sales."
-                  if module == 'cp' else '') + "]\n\n")
+                  if module == 'cp' else f" They asked from the {where} screen — likely about that module, "
+                  "but answer about whichever module the question names." if where else '') + "]\n\n")
+    tool = tool_for(available(user))
     messages = []
     for turn in (history or [])[-6:]:            # earlier questions and answers, as text
         q, a = str(turn.get('q') or '')[:2000], str(turn.get('a') or '')[:4000]
@@ -419,7 +665,7 @@ def answer(user, company_id, question, history, module='sales'):
     queries = 0
     for _ in range(MAX_ROUNDS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[TOOL], messages=messages,
+            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool], messages=messages,
             # Reuse the fixed instructions + tool between questions (cheaper input), effort
             # medium, and route a refused request to another model instead of stopping.
             extra_headers={'anthropic-beta': 'server-side-fallback-2026-07-01'},
@@ -432,7 +678,7 @@ def answer(user, company_id, question, history, module='sales'):
         usage['cache_read'] += getattr(u, 'cache_read_input_tokens', 0) or 0
         usage['cache_write'] += getattr(u, 'cache_creation_input_tokens', 0) or 0
         if resp.stop_reason == 'refusal':
-            return "I can't help with that one — try asking about leads, visits, follow-ups or bookings.", usage, queries
+            return "I can't help with that one — try asking about your records in Nexora.", usage, queries
         # The assistant turn goes back exactly as it came (append-only).
         content = resp.to_dict()['content']
         messages.append({'role': 'assistant', 'content': content})
@@ -477,13 +723,13 @@ def _read(job):
         return None
 
 
-def _log(user, question, state, usage, queries, request_path):
+def _log(user, question, state, usage, queries, request_path, module='dashboard'):
     try:
         from activity.models import ActivityLog
         rupees = _cost(usage)
         ActivityLog.objects.create(
             company_id=getattr(user, 'company_id', None), actor=user, actor_name=user.name or '',
-            module='Sales', action='asked', target_type='ai question', target_id='',
+            module=LOG_MODULE.get(module, 'Admin'), action='asked', target_type='ai question', target_id='',
             summary=('Asked Nexora AI — %s' % question)[:500],
             details=json.dumps({'question': question[:1000], 'status': state, 'queries': queries,
                                 'tokens': usage, 'approx_cost_inr': rupees, 'model': MODEL}),
@@ -515,7 +761,9 @@ class AskView(APIView):
         cache.set(key, used + 1, 60 * 60 * 26)
         history = request.data.get('history') if isinstance(request.data.get('history'), list) else []
         company_id = request.data.get('company_id')
-        module = 'cp' if request.data.get('module') == 'cp' else 'sales'
+        module = str(request.data.get('module') or 'dashboard')
+        if module not in LOG_MODULE:
+            module = 'dashboard'
         from .views import is_platform_admin
         if not is_platform_admin(user):
             company_id = None                    # only a platform admin picks a company
@@ -528,7 +776,7 @@ class AskView(APIView):
                 text, usage, queries = answer(user, company_id, question, history, module)
                 _write(job, {'owner': user.id, 'status': 'done', 'answer': text,
                              'approx_cost_inr': _cost(usage)})
-                _log(user, question, 'answered', usage, queries, path)
+                _log(user, question, 'answered', usage, queries, path, module)
             except Exception as e:
                 import anthropic
                 msg = 'Ask Nexora could not answer right now. Try again in a minute.'
@@ -540,7 +788,7 @@ class AskView(APIView):
                     msg = 'Ask Nexora has run out of AI credit. Ask an admin to top it up.'
                 _write(job, {'owner': user.id, 'status': 'error', 'detail': msg})
                 _log(user, question, 'failed: %s' % type(e).__name__,
-                     {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}, 0, path)
+                     {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}, 0, path, module)
             finally:
                 if not getattr(settings, 'AI_INLINE', False):
                     connection.close()

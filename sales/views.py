@@ -1811,11 +1811,8 @@ def _ai_capture(request, qs):
     project and Sales/CP rules — without a second copy of them to drift. Only an
     in-process request carries the marker; a real HTTP request never does.
     """
-    box = getattr(getattr(request, '_request', request), '_ai_capture', None)
-    if box is None:
-        return False
-    box['qs'] = qs
-    return True
+    from .ai_capture import ai_capture
+    return ai_capture(request, qs=qs)
 
 
 def _start_export(request, title, noun, total, rows, headings, note_extra=''):

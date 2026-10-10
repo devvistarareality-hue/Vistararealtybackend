@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework.views import APIView
+from sales.ai_capture import ai_capture
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -379,6 +380,8 @@ class InvestorListCreateView(APIView):
         # module — they own the account and answer for what is in it.
         if not is_platform_admin(request.user):
             qs = qs.exclude(Q(approval_status='draft') & ~Q(added_by=request.user))
+        if ai_capture(request, qs=qs.exclude(approval_status__in=('rejected', 'draft'))):
+            return Response({})
         if request.query_params.get('facets') == '1':
             # The pool the page lists from, before its own filters.
             pool = qs
@@ -697,6 +700,8 @@ class PayoutListView(APIView):
             qs = _scoped
         elif not is_club1000_manager(request.user):
             qs = qs.filter(investor__added_by=request.user)
+        if ai_capture(request, qs=qs):
+            return Response({})
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         return Response(PayoutSerializer(qs, many=True).data)
