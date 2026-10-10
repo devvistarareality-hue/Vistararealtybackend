@@ -79,3 +79,25 @@ class ListExportTests(TestCase):
         self.assertEqual(res.status_code, 200, res.content[:300])
         self.stm.refresh_from_db()
         self.assertTrue(self.stm.can_export_leads)
+
+
+class LoiAccessTests(TestCase):
+    """The Accounts desk reviewing bookings in Approvals can open their LOIs."""
+
+    def test_accounts_employee_can_open_an_loi(self):
+        from django.core.files.base import ContentFile
+        from sales.models import Booking
+        co = Company.objects.create(code='VRL', name='Vistara', loi_enabled=True)
+        p = Project.objects.create(company=co, name='Anahata')
+        boss = User.objects.create(name='B', email='b@lx.com', phone='9100000201', user_code='LX-B', role='Admin', company=co)
+        acc = User.objects.create(name='Acc', email='acc@lx.com', phone='9100000202', user_code='LX-C', role='Employee',
+                                  designation='Accountant', company=co, modules=['Accounts & Finance'], reporting_manager=boss)
+        sales = User.objects.create(name='Sx', email='sx@lx.com', phone='9100000203', user_code='LX-D', role='Employee',
+                                    designation='STM', company=co, modules=['Sales'], reporting_manager=boss)
+        b = Booking.objects.create(company=co, project=p, client_name='C', status='sold', accounts_status='pending')
+        b.loi_document.save('loi.pdf', ContentFile(b'%PDF-1.4'), save=True)
+        c = APIClient()
+        c.force_authenticate(acc)
+        self.assertEqual(c.get(f'/api/sales/bookings/{b.id}/loi-url/').status_code, 200)
+        c.force_authenticate(sales)
+        self.assertEqual(c.get(f'/api/sales/bookings/{b.id}/loi-url/').status_code, 403)
