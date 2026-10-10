@@ -18,6 +18,7 @@ urlpatterns = [
     path('api/ar/', include('receivables.urls')),
     path('api/activity/', include('activity.urls')),
     path('api/tasks/', include('tasks.urls')),
+    path('api/ai/', include('ai.urls')),
 ]
 
 # Serve uploaded media (signed LOIs) in development.
