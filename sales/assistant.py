@@ -13,7 +13,7 @@ Answers take several model calls, longer than one web request may run, so a
 question runs as a background job (like the Excel exports): POST /api/ai/ask/
 starts it, GET /api/ai/ask/<job>/ returns the answer when ready.
 
-Model: Claude Opus 5.5 with server-side refusal fallbacks. Each question is
+Model: Claude Sonnet 5.5 with server-side refusal fallbacks. Each question is
 recorded in the Activity Log with its token use and approximate cost.
 """
 import json
@@ -33,7 +33,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-MODEL = 'claude-opus-5-5'
+MODEL = 'claude-sonnet-5-5'
 EFFORT = 'medium'
 MAX_ROUNDS = 8            # model calls per question (each may run several queries)
 LIST_LIMIT = 100          # rows a list may return to the model
@@ -41,7 +41,7 @@ SCAN_LIMIT = 20000        # rows read when filtering/summing encrypted fields
 DAILY_LIMIT = 60          # questions per person per day
 JOB_DIR = os.path.join('/tmp', 'nexora-ai')
 # Opus 5.5 list prices, USD per million tokens, and a rupee rate for the log.
-PRICE_IN, PRICE_OUT, PRICE_CACHE_READ, PRICE_CACHE_WRITE = 4.0, 20.0, 0.20, 5.0
+PRICE_IN, PRICE_OUT, PRICE_CACHE_READ, PRICE_CACHE_WRITE = 2.0, 10.0, 0.20, 2.50
 USD_INR = 85.0
 
 
