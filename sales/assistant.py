@@ -400,13 +400,15 @@ def _cost(usage):
     return round(usd * USD_INR, 2)
 
 
-def answer(user, company_id, question, history):
+def answer(user, company_id, question, history, module='sales'):
     """Run the tool loop for one question. Returns (text, usage, queries)."""
     client = _client()
     who = f"{user.name or 'User'} ({user.role or ''}{', ' + user.designation if user.designation else ''})"
     today = timezone.localdate()
     context = (f"[Today is {today:%A, %d %B %Y} (India). Asked by {who}. "
-               f"Data is limited to what this person can see.]\n\n")
+               f"Data is limited to what this person can see."
+               + (" They are in the Channel Partner module: use book 'cp' unless they ask about Sales."
+                  if module == 'cp' else '') + "]\n\n")
     messages = []
     for turn in (history or [])[-6:]:            # earlier questions and answers, as text
         q, a = str(turn.get('q') or '')[:2000], str(turn.get('a') or '')[:4000]
@@ -513,6 +515,7 @@ class AskView(APIView):
         cache.set(key, used + 1, 60 * 60 * 26)
         history = request.data.get('history') if isinstance(request.data.get('history'), list) else []
         company_id = request.data.get('company_id')
+        module = 'cp' if request.data.get('module') == 'cp' else 'sales'
         from .views import is_platform_admin
         if not is_platform_admin(user):
             company_id = None                    # only a platform admin picks a company
@@ -522,7 +525,7 @@ class AskView(APIView):
 
         def run():
             try:
-                text, usage, queries = answer(user, company_id, question, history)
+                text, usage, queries = answer(user, company_id, question, history, module)
                 _write(job, {'owner': user.id, 'status': 'done', 'answer': text,
                              'approx_cost_inr': _cost(usage)})
                 _log(user, question, 'answered', usage, queries, path)
