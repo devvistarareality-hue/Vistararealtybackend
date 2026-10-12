@@ -43,7 +43,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'id', 'company_id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
-            'plot_type_plans', 'eoi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
+            'plot_type_plans', 'eoi_unit_types', 'loi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
             'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'is_locked', 'locked_blocks',

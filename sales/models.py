@@ -169,6 +169,9 @@ class Project(models.Model):
     # Standard EOI unit types (pre-approval): [{type, plot_area, const_area}, …].
     # Used to prefill the EOI form so areas are never hardcoded.
     eoi_unit_types = models.JSONField(default=list, blank=True)
+    # Standard LOI unit types, same shape: [{type, plot_area, const_area}, …]. Picked on
+    # an LOI — a new one, or an EOI being converted — to fill Plot & Construction Area.
+    loi_unit_types = models.JSONField(default=list, blank=True)
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)
