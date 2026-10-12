@@ -136,3 +136,23 @@ class CpSourceNeedsPartnerTests(TestCase):
 
     def test_other_sources_need_no_partner(self):
         self.assertIn(self._add(source=self.meta.id).status_code, (200, 201))
+
+
+class StmNotUpdatedFilterTests(TestCase):
+    """STM Status = not updated: passed to an STM who has not set any status yet."""
+    def test_lists_only_untouched_stm_leads(self):
+        from rest_framework.test import APIClient
+        from accounts.models import User
+        from companies.models import Company
+        from sales.models import Lead
+        co = Company.objects.create(code='NUP', name='Nup')
+        admin = User.objects.create(name='A', email='a@nup.com', phone='9300000001', user_code='NU-A', role='Admin', company=co)
+        stm = User.objects.create(name='S', email='s@nup.com', phone='9300000002', user_code='NU-S', role='Employee',
+                                  designation='STM', company=co, modules=['Sales'])
+        Lead.objects.create(company=co, name='Waiting', phone='9300000010', stm=stm, telecaller_status='warm')
+        Lead.objects.create(company=co, name='Worked', phone='9300000011', stm=stm, telecaller_status='warm', stm_status='hot')
+        Lead.objects.create(company=co, name='No stm', phone='9300000012')
+        api = APIClient(); api.force_authenticate(admin)
+        rows = api.get('/api/sales/leads/?stm_status=not_updated').json()
+        rows = rows.get('results', rows) if isinstance(rows, dict) else rows
+        self.assertEqual([r['name'] for r in rows], ['Waiting'])

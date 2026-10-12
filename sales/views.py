@@ -1971,7 +1971,11 @@ class LeadListView(APIView):
                 qs = qs.filter(telecaller_status=telecaller_status_filter)
         stm_status_filter = request.query_params.get('stm_status')
         if stm_status_filter:
-            if stm_status_filter in ('hot', 'warm', 'cold'):
+            if stm_status_filter == 'not_updated':
+                # Passed to an STM (the telecaller made it warm, or it was assigned
+                # straight to them) and the STM has not set any status on it yet.
+                qs = qs.filter(stm__isnull=False).filter(Q(stm_status='') | Q(stm_status__isnull=True))
+            elif stm_status_filter in ('hot', 'warm', 'cold'):
                 if date_from_param or date_to_param:
                     direct_ids = _leads_by_status_transition(
                         qs, 'stm_status', stm_status_filter, date_from_param, date_to_param)
