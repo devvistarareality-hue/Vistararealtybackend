@@ -1803,6 +1803,18 @@ def _export_module(request):
     return 'Channel Partner' if request.query_params.get('cp_only') == 'true' else 'Sales'
 
 
+def _ai_capture(request, qs):
+    """Hand the scoped queryset to Ask Nexora instead of answering (sales/assistant.py).
+
+    The assistant reads data by calling these list views in-process, so it sees
+    exactly what the asker's screens show — the same company, role, reporting-tree,
+    project and Sales/CP rules — without a second copy of them to drift. Only an
+    in-process request carries the marker; a real HTTP request never does.
+    """
+    from .ai_capture import ai_capture
+    return ai_capture(request, qs=qs)
+
+
 def _start_export(request, title, noun, total, rows, headings, note_extra=''):
     """Start a background Excel build (see sales/exports.py) and log the download."""
     from . import exports
@@ -2070,6 +2082,8 @@ class LeadListView(APIView):
         if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at', 'stm_assigned_at', '-stm_assigned_at'):
             qs = qs.order_by(ordering)
 
+        if _ai_capture(request, qs):
+            return Response({})
         if request.query_params.get('export') == 'xlsx':
             return self._export(request, qs)
 
@@ -3794,6 +3808,8 @@ class FollowUpListView(APIView):
             # whoever it is assigned to, so that is what the exception reads.
             _own = _visible_user_ids(request.user)
             qs = qs.exclude(cp_lead_q(prefix='lead__') & ~Q(assigned_to__in=_own))
+        if _ai_capture(request, qs):
+            return Response({})
         return maybe_paginate(request, qs.order_by('-scheduled_at', '-id'), FollowUpSerializer)
 
     def post(self, request):
@@ -3881,6 +3897,8 @@ class SiteVisitListView(APIView):
 
     def get(self, request):
         qs = _site_visit_scope(request)
+        if _ai_capture(request, qs):
+            return Response({})
         if request.query_params.get('export') == 'xlsx':
             return self._export(request, qs)
         if request.query_params.get('status'):
@@ -4164,6 +4182,8 @@ class ClosureListView(APIView):
         qs = qs.exclude(id__in=_not_sold)
         if request.query_params.get('counts_only') == 'true':
             return Response({'total': qs.count()})
+        if _ai_capture(request, qs):
+            return Response({})
         return maybe_paginate(request, qs.order_by('-closure_date', '-id'), ClosureSerializer)
 
     def post(self, request):
@@ -6263,6 +6283,8 @@ class BookingListCreateView(APIView):
         # Chains are resolved against the whole company, not this viewer's slice —
         # otherwise whether a replaced booking still shows depends on who is looking.
         qs = _drop_superseded_revisions(qs, scope=Booking.objects.filter(company=company))
+        if _ai_capture(request, qs):
+            return Response({})
         if request.query_params.get('closure'):
             qs = qs.filter(closure_id=request.query_params['closure'])
         if request.query_params.get('plot'):
@@ -8427,8 +8449,17 @@ class BookingLOIUrlView(APIView):
                 {'detail': 'LOI / EOI documents are not enabled for this company.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        if not (is_admin_or_manager(request.user) or b.stm_id == request.user.id):
-            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        # Who reviews a booking may read its LOI: admins/managers, its STM, the
+        # Accounts & Finance desk that signs bookings off (the same people who see
+        # every booking in Approvals), and whoever is named an approver on its project.
+        # An Accounts employee used to be refused here while Approvals listed the
+        # booking with View / Download LOI on it.
+        u = request.user
+        allowed = (is_admin_or_manager(u) or b.stm_id == u.id or _can_view_all_bookings(u)
+                   or (b.project_id and (b.project_id in _approver_project_ids(u, b.company)
+                                         or b.project_id in _cp_approver_project_ids(u, b.company))))
+        if not allowed:
+            return Response({'detail': 'You do not have access to this LOI.'}, status=status.HTTP_403_FORBIDDEN)
         from sales.supabase_storage import create_signed_url
         url = create_signed_url(b.loi_document.name, expires_in=120)
         if not url:

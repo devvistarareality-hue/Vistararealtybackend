@@ -11,6 +11,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import status
+from sales.ai_capture import ai_capture
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -196,6 +197,8 @@ class TasksView(APIView):
         p = request.query_params
         if p.get('include_archived') != 'true':
             qs = qs.filter(archived=False)
+        if ai_capture(request, qs=qs):
+            return Response({})
         if p.get('facets') == '1':
             return Response({
                 'list_ids': _distinct(qs, 'task_list_id'), 'statuses': _distinct(qs, 'status'),

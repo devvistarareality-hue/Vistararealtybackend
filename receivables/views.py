@@ -7,6 +7,7 @@ from django.http import HttpResponse
 from django.template.loader import render_to_string
 from django.utils import timezone
 from rest_framework import status
+from sales.ai_capture import ai_capture
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -156,6 +157,8 @@ class ARRegisterView(APIView):
         if pids:
             qs = qs.filter(booking__project_id__in=pids)
         rows = [_summary(a, p, r, m) for a, p, r, m, _ in _computed(qs, as_of)]
+        if ai_capture(request, rows=rows):
+            return Response({})
         q = (request.query_params.get('q') or '').strip().lower()
         if q:
             rows = [x for x in rows if q in x['client_name'].lower() or q in x['phone'] or q in str(x['plots']).lower()]

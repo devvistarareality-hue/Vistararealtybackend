@@ -172,6 +172,16 @@ def _plot_ids(body):
     return [int(x) for x in raw if str(x).isdigit()][:200]
 
 
+def _screen_module(request, module):
+    """The Channel Partner desk works on the Sales records (leads, visits, bookings),
+    so its calls go to /api/sales/ like the Sales module's. The web and the app say
+    which module the screen belongs to (X-Nexora-Module: cp), and the change is
+    logged under Channel Partner — that module's Log shows everything done there."""
+    if module == 'Sales' and (request.META.get('HTTP_X_NEXORA_MODULE') or '').lower() == 'cp':
+        return 'Channel Partner'
+    return module
+
+
 def _client_ip(request):
     fwd = request.META.get('HTTP_X_FORWARDED_FOR', '')
     return (fwd.split(',')[0].strip() if fwd else request.META.get('REMOTE_ADDR', '')) or ''
@@ -307,7 +317,7 @@ class ActivityLogMiddleware:
             company_id=getattr(user, 'company_id', None),
             actor=user,
             actor_name=getattr(user, 'name', '') or getattr(user, 'email', '') or '',
-            module=(extra.get('module') or module)[:30],
+            module=_screen_module(request, extra.get('module') or module)[:30],
             action=(extra.get('action') or action)[:30],
             target_type=(extra.get('target_type') or ttype)[:40],
             target_id=str(extra.get('target_id') or tid)[:40],

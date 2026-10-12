@@ -41,6 +41,14 @@ class ActivityLogTests(TestCase):
         self.assertNotIn('password', row.details)
         self.assertNotIn('hunter2', row.details)
 
+    def test_channel_partner_screens_log_under_channel_partner(self):
+        self.api.force_authenticate(self.admin)
+        r = self.api.post('/api/sales/projects/', {'name': 'Kalrav 10'}, format='json', HTTP_X_NEXORA_MODULE='cp')
+        self.assertLess(r.status_code, 400, r.content)
+        self.assertEqual(ActivityLog.objects.latest('id').module, 'Channel Partner')
+        self.api.post('/api/sales/projects/', {'name': 'Kalrav 11'}, format='json')
+        self.assertEqual(ActivityLog.objects.latest('id').module, 'Sales')
+
     def test_reads_and_failures_are_not_logged(self):
         self.api.force_authenticate(self.admin)
         self.api.get('/api/sales/projects/')

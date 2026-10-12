@@ -58,6 +58,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Download the Leads and (completed) Site Visits lists as Excel — granted per
     # person in User Management, like can_export_bookings; admins always may.
     can_export_leads = models.BooleanField(default=False)
+    # Ask Nexora (AI assistant) — granted per person in User Management; admins always.
+    can_use_ai = models.BooleanField(default=False)
     is_active         = models.BooleanField(default=True)
     is_staff          = models.BooleanField(default=False)
     date_joined       = models.DateTimeField(auto_now_add=True)
