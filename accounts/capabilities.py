@@ -82,6 +82,7 @@ SCREENS = [
     ('cp.screen.booking', 'Booking', 'Channel Partner'),
     ('cp.screen.myteam', 'My Team', 'Channel Partner'),
     ('cp.screen.approvals', 'Approvals', 'Channel Partner'),
+    ('cp.screen.users', 'Team Users', 'Channel Partner'),
     # Every module has the same three tabs — Dashboard, My Team, and Log for
     # admins — plus whatever else it does.
     ('accounts.screen.dashboard', 'Dashboard', 'Accounts & Finance'),

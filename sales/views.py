@@ -4354,15 +4354,19 @@ class SalesTeamView(APIView):
 
     def get(self, request):
         cid = request.query_params.get('company_id')
+        # ?cp=1 lists the Channel Partner desk instead of the Sales one, for that
+        # module's own Team Users screen. Matched on department, as the Sales list
+        # is — a person can sit in both, and then they belong on both screens.
+        dept = 'channel partner' if request.query_params.get('cp') in ('1', 'true') else 'sales'
         if is_platform_admin(request.user):
             if cid:
                 from companies.models import Company as Co
                 company = Co.objects.filter(pk=cid).first()
-                users = User.objects.filter(company=company, is_active=True, department__icontains='sales') if company else User.objects.none()
+                users = User.objects.filter(company=company, is_active=True, department__icontains=dept) if company else User.objects.none()
             else:
-                users = User.objects.filter(is_active=True, department__icontains='sales')
+                users = User.objects.filter(is_active=True, department__icontains=dept)
         else:
-            users = User.objects.filter(company=request.user.company, is_active=True, department__icontains='sales')
+            users = User.objects.filter(company=request.user.company, is_active=True, department__icontains=dept)
         users = users.order_by('name')
 
         data = [{

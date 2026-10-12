@@ -68,3 +68,65 @@ class CpOrgChartTests(APITestCase):
         # module= still scopes by assigned module, and nobody here is assigned one,
         # so the CP branch must not have taken over the ordinary path.
         self.assertEqual(self._codes(self.admin, '/api/sales/my-team/?module=Sales'), set())
+
+
+class CpTeamUsersTests(APITestCase):
+    """/api/sales/team/?cp=1 — the Channel Partner module's own Team Users list.
+
+    Scoped by department, as the Sales list is, because that is what the screen
+    is for: a CP manager setting project assignments for their own people without
+    going through Sales.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.co = Company.objects.create(code='CTU', name='Team Co')
+        cls.other = Company.objects.create(code='CTV', name='Other Co')
+        cls.admin = User.objects.create(email='ctu_admin@x.com', company=cls.co, role='Admin',
+                                        user_code='T0', name='Admin', department='Sales')
+        cls.sales = User.objects.create(email='ctu_stm@x.com', company=cls.co, role='Employee',
+                                        designation='STM', user_code='T1', name='Sales Only',
+                                        department='Sales')
+        cls.cp = User.objects.create(email='ctu_cp@x.com', company=cls.co, role='Employee',
+                                     designation='CP EXECUTIVE', user_code='T2', name='CP Only',
+                                     department='Channel Partner')
+        # Someone who works both desks belongs on both screens.
+        cls.both = User.objects.create(email='ctu_both@x.com', company=cls.co, role='Manager',
+                                       designation='CP CLUSTER HEAD', user_code='T3',
+                                       name='Both Desks', department='Sales + Channel Partner')
+        cls.foreign = User.objects.create(email='ctv_cp@x.com', company=cls.other, role='Employee',
+                                          designation='CP EXECUTIVE', user_code='T4',
+                                          name='Elsewhere', department='Channel Partner')
+
+    def setUp(self):
+        cache.clear()
+        auth(self.client, self.admin)
+
+    def _names(self, qs=''):
+        r = self.client.get(f'/api/sales/team/{qs}')
+        self.assertEqual(r.status_code, 200)
+        return {u['name'] for u in r.data}
+
+    def test_cp_lists_the_channel_partner_desk(self):
+        names = self._names('?cp=1')
+        self.assertIn('CP Only', names)
+        self.assertNotIn('Sales Only', names)
+
+    def test_without_the_flag_it_still_lists_sales(self):
+        names = self._names()
+        self.assertIn('Sales Only', names)
+        self.assertNotIn('CP Only', names)
+
+    def test_someone_on_both_desks_appears_on_both(self):
+        # Assignments made from either screen are the same assignments, so hiding
+        # them from one would only make the other look wrong.
+        self.assertIn('Both Desks', self._names('?cp=1'))
+        self.assertIn('Both Desks', self._names())
+
+    def test_another_companys_cp_staff_are_not_listed(self):
+        self.assertNotIn('Elsewhere', self._names('?cp=1'))
+
+    def test_an_inactive_person_drops_off(self):
+        self.cp.is_active = False
+        self.cp.save(update_fields=['is_active'])
+        self.assertNotIn('CP Only', self._names('?cp=1'))
