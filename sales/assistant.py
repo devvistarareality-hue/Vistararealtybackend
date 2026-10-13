@@ -188,8 +188,8 @@ def _entities():
         'bookings': {'module': SALES_MODULES, 'view': v.BookingListCreateView, 'date': 'booking_date', 'sales': True,
                      'params': {'mine': '1', 'scope': 'visible'},
                      'annotate': '_booking_stage',
-                     'note': "stage: approved (= THE closure / sale: approved by Sales AND Accounts), "
-                             "awaiting_accounts, awaiting_sales, rejected, on_hold. Drafts are left out "
+                     'note': "stage: approved (= THE closure / sale: approved by Sales AND Accounts, not "
+                             "cancelled), awaiting_accounts, awaiting_sales, rejected, cancelled, on_hold. Drafts are left out "
                              "unless filtered stage=draft. For closures / sales always filter stage=approved.",
                      'fields': {
             'stage': ('_stage', 'choice'),
@@ -400,6 +400,7 @@ def _booking_stage(qs):
     from django.db.models import Case, CharField, Q, Value, When
     return qs.annotate(_stage=Case(
         When(status='draft', then=Value('draft')),
+        When(approval_status__iexact='cancelled', then=Value('cancelled')),
         When(status='rejected', then=Value('rejected')),
         When(Q(status='sold') & Q(accounts_status='rejected'), then=Value('rejected')),
         When(Q(status='sold') & Q(accounts_status='approved'), then=Value('approved')),
