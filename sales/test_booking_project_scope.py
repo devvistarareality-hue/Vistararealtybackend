@@ -73,3 +73,18 @@ class BookingProjectScope(TestCase):
             res = self._call(view, self.stm, 'post', data={'project': self.beta.id})
             self.assertEqual(res.status_code, 403, view.__name__)
             self.assertIn('not assigned', res.data['detail'])
+
+
+class CpExecutiveProjectScope(BookingProjectScope):
+    """A Channel Partner executive books only on projects assigned to them — with
+    none assigned they see none (the Sales opt-in does not apply to them)."""
+    def test_cp_executive_with_nothing_assigned_sees_no_project(self):
+        cp = User.objects.create(name='Bhavin', email='cp@x.com', phone='9300000077', user_code='CP1',
+                                 role='Employee', designation='CP Executive', company=self.co,
+                                 modules=['Channel Partner'])
+        from sales.views import is_cp
+        self.assertTrue(is_cp(cp))
+        self.assertEqual(booking_project_ids(cp), [])
+        self.assertEqual(self._names(cp), [])
+        UserProjectAssignment.objects.create(user=cp, project=self.beta)
+        self.assertEqual(self._names(cp), ['Beta'])

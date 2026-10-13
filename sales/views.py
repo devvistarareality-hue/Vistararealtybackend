@@ -752,8 +752,11 @@ BOOKING_SCOPED_ROLES = ('Employee', 'Intern')
 def booking_project_ids(user):
     """Projects this rep may book on, or None if they are not restricted.
 
-    Same opt-in as managers: a rep with no project assigned is not restricted, so
-    nobody's Booking screen goes blank — you confine a rep by assigning projects.
+    Sales reps are opt-in, like managers: one with no project assigned is not
+    restricted, so nobody's Booking screen goes blank — you confine them by
+    assigning projects. A Channel Partner executive is the other way round (the
+    company's rule): they book only on projects assigned to them, so with none
+    assigned they see none until an admin assigns some in Team Users.
     """
     if is_platform_admin(user) or getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'Admin':
         return None
@@ -762,6 +765,8 @@ def booking_project_ids(user):
     pids = list(
         UserProjectAssignment.objects.filter(user=user).values_list('project_id', flat=True)
     )
+    if not pids and is_cp(user):
+        return []
     return pids or None
 
 
