@@ -173,11 +173,14 @@ def _plot_ids(body):
 
 
 def _screen_module(request, module):
-    """The Channel Partner desk works on the Sales records (leads, visits, bookings),
-    so its calls go to /api/sales/ like the Sales module's. The web and the app say
-    which module the screen belongs to (X-Nexora-Module: cp), and the change is
-    logged under Channel Partner — that module's Log shows everything done there."""
-    if module == 'Sales' and (request.META.get('HTTP_X_NEXORA_MODULE') or '').lower() == 'cp':
+    """Everything done from a Channel Partner screen is logged under Channel Partner.
+
+    The CP desk works on shared records — Sales leads, visits and bookings, Team
+    Users (accounts), its own partners — so its calls go to the same endpoints as
+    other modules. The web and the app say which module the screen belongs to
+    (X-Nexora-Module: cp), and whatever the endpoint, the change is filed under
+    Channel Partner, so that module's Log shows everything anyone did there."""
+    if (request.META.get('HTTP_X_NEXORA_MODULE') or '').lower() == 'cp':
         return 'Channel Partner'
     return module
 

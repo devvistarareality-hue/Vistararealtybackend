@@ -48,6 +48,10 @@ class ActivityLogTests(TestCase):
         self.assertEqual(ActivityLog.objects.latest('id').module, 'Channel Partner')
         self.api.post('/api/sales/projects/', {'name': 'Kalrav 11'}, format='json')
         self.assertEqual(ActivityLog.objects.latest('id').module, 'Sales')
+        # Not only Sales endpoints: anything done from a CP screen (Team Users → accounts).
+        r = self.api.patch(f'/api/auth/users/{self.emp.id}/', {'name': 'Emp 2'}, format='json', HTTP_X_NEXORA_MODULE='cp')
+        self.assertLess(r.status_code, 400, r.content)
+        self.assertEqual(ActivityLog.objects.latest('id').module, 'Channel Partner')
 
     def test_reads_and_failures_are_not_logged(self):
         self.api.force_authenticate(self.admin)
