@@ -428,3 +428,25 @@ class StatusChangeTests(TestCase):
                                                             {'field': 'changed', 'op': 'eq', 'value': 'today'}]})
         self.assertEqual(out['total'], 2)
         self.assertEqual(out['groups'], [{'changed_by': 'Kavya', 'count': 2}])
+
+
+class DashboardNumbersTests(TestCase):
+    """dashboard_numbers returns the dashboard's own tiles, as the named person, within scope."""
+    def test_as_person_and_scope(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from sales import ai_dashboard
+        from sales.views import StatsView
+        co = Company.objects.create(code='DBN', name='Dbn')
+        admin = User.objects.create(name='Boss', email='b@dbn.com', phone='9940000001', user_code='DB-A', role='Admin', company=co)
+        tc = User.objects.create(name='Varsha Parmar', email='v@dbn.com', phone='9940000002', user_code='DB-V', role='Employee',
+                                 designation='TELECALLER', company=co, modules=['Sales'])
+        stm = User.objects.create(name='Nisarg', email='n@dbn.com', phone='9940000003', user_code='DB-N', role='Employee',
+                                  designation='STM', company=co, modules=['Sales'])
+        p = Project.objects.create(company=co, name='Kalrav')
+        Lead.objects.create(company=co, project=p, name='L1', phone='9940000010', telecaller=tc, telecaller_status='warm')
+        out = ai_dashboard.run(admin, None, {'person': 'varsha parmar'})
+        req = APIRequestFactory().get('/x/', {'book': 'sales'}); force_authenticate(req, user=tc)
+        self.assertEqual(out['figures']['Leads'], StatsView.as_view()(req).data['total_leads'])
+        self.assertEqual(out['for'], 'Varsha Parmar')
+        with self.assertRaises(ValueError):
+            ai_dashboard.run(stm, None, {'person': 'Varsha Parmar'})

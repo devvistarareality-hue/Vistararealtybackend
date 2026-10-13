@@ -348,6 +348,9 @@ SYSTEM = (
     "which Sales/CP approve and then Accounts signs off (bookings stage: awaiting_sales → "
     "awaiting_accounts → approved). "
     "An approved booking becomes an AR account whose instalments are collected.\n"
+    "Dashboard figures and ratios (called / MQL, SQL, SV done, MQL→SV, SQL→SV, follow-ups overdue, for "
+    "anyone or one person): ALWAYS the dashboard_numbers tool — it returns the dashboard's own tiles. "
+    "Never compute 'called' or a ratio yourself from leads.\n"
     "Lead counts by status and day ('warm leads today', 'not qualified this week', by telecaller / "
     "STM / project): ALWAYS the leads entity with tc_status or stm_status eq X and received eq the "
     "period — Nexora applies the Leads screen's own rules to that, so the number is the screen's. Use "
@@ -868,7 +871,7 @@ def answer(user, company_id, question, history, module='dashboard'):
                   if module == 'sales' else f" They asked from the {where} screen — likely about that module, "
                   "but answer about whichever module the question names." if where else '') + "]\n\n")
     tool = tool_for(available(user))
-    from . import ai_files
+    from . import ai_dashboard, ai_files
     files = []
     messages = []
     for turn in (history or [])[-6:]:            # earlier questions and answers, as text
@@ -881,7 +884,7 @@ def answer(user, company_id, question, history, module='dashboard'):
     calls_log = usage.setdefault('calls', [])      # what the model asked for — kept in the log
     for _ in range(MAX_ROUNDS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool, ai_files.TOOL], messages=messages,
+            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool, ai_dashboard.TOOL, ai_files.TOOL], messages=messages,
             # Reuse the fixed instructions + tool between questions (cheaper input), effort
             # medium, and route a refused request to another model instead of stopping.
             extra_headers={'anthropic-beta': 'server-side-fallback-2026-07-01'},
@@ -909,6 +912,12 @@ def answer(user, company_id, question, history, module='dashboard'):
             queries += 1
             calls_log.append({'tool': b.get('name'), 'input': b.get('input')})
             try:
+                if b.get('name') == 'dashboard_numbers':
+                    if not set(available(user)) & {'leads'}:
+                        raise ValueError('The Sales dashboard is not one of your modules.')
+                    out = ai_dashboard.run(user, company_id, b.get('input') or {})
+                    results.append({'type': 'tool_result', 'tool_use_id': b['id'], 'content': json.dumps(out, default=str)})
+                    continue
                 if b.get('name') == 'make_file':
                     made = ai_files.make(user, company_id, b.get('input') or {})
                     files.append(made)
