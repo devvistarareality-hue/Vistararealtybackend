@@ -298,3 +298,31 @@ class ChatHistoryTests(TestCase):
                          {'Ask Nexora'})
         self.assertEqual(c.delete(f"/api/sales/ai/chats/{r1['chat']}/").status_code, 204)
         self.assertFalse(AiChat.objects.exists())
+
+
+class ScopeLeakTests(TestCase):
+    """A CP-only person reads the partner book only; a platform admin's answers stay
+    in one company."""
+    def test_cp_only_user_is_confined_to_the_cp_book(self):
+        from sales.models import ChannelPartner
+        co = Company.objects.create(code='SLK', name='Slk')
+        p = Project.objects.create(company=co, name='Kalrav')
+        cp = ChannelPartner.objects.create(company=co, name='Broker', contact_no='9700000001')
+        mgr = User.objects.create(name='CPM', email='m@slk.com', phone='9700000010', user_code='SL-M', role='Manager',
+                                  designation='CP Cluster Head', company=co, modules=['Channel Partner'],
+                                  manager_modules=['Channel Partner'])
+        Lead.objects.create(company=co, project=p, name='Sales lead', phone='9700000020')
+        Lead.objects.create(company=co, project=p, name='CP lead', phone='9700000021', channel_partner=cp)
+        self.assertEqual(assistant._book_for(mgr, 'all'), 'cp')
+        names = [r['name'] for r in assistant.run_query(mgr, None, {'entity': 'leads', 'mode': 'list', 'fields': ['name'],
+                                                                    'book': 'all'})['rows']]
+        self.assertNotIn('Sales lead', names)
+        from sales.models import Booking
+        stm = User.objects.create(name='STM', email='s@slk.com', phone='9700000011', user_code='SL-S', role='Employee',
+                                  designation='STM', company=co, modules=['Sales'], reporting_manager=mgr)
+        # Someone else's Sales deal (the CP screen also shows the manager's own deals, any source).
+        Booking.objects.create(company=co, project=p, client_name='Sales deal', status='sold', source='Walk-In', stm=stm)
+        Booking.objects.create(company=co, project=p, client_name='CP deal', status='sold', source='Channel Partner', stm=mgr)
+        deals = [r['client'] for r in assistant.run_query(mgr, None, {'entity': 'bookings', 'mode': 'list',
+                                                                      'fields': ['client'], 'book': 'all'})['rows']]
+        self.assertNotIn('Sales deal', deals)

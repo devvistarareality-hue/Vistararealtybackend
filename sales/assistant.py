@@ -303,6 +303,19 @@ SYSTEM = (
 
 
 # ── Running a query ──────────────────────────────────────────────────────────
+def _book_for(user, book):
+    """Which Sales/CP book a question may read. Someone who holds Channel Partner but
+    not Sales sees the partner book only — exactly what their CP screens show — so
+    'all' never widens them into Sales leads."""
+    from .views import _is_hard_admin
+    held = set(getattr(user, 'modules', None) or []) | set(getattr(user, 'manager_modules', None) or []) \
+        | set(getattr(user, 'admin_modules', None) or [])
+    admin = _is_hard_admin(user) or getattr(user, 'role', '') == 'Admin' or getattr(user, 'is_staff', False)
+    if not admin and 'Sales' not in held:
+        return 'cp'
+    return book if book in ('sales', 'cp', 'all') else 'all'
+
+
 def _scoped(request_user, spec, book, company_id):
     """The entity's queryset (or rows) exactly as the asker's list screen would scope it."""
     if spec.get('own'):
@@ -310,7 +323,13 @@ def _scoped(request_user, spec, book, company_id):
     from rest_framework.test import APIRequestFactory, force_authenticate
     params = dict(spec.get('params', {}))
     if spec.get('sales'):
-        params['book'] = book or 'all'
+        params['book'] = _book_for(request_user, book)
+        # The lists read the book from `book`; Bookings reads the same split from the
+        # flags the Sales / CP screens send (cp_only / source=sales).
+        if params['book'] == 'cp':
+            params['cp_only'] = 'true'
+        elif params['book'] == 'sales':
+            params['source'] = 'sales'
     if company_id:
         params['company_id'] = str(company_id)
     req = APIRequestFactory().get('/ai/', params)
@@ -852,6 +871,10 @@ class AskView(APIView):
         from .views import is_platform_admin
         if not is_platform_admin(user):
             company_id = None                    # only a platform admin picks a company
+        elif not company_id:
+            # A platform admin sees every company on their screens; an answer must not
+            # mix them, so with no company picked it is their own company.
+            company_id = getattr(user, 'company_id', None)
         job = uuid.uuid4().hex
         _write(job, {'owner': user.id, 'status': 'running'})
         path = request.path
