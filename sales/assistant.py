@@ -77,6 +77,41 @@ def _own_attendance(user):
     return AttendanceRecord.objects.filter(user=user)
 
 
+def _availability_rows(user, company_id):
+    """STM / telecaller sign-ins ("marked available") for the last 120 days, with how
+    late each was against the company's designated time (Distribution settings).
+
+    Who sees whom, as on the Distribution / Availability screens: admins and
+    department heads the whole company, a manager their reporting tree, anyone else
+    only themselves."""
+    from datetime import datetime as dt
+    from .models import DistributionSettings, UserAvailability
+    from .views import _sees_all_company, _visible_user_ids, is_platform_admin
+    cid = company_id if (company_id and is_platform_admin(user)) else user.company_id
+    qs = UserAvailability.objects.filter(user__company_id=cid,
+                                         date__gte=timezone.localdate() - timedelta(days=120))
+    if not _sees_all_company(user, include_manager_role=False):
+        qs = qs.filter(user_id__in=_visible_user_ids(user))
+    ds = DistributionSettings.objects.filter(company_id=cid).first()
+    due = {'TELECALLER': getattr(ds, 'tc_signin_time', None), 'STM': getattr(ds, 'stm_signin_time', None)}
+    rows = []
+    for a in qs.select_related('user').order_by('-date', 'user__name')[:SCAN_LIMIT]:
+        desig = (a.user.designation or '').upper()
+        at = timezone.localtime(a.checked_in_at) if a.checked_in_at else None
+        on_time = due.get(desig)
+        late = None
+        if at and on_time:
+            late = max(0, int((at - at.replace(hour=on_time.hour, minute=on_time.minute, second=0,
+                                               microsecond=0)).total_seconds() // 60))
+        rows.append({
+            'date': a.date.isoformat(), 'name': a.user.name, 'designation': a.user.designation or '',
+            'available': 'yes' if a.is_available else 'no',
+            'signed_in': at.strftime('%H:%M') if at else '', 'due_by': on_time.strftime('%H:%M') if on_time else '',
+            'late_minutes': late, 'late': 'yes' if (late or 0) > 0 else 'no',
+        })
+    return rows
+
+
 def _own_leaves(user):
     from attendance.models import LeaveApplication
     return LeaveApplication.objects.filter(user=user)
@@ -142,6 +177,14 @@ def _entities():
             'accounts_status': ('accounts_status', 'choice'), 'project': ('project__name', 'text'),
             'stm': ('stm__name', 'text'), 'source': ('source', 'text'), 'units': ('plot_numbers', 'text'),
             'client': ('client_name', 'enc'), 'amount': ('final_amount', 'enc_money'),
+        }},
+        'availability': {'module': SALES_MODULES, 'rows_fn': _availability_rows, 'date': 'date',
+                         'note': 'STM / telecaller daily sign-in ("marked available"): signed_in time, the '
+                                 'designated due_by time, late_minutes and late yes/no; last 120 days',
+                         'fields': {
+            'date': ('date', 'date'), 'name': ('name', 'text'), 'designation': ('designation', 'text'),
+            'available': ('available', 'choice'), 'signed_in': ('signed_in', 'text'), 'due_by': ('due_by', 'text'),
+            'late_minutes': ('late_minutes', 'number'), 'late': ('late', 'choice'),
         }},
         # ── Accounts Receivable ──
         'ar_accounts': {'module': ('AR',), 'view': ARRegisterView, 'rows': True, 'date': 'booking_date',
@@ -320,6 +363,8 @@ def _scoped(request_user, spec, book, company_id):
     """The entity's queryset (or rows) exactly as the asker's list screen would scope it."""
     if spec.get('own'):
         return spec['own'](request_user), None
+    if spec.get('rows_fn'):
+        return None, spec['rows_fn'](request_user, company_id)
     from rest_framework.test import APIRequestFactory, force_authenticate
     params = dict(spec.get('params', {}))
     if spec.get('sales'):

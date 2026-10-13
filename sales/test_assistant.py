@@ -326,3 +326,28 @@ class ScopeLeakTests(TestCase):
         deals = [r['client'] for r in assistant.run_query(mgr, None, {'entity': 'bookings', 'mode': 'list',
                                                                       'fields': ['client'], 'book': 'all'})['rows']]
         self.assertNotIn('Sales deal', deals)
+
+
+class AvailabilityTests(TestCase):
+    """Who marked themselves available late — admins see all, a telecaller only themselves."""
+    def test_late_sign_ins(self):
+        from datetime import datetime, time
+        from sales.models import DistributionSettings, UserAvailability
+        co = Company.objects.create(code='AVL', name='Avl')
+        DistributionSettings.objects.create(company=co, tc_signin_time=time(10, 20), stm_signin_time=time(10, 20))
+        admin = User.objects.create(name='Boss', email='b@avl.com', phone='9800000001', user_code='AV-B', role='Admin', company=co)
+        tc = User.objects.create(name='Kavya', email='k@avl.com', phone='9800000002', user_code='AV-K', role='Employee',
+                                 designation='TELECALLER', company=co, modules=['Sales'])
+        stm = User.objects.create(name='Nisarg', email='n@avl.com', phone='9800000003', user_code='AV-N', role='Employee',
+                                  designation='STM', company=co, modules=['Sales'])
+        today = timezone.localdate()
+        tz = timezone.get_current_timezone()
+        UserAvailability.objects.create(user=tc, date=today, is_available=True,
+                                        checked_in_at=datetime.combine(today, time(11, 5), tzinfo=tz))
+        UserAvailability.objects.create(user=stm, date=today, is_available=True,
+                                        checked_in_at=datetime.combine(today, time(10, 10), tzinfo=tz))
+        out = assistant.run_query(admin, None, {'entity': 'availability', 'mode': 'list', 'fields': ['name', 'late_minutes'],
+                                                'filters': [{'field': 'late', 'op': 'eq', 'value': 'yes'}]})
+        self.assertEqual(out['rows'], [{'name': 'Kavya', 'late_minutes': 45}])
+        mine = assistant.run_query(stm, None, {'entity': 'availability', 'mode': 'count'})
+        self.assertEqual(mine['total'], 1)          # only their own day
