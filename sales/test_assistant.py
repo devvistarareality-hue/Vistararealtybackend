@@ -406,3 +406,25 @@ class PeriodWordTests(TestCase):
             out = assistant.run_query(admin, None, {'entity': 'bookings', 'mode': 'count', 'filters': [
                 {'field': 'stage', 'op': 'eq', 'value': 'approved'}, {'field': 'booking_date', 'op': op, 'value': 'this_month'}]})
             self.assertEqual(out['total'], 1, op)
+
+
+class StatusChangeTests(TestCase):
+    """'Marked warm today' counts leads by their status change (older leads too), once per lead."""
+    def test_marked_warm_today(self):
+        from datetime import timedelta
+        from sales.models import LeadStatusHistory
+        co = Company.objects.create(code='SCH', name='Sch')
+        p = Project.objects.create(company=co, name='Kalrav')
+        admin = User.objects.create(name='Boss', email='b@sch.com', phone='9930000001', user_code='SC-A', role='Admin', company=co)
+        tc = User.objects.create(name='Kavya', email='k@sch.com', phone='9930000002', user_code='SC-K', role='Employee',
+                                 designation='TELECALLER', company=co, modules=['Sales'])
+        old = Lead.objects.create(company=co, project=p, name='Old', phone='9930000010', telecaller=tc)
+        Lead.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(days=5))
+        new = Lead.objects.create(company=co, project=p, name='New', phone='9930000011', telecaller=tc)
+        for lead in (old, new, new):          # the new lead flipped to warm twice today
+            LeadStatusHistory.objects.create(lead=lead, changed_by=tc, field_changed='telecaller_status', new_value='warm')
+        out = assistant.run_query(admin, None, {'entity': 'status_changes', 'mode': 'count', 'group_by': ['changed_by'],
+                                                'filters': [{'field': 'to', 'op': 'eq', 'value': 'warm'},
+                                                            {'field': 'changed', 'op': 'eq', 'value': 'today'}]})
+        self.assertEqual(out['total'], 2)
+        self.assertEqual(out['groups'], [{'changed_by': 'Kavya', 'count': 2}])

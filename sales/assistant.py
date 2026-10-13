@@ -141,6 +141,21 @@ def _entities():
             'ad': ('meta_ad_name', 'enc'), 'city': ('city', 'text'), 'budget': ('budget_bucket', 'choice'),
             'duplicate': ('is_duplicate', 'bool'), 'stm_assigned': ('stm_assigned_at', 'datetime'),
         }},
+        # Every status change on a lead the person can see — "who marked what, when".
+        # The Leads screen's "TC Status = Warm + Today" means leads MARKED warm today
+        # (older ones included), which is this, counted once per lead.
+        'status_changes': {'module': SALES_MODULES, 'view': v.LeadListView, 'derive': '_lead_status_changes',
+                           'count_distinct': 'lead_id', 'date': 'changed', 'sales': True,
+                           'note': "each change of a lead's telecaller_status or stm_status: field (telecaller_status "
+                                   "/ stm_status), to (new value), from, changed (when), changed_by; counts are of "
+                                   "distinct leads. Use for 'marked warm today', 'how many did X qualify'",
+                           'fields': {
+            'changed': ('created_at', 'datetime'), 'field': ('field_changed', 'choice'), 'to': ('new_value', 'choice'),
+            'from': ('old_value', 'choice'), 'changed_by': ('changed_by__name', 'text'),
+            'project': ('lead__project__name', 'text'), 'telecaller': ('lead__telecaller__name', 'text'),
+            'stm': ('lead__stm__name', 'text'), 'source': ('lead__source__name', 'text'),
+            'client': ('lead__name', 'enc'),
+        }},
         'site_visits': {'module': SALES_MODULES, 'view': v.SiteVisitListView, 'date': 'visited', 'sales': True,
                         'note': 'status scheduled/completed/no_show/cancelled; outcome hot/warm/cold/not_interested',
                         'fields': {
@@ -333,6 +348,10 @@ SYSTEM = (
     "which Sales/CP approve and then Accounts signs off (bookings stage: awaiting_sales → "
     "awaiting_accounts → approved). "
     "An approved booking becomes an AR account whose instalments are collected.\n"
+    "Status questions about WORK DONE ('marked warm today', 'how many did each telecaller qualify this "
+    "week') use the status_changes entity (field telecaller_status or stm_status, to, changed = the day), "
+    "exactly like the Leads screen's status + date filter. leads.received is when a lead ARRIVED — use it "
+    "only for 'leads received'.\n"
     "Sales vs Channel Partner: the Sales screens count the Sales book only. Unless the person is in "
     "the Sales or CP module (see the note in their message), give the total and say how much of it "
     "came through Channel Partners (run the query with book 'sales' and 'cp').\n"
@@ -369,6 +388,12 @@ SYSTEM = (
 
 
 # ── Running a query ──────────────────────────────────────────────────────────
+def _lead_status_changes(leads_qs):
+    from .models import LeadStatusHistory
+    return LeadStatusHistory.objects.filter(lead__in=leads_qs.values('id'),
+                                            field_changed__in=('telecaller_status', 'stm_status'))
+
+
 def _booking_stage(qs):
     """One unambiguous stage per booking. accounts_status defaults to 'approved' even on
     drafts and bookings Sales has not approved, so it must never be read on its own."""
@@ -426,6 +451,8 @@ def _scoped(request_user, spec, book, company_id):
         raise ValueError('That list is not available to you.')
     if company_id and spec.get('company'):
         qs = qs.filter(**{spec['company']: company_id})
+    if spec.get('derive'):
+        qs = globals()[spec['derive']](qs)
     if spec.get('annotate'):
         qs = globals()[spec['annotate']](qs)
     return qs.order_by(), None
@@ -759,10 +786,12 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
         out = [dict(zip(groups, [_fmt(x, 'date') if hasattr(x, 'isoformat') else x for x in k]), count=v)
                for k, v in sorted(counts.items(), key=lambda kv: -kv[1])]
         return {'groups': out[:200] if groups else None, 'total': sum(counts.values())}
+    dist = spec.get('count_distinct')
     if not groups:
-        return {'total': qs.count()}
+        return {'total': qs.values(dist).distinct().count() if dist else qs.count()}
     ann = {f'_g{i}': e for i, e in enumerate(gexpr.values())}
-    rows = (qs.annotate(**ann).values(*ann).annotate(count=Count('id')).order_by('-count')[:200])
+    cnt = Count(dist, distinct=True) if dist else Count('id')
+    rows = (qs.annotate(**ann).values(*ann).annotate(count=cnt).order_by('-count')[:200])
     out = []
     for r in rows:
         d = {}
@@ -771,7 +800,7 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
             d[g] = x.isoformat() if hasattr(x, 'isoformat') else x
         d['count'] = r['count']
         out.append(d)
-    return {'groups': out, 'total': qs.count()}
+    return {'groups': out, 'total': qs.values(dist).distinct().count() if dist else qs.count()}
 
 
 # ── The conversation ─────────────────────────────────────────────────────────
