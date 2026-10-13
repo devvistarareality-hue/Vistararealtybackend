@@ -368,3 +368,23 @@ class PhoneMaskTests(TestCase):
         hit = assistant.run_query(admin, None, {'entity': 'leads', 'mode': 'count',
                                                 'filters': [{'field': 'phone', 'op': 'contains', 'value': '9876543210'}]})
         self.assertEqual(hit['total'], 1)
+
+
+class BookingStageTests(TestCase):
+    """Closures = stage approved; drafts (accounts_status 'approved' by default) never count."""
+    def test_drafts_and_unapproved_do_not_count(self):
+        from sales.models import Booking
+        co = Company.objects.create(code='STG', name='Stg')
+        p = Project.objects.create(company=co, name='Waghodiya')
+        admin = User.objects.create(name='Boss', email='b@stg.com', phone='9910000001', user_code='SG-A', role='Admin', company=co)
+        d = timezone.localdate()
+        Booking.objects.create(company=co, project=p, client_name='A', status='sold', accounts_status='approved', booking_date=d)
+        Booking.objects.create(company=co, project=p, client_name='B', status='draft', booking_date=d)          # approved by default
+        Booking.objects.create(company=co, project=p, client_name='C', status='sold', accounts_status='pending', booking_date=d)
+        Booking.objects.create(company=co, project=p, client_name='D', status='pending', booking_date=d)
+        q = lambda f: assistant.run_query(admin, None, {'entity': 'bookings', 'mode': 'count', 'filters': f})['total']
+        self.assertEqual(q([{'field': 'stage', 'op': 'eq', 'value': 'approved'}]), 1)
+        with self.assertRaises(ValueError):          # the misleading field is not offered at all
+            q([{'field': 'accounts_status', 'op': 'eq', 'value': 'approved'}])
+        out = assistant.run_query(admin, None, {'entity': 'bookings', 'mode': 'count', 'group_by': ['stage']})
+        self.assertEqual({g['stage']: g['count'] for g in out['groups']}, {'approved': 1, 'awaiting_accounts': 1, 'awaiting_sales': 1})

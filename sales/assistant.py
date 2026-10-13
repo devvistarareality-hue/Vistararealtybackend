@@ -172,11 +172,14 @@ def _entities():
         }},
         'bookings': {'module': SALES_MODULES, 'view': v.BookingListCreateView, 'date': 'booking_date', 'sales': True,
                      'params': {'mine': '1', 'scope': 'visible'},
-                     'note': 'THE closures/sales count: status sold AND accounts_status approved = approved by '
-                             'Sales and Accounts; status sold + accounts_status pending = awaiting Accounts',
+                     'annotate': '_booking_stage',
+                     'note': "stage: approved (= THE closure / sale: approved by Sales AND Accounts), "
+                             "awaiting_accounts, awaiting_sales, rejected, on_hold. Drafts are left out "
+                             "unless filtered stage=draft. For closures / sales always filter stage=approved.",
                      'fields': {
+            'stage': ('_stage', 'choice'),
             'booking_date': ('booking_date', 'date'), 'status': ('status', 'choice'),
-            'accounts_status': ('accounts_status', 'choice'), 'project': ('project__name', 'text'),
+            'project': ('project__name', 'text'),
             'stm': ('stm__name', 'text'), 'source': ('source', 'text'), 'units': ('plot_numbers', 'text'),
             'client': ('client_name', 'enc'), 'amount': ('final_amount', 'enc_money'),
         }},
@@ -326,15 +329,16 @@ SYSTEM = (
     "How the business works: leads arrive (Meta ads, walk-ins, channel partners, references); a "
     "telecaller (TC) calls them and passes interested ones to an STM (sales executive), who books a "
     "site visit; a visit ends Hot/Warm/Cold/Not Interested; a deal becomes a closure and a booking, "
-    "which Sales/CP approve (status sold) and then Accounts signs off (accounts_status approved). "
+    "which Sales/CP approve and then Accounts signs off (bookings stage: awaiting_sales → "
+    "awaiting_accounts → approved). "
     "An approved booking becomes an AR account whose instalments are collected.\n"
     "Sales vs Channel Partner: the Sales screens count the Sales book only. Unless the person is in "
     "the Sales or CP module (see the note in their message), give the total and say how much of it "
     "came through Channel Partners (run the query with book 'sales' and 'cp').\n"
-    "IMPORTANT — what counts as a closure / sale / booking done: a booking with status 'sold' AND "
-    "accounts_status 'approved' (approved by both Sales and Accounts), dated by booking_date. Always "
-    "answer 'how many closures / bookings / sales' and their value from the bookings entity with those "
-    "two filters. The closures entity holds deals recorded by Sales before Accounts signs off — use it "
+    "IMPORTANT — what counts as a closure / sale / booking done: a booking with stage 'approved' "
+    "(approved by both Sales and Accounts), dated by booking_date. Always answer 'how many closures / "
+    "bookings / sales' and their value from the bookings entity filtered stage = approved — never by "
+    "status alone. The closures entity holds deals recorded by Sales before Accounts signs off — use it "
     "only when asked about recorded / pending closures, and say so. If useful, mention how many more "
     "are still awaiting Accounts approval. Projects include "
     "Pratishtha, Kalrav, Anahata Florenza, Tundav and others.\n\n"
@@ -364,6 +368,20 @@ SYSTEM = (
 
 
 # ── Running a query ──────────────────────────────────────────────────────────
+def _booking_stage(qs):
+    """One unambiguous stage per booking. accounts_status defaults to 'approved' even on
+    drafts and bookings Sales has not approved, so it must never be read on its own."""
+    from django.db.models import Case, CharField, Q, Value, When
+    return qs.annotate(_stage=Case(
+        When(status='draft', then=Value('draft')),
+        When(status='rejected', then=Value('rejected')),
+        When(Q(status='sold') & Q(accounts_status='rejected'), then=Value('rejected')),
+        When(Q(status='sold') & Q(accounts_status='approved'), then=Value('approved')),
+        When(status='sold', then=Value('awaiting_accounts')),
+        When(status='hold', then=Value('on_hold')),
+        default=Value('awaiting_sales'), output_field=CharField()))
+
+
 def _book_for(user, book):
     """Which Sales/CP book a question may read. Someone who holds Channel Partner but
     not Sales sees the partner book only — exactly what their CP screens show — so
@@ -407,6 +425,8 @@ def _scoped(request_user, spec, book, company_id):
         raise ValueError('That list is not available to you.')
     if company_id and spec.get('company'):
         qs = qs.filter(**{spec['company']: company_id})
+    if spec.get('annotate'):
+        qs = globals()[spec['annotate']](qs)
     return qs.order_by(), None
 
 
@@ -647,6 +667,9 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     qs, rows = _scoped(user, spec, args.get('book'), company_id)
     if rows is not None:
         return _run_rows(rows, fields, args, spec['date'], list_cap, mask)
+    if 'stage' in fields and not any(f.get('field') == 'stage' and 'draft' in str(f.get('value')).lower()
+                                     for f in args.get('filters') or []):
+        qs = qs.exclude(_stage='draft')
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
     if mode == 'list':
@@ -774,6 +797,7 @@ def answer(user, company_id, question, history, module='dashboard'):
     messages.append({'role': 'user', 'content': context + question})
     usage = {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}
     queries = 0
+    calls_log = usage.setdefault('calls', [])      # what the model asked for — kept in the log
     for _ in range(MAX_ROUNDS):
         resp = client.messages.create(
             model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool, ai_files.TOOL], messages=messages,
@@ -802,6 +826,7 @@ def answer(user, company_id, question, history, module='dashboard'):
         results = []
         for b in calls:
             queries += 1
+            calls_log.append({'tool': b.get('name'), 'input': b.get('input')})
             try:
                 if b.get('name') == 'make_file':
                     made = ai_files.make(user, company_id, b.get('input') or {})
@@ -849,7 +874,8 @@ def _log(user, question, state, usage, queries, request_path, module='dashboard'
             module='Ask Nexora', action='asked', target_type='ai question', target_id=str(chat_id or ''),
             summary=('Asked Nexora AI — %s' % question)[:500],
             details=json.dumps({'question': question[:1000], 'status': state, 'queries': queries,
-                                'tokens': usage, 'approx_cost_inr': rupees, 'model': MODEL,
+                                'tokens': {k: v for k, v in usage.items() if k != 'calls'},
+                                'calls': (usage.get('calls') or [])[:12], 'approx_cost_inr': rupees, 'model': MODEL,
                                 'files': [{'name': f['name'], 'rows': f['rows']} for f in files],
                                 'asked_from': LOG_MODULE.get(module, 'Dashboard')}),
             method='POST', path=request_path, status_code=200)
