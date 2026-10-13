@@ -328,6 +328,9 @@ SYSTEM = (
     "site visit; a visit ends Hot/Warm/Cold/Not Interested; a deal becomes a closure and a booking, "
     "which Sales/CP approve (status sold) and then Accounts signs off (accounts_status approved). "
     "An approved booking becomes an AR account whose instalments are collected.\n"
+    "Sales vs Channel Partner: the Sales screens count the Sales book only. Unless the person is in "
+    "the Sales or CP module (see the note in their message), give the total and say how much of it "
+    "came through Channel Partners (run the query with book 'sales' and 'cp').\n"
     "IMPORTANT — what counts as a closure / sale / booking done: a booking with status 'sold' AND "
     "accounts_status 'approved' (approved by both Sales and Accounts), dated by booking_date. Always "
     "answer 'how many closures / bookings / sales' and their value from the bookings entity with those "
@@ -728,7 +731,10 @@ def answer(user, company_id, question, history, module='dashboard'):
     context = (f"[Today is {today:%A, %d %B %Y} (India). Asked by {who}. "
                f"Data is limited to what this person can see."
                + (" They are in the Channel Partner module: use book 'cp' unless they ask about Sales."
-                  if module == 'cp' else f" They asked from the {where} screen — likely about that module, "
+                  if module == 'cp' else
+                  " They are in the Sales module: use book 'sales' (the Sales screens' numbers) unless they ask "
+                  "about Channel Partner or the total; when it matters, add the Channel Partner figure separately."
+                  if module == 'sales' else f" They asked from the {where} screen — likely about that module, "
                   "but answer about whichever module the question names." if where else '') + "]\n\n")
     tool = tool_for(available(user))
     from . import ai_files
