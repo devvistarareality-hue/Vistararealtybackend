@@ -735,20 +735,80 @@ def _read(job):
         return None
 
 
-def _log(user, question, state, usage, queries, request_path, module='dashboard', files=()):
+def _log(user, question, state, usage, queries, request_path, module='dashboard', files=(), chat_id=None):
     try:
         from activity.models import ActivityLog
         rupees = _cost(usage)
         ActivityLog.objects.create(
             company_id=getattr(user, 'company_id', None), actor=user, actor_name=user.name or '',
-            module=LOG_MODULE.get(module, 'Admin'), action='asked', target_type='ai question', target_id='',
+            module='Ask Nexora', action='asked', target_type='ai question', target_id=str(chat_id or ''),
             summary=('Asked Nexora AI — %s' % question)[:500],
             details=json.dumps({'question': question[:1000], 'status': state, 'queries': queries,
                                 'tokens': usage, 'approx_cost_inr': rupees, 'model': MODEL,
-                                'files': [{'name': f['name'], 'rows': f['rows']} for f in files]}),
+                                'files': [{'name': f['name'], 'rows': f['rows']} for f in files],
+                                'asked_from': LOG_MODULE.get(module, 'Dashboard')}),
             method='POST', path=request_path, status_code=200)
     except Exception:
         pass
+
+
+# ── Saved chats (History) ────────────────────────────────────────────────────
+def _chat_turns(chat):
+    try:
+        t = json.loads(chat.turns or '[]')
+        return t if isinstance(t, list) else []
+    except ValueError:
+        return []
+
+
+def _save_turn(chat_id, user, question, answer_text, files):
+    from .models import AiChat
+    chat = AiChat.objects.filter(pk=chat_id, user=user).first()
+    if not chat:
+        return
+    turns = _chat_turns(chat)
+    turns.append({'q': question, 'a': answer_text, 'at': timezone.now().isoformat(),
+                  'files': [{'id': f['id'], 'name': f['name'], 'format': f['format']} for f in files]})
+    chat.turns = json.dumps(turns[-60:])
+    chat.save(update_fields=['turns', 'updated_at'])
+
+
+class ChatListView(APIView):
+    """GET → the person's own past chats, newest first."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import AiChat
+        out = []
+        for c in AiChat.objects.filter(user=request.user).order_by('-updated_at')[:50]:
+            turns = _chat_turns(c)
+            if not turns:
+                continue
+            out.append({'id': c.id, 'title': (c.title or turns[0].get('q') or 'Chat')[:120],
+                        'updated_at': c.updated_at.isoformat(), 'turns': len(turns), 'module': c.module})
+        return Response({'results': out})
+
+
+class ChatDetailView(APIView):
+    """GET → one of the person's chats with every question and answer; DELETE removes it."""
+    permission_classes = [IsAuthenticated]
+
+    def _chat(self, request, pk):
+        from .models import AiChat
+        return AiChat.objects.filter(pk=pk, user=request.user).first()
+
+    def get(self, request, pk):
+        c = self._chat(request, pk)
+        if not c:
+            return Response({'detail': 'Chat not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({'id': c.id, 'title': c.title, 'module': c.module, 'turns': _chat_turns(c)})
+
+    def delete(self, request, pk):
+        c = self._chat(request, pk)
+        if not c:
+            return Response({'detail': 'Chat not found.'}, status=status.HTTP_404_NOT_FOUND)
+        c.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AskView(APIView):
@@ -773,6 +833,18 @@ class AskView(APIView):
                             status=status.HTTP_429_TOO_MANY_REQUESTS)
         cache.set(key, used + 1, 60 * 60 * 26)
         history = request.data.get('history') if isinstance(request.data.get('history'), list) else []
+        # The conversation this question belongs to: an existing chat of theirs (its
+        # saved turns are the history), or a new one titled by this question.
+        from .models import AiChat
+        chat = None
+        if str(request.data.get('chat_id') or '').isdigit():
+            chat = AiChat.objects.filter(pk=request.data['chat_id'], user=user).first()
+        if chat:
+            history = [{'q': t.get('q'), 'a': t.get('a')} for t in _chat_turns(chat)]
+        else:
+            chat = AiChat.objects.create(user=user, company_id=getattr(user, 'company_id', None),
+                                         title=question[:200], module=str(request.data.get('module') or '')[:20])
+        chat_id = chat.id
         company_id = request.data.get('company_id')
         module = str(request.data.get('module') or 'dashboard')
         if module not in LOG_MODULE:
@@ -790,7 +862,8 @@ class AskView(APIView):
                 _write(job, {'owner': user.id, 'status': 'done', 'answer': text,
                              'approx_cost_inr': _cost(usage),
                              'files': [{'id': f['id'], 'name': f['name'], 'format': f['format']} for f in files]})
-                _log(user, question, 'answered', usage, queries, path, module, files)
+                _save_turn(chat_id, user, question, text, files)
+                _log(user, question, 'answered', usage, queries, path, module, files, chat_id)
             except Exception as e:
                 import anthropic
                 msg = 'Ask Nexora could not answer right now. Try again in a minute.'
@@ -802,7 +875,7 @@ class AskView(APIView):
                     msg = 'Ask Nexora has run out of AI credit. Ask an admin to top it up.'
                 _write(job, {'owner': user.id, 'status': 'error', 'detail': msg})
                 _log(user, question, 'failed: %s' % type(e).__name__,
-                     {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}, 0, path, module)
+                     {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}, 0, path, module, (), chat_id)
             finally:
                 if not getattr(settings, 'AI_INLINE', False):
                     connection.close()
@@ -811,7 +884,7 @@ class AskView(APIView):
             run()
         else:
             threading.Thread(target=run, daemon=True).start()
-        return Response({'job': job}, status=status.HTTP_202_ACCEPTED)
+        return Response({'job': job, 'chat': chat_id}, status=status.HTTP_202_ACCEPTED)
 
 
 class AskJobView(APIView):

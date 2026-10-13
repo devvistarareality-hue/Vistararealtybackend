@@ -250,3 +250,51 @@ class AiFileTests(TestCase):
         self.assertEqual(dl.status_code, 200)
         other = APIClient(); other.force_authenticate(self.stm)
         self.assertEqual(other.get(f"/api/sales/ai/files/{st['files'][0]['id']}/").status_code, 404)
+
+
+@override_settings(AI_INLINE=True)
+class ChatHistoryTests(TestCase):
+    """Chats are saved (encrypted), private to their owner, continue with their own
+    history, and every question is logged under the Ask Nexora module."""
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='AIC', name='Aic Co')
+        self.admin = User.objects.create(name='Boss', email='b@aic.com', phone='9600000001', user_code='AC-A',
+                                         role='Admin', company=self.co)
+        self.other = User.objects.create(name='Other', email='o@aic.com', phone='9600000002', user_code='AC-O',
+                                         role='Admin', company=self.co)
+
+    @mock.patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test'})
+    def test_chat_is_saved_and_continued(self):
+        from sales.models import AiChat
+        fake = mock.MagicMock()
+        fake.messages.create.side_effect = [
+            _msg([{'type': 'text', 'text': 'First answer.'}], 'end_turn'),
+            _msg([{'type': 'text', 'text': 'Second answer.'}], 'end_turn'),
+        ]
+        c = APIClient(); c.force_authenticate(self.admin)
+        with mock.patch.object(assistant, '_client', return_value=fake):
+            r1 = c.post('/api/sales/ai/ask/', {'question': 'How many leads?'}, format='json').json()
+            r2 = c.post('/api/sales/ai/ask/', {'question': 'And last month?', 'chat_id': r1['chat']}, format='json').json()
+        self.assertEqual(r1['chat'], r2['chat'])
+        # the second call carried the first turn as history
+        sent = fake.messages.create.call_args_list[1].kwargs['messages']
+        self.assertEqual(sent[0]['content'], 'How many leads?')
+        lst = c.get('/api/sales/ai/chats/').json()['results']
+        self.assertEqual([(x['title'], x['turns']) for x in lst], [('How many leads?', 2)])
+        detail = c.get(f"/api/sales/ai/chats/{r1['chat']}/").json()
+        self.assertEqual([t['a'] for t in detail['turns']], ['First answer.', 'Second answer.'])
+        # encrypted at rest
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute('SELECT turns FROM sales_aichat WHERE id = %s', [r1['chat']])
+            self.assertNotIn('First answer', cur.fetchone()[0])
+        # private
+        o = APIClient(); o.force_authenticate(self.other)
+        self.assertEqual(o.get(f"/api/sales/ai/chats/{r1['chat']}/").status_code, 404)
+        self.assertEqual(o.get('/api/sales/ai/chats/').json()['results'], [])
+        # logged under Ask Nexora
+        self.assertEqual(set(ActivityLog.objects.filter(target_type='ai question').values_list('module', flat=True)),
+                         {'Ask Nexora'})
+        self.assertEqual(c.delete(f"/api/sales/ai/chats/{r1['chat']}/").status_code, 204)
+        self.assertFalse(AiChat.objects.exists())

@@ -1130,5 +1130,25 @@ class MetaCapiEvent(models.Model):
         indexes = [models.Index(fields=['company', 'status'])]
 
 
+
+class AiChat(models.Model):
+    """One Ask Nexora conversation, so the person can go back to it (History).
+
+    Private to the person who had it. The title and every question and answer are
+    encrypted at rest, like the rest of the CRM's data (`turns` is a JSON list of
+    {q, a, files, at}). Files listed in a turn expire after a day on their own.
+    """
+    company = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='+', null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_chats')
+    title = EncryptedTextField(blank=True)
+    turns = EncryptedTextField(blank=True, default='[]')
+    module = models.CharField(max_length=20, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['user', '-updated_at'])]
+
+
 from . import meta_capi as _meta_capi  # noqa: E402  (connects the stage signals)
 _meta_capi.connect()
