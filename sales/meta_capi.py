@@ -5,7 +5,9 @@ more people who actually come for a site visit rather than people who only fill 
 
 Stages (the event names mapped in Events Manager → the CRM dataset):
   Lead_Received          a Meta form lead arrives
-  Qualified              the telecaller marks it warm (passes it to the STM)
+  Qualified              the telecaller marks it warm (passes it to the STM) — or, on
+                         projects where leads go straight to an STM, the STM marks it
+                         hot / warm or books a visit (a visit means it qualified)
   Site_Visit_Scheduled   a site visit is booked
   Site_Visit_Done        the site visit is completed
   Booked                 a booking on the lead is approved (sold)
@@ -185,6 +187,8 @@ def _lead_post(sender, instance, created=False, raw=False, **kw):
             elif tc in DISQUALIFIED:
                 record(instance, 'Disqualified')
         if stm != (old.get('stm_status') or ''):
+            if stm in ('hot', 'warm', 'sv_scheduled', 'sv_done'):
+                record(instance, 'Qualified')      # once per lead — a TC's earlier Warm wins
             if stm == 'sv_scheduled':
                 record(instance, 'Site_Visit_Scheduled')
             elif stm == 'sv_done':
@@ -206,6 +210,8 @@ def _visit_post(sender, instance, created=False, raw=False, **kw):
     try:
         old = getattr(instance, '_capi_old', None)
         if created or old != instance.status:
+            if instance.status in ('completed', 'scheduled'):
+                record(instance.lead, 'Qualified')  # a booked visit means it qualified
             if instance.status == 'completed':
                 record(instance.lead, 'Site_Visit_Done', instance.visited_at or timezone.now())
             elif instance.status == 'scheduled':

@@ -80,3 +80,26 @@ class MetaCapiTests(TestCase):
         ev.refresh_from_db()
         self.assertEqual(ev.status, 'sent')
         self.assertTrue(MetaCapiEvent.objects.filter(lead=lead, event_name='Booked', status='sent').exists())
+
+
+@override_settings(META_CAPI_INLINE=True)
+class StmDirectQualifiedTests(MetaCapiTests):
+    """Projects with no telecaller: the STM's warm / hot (or a booked visit) sends Qualified, once."""
+    def test_stm_marks_warm(self):
+        with mock.patch('requests.post', return_value=FakeResp()):
+            lead = self._lead(meta_form_id='77')
+            lead.stm_status = 'warm'
+            with self.captureOnCommitCallbacks(execute=True):
+                lead.save()
+            lead.stm_status = 'sv_scheduled'
+            with self.captureOnCommitCallbacks(execute=True):
+                lead.save()
+        names = list(MetaCapiEvent.objects.filter(lead=lead).order_by('id').values_list('event_name', flat=True))
+        self.assertEqual(names, ['Lead_Received', 'Qualified', 'Site_Visit_Scheduled'])
+
+    def test_visit_booked_directly(self):
+        with mock.patch('requests.post', return_value=FakeResp()):
+            lead = self._lead(meta_form_id='77')
+            with self.captureOnCommitCallbacks(execute=True):
+                SiteVisit.objects.create(lead=lead, project=self.p, scheduled_at=timezone.now())
+        self.assertTrue(MetaCapiEvent.objects.filter(lead=lead, event_name='Qualified').exists())
