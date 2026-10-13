@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, time
 
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -149,7 +150,16 @@ class ActivityLogView(APIView):
         record = p.get('target_type') and p.get('target_id')
         if record:
             types = [t for t in p['target_type'].split(',') if t]
-            qs = qs.filter(target_type__in=types, target_id=p['target_id'])
+            match = Q(target_type__in=types, target_id=p['target_id'])
+            if 'channel-partner' in types and p['target_id'].isdigit():
+                # A partner's history also holds the follow-ups and site visits
+                # scheduled with them — those are logged against their own ids.
+                from sales.models import PartnerFollowUp, PartnerSiteVisit
+                pid = int(p['target_id'])
+                fu = [str(i) for i in PartnerFollowUp.objects.filter(channel_partner_id=pid).values_list('id', flat=True)]
+                sv = [str(i) for i in PartnerSiteVisit.objects.filter(channel_partner_id=pid).values_list('id', flat=True)]
+                match |= Q(target_type='partner-follow-up', target_id__in=fu) | Q(target_type='partner-site-visit', target_id__in=sv)
+            qs = qs.filter(match)
         elif not is_log_admin(u):
             qs = qs.filter(actor=u)
         if p.get('module'):
@@ -180,7 +190,6 @@ class ActivityLogView(APIView):
         modules = sorted(set(qs.order_by().values_list('module', flat=True).distinct()[:50])) if not record and page == 1 else []
         actors = []
         if is_log_admin(u) and not record and page == 1:
-            from django.db.models import Q
             from accounts.models import User
             # Everyone in the company can be picked, not only people already in the log
             # (plus anyone in the log who has since left or moved company).

@@ -213,3 +213,23 @@ class NamedLinesAcrossModulesTests(TestCase):
         la = LeaveApplication.objects.latest('id')
         self.api.patch(f'/api/attendance/leave-action/{la.id}/', {'status': 'approved'}, format='json')
         self.assertTrue(self.last().startswith('Approved leave — Boss · Casual Leave'), self.last())
+
+
+class PartnerHistoryTests(TestCase):
+    """A channel partner's History holds the follow-ups and visits scheduled with them."""
+    def test_follow_ups_show_in_the_partner_history(self):
+        from django.utils import timezone
+        from sales.models import ChannelPartner, PartnerFollowUp
+        co = Company.objects.create(code='PHT', name='Pht')
+        admin = User.objects.create_user('p@x.com', company=co, user_code='PH1', password='x', name='Boss', role='Admin')
+        cp = ChannelPartner.objects.create(company=co, name='Rakesh', contact_no='9998697169')
+        other = ChannelPartner.objects.create(company=co, name='Other', contact_no='9998697100')
+        mine = PartnerFollowUp.objects.create(channel_partner=cp, assigned_to=admin, scheduled_at=timezone.now())
+        theirs = PartnerFollowUp.objects.create(channel_partner=other, assigned_to=admin, scheduled_at=timezone.now())
+        for fu in (mine, theirs):
+            ActivityLog.objects.create(company=co, actor=admin, actor_name='Boss', module='Channel Partner', action='created',
+                                       target_type='partner-follow-up', target_id=str(fu.id), summary=f'Created follow up #{fu.id}',
+                                       method='POST', path='/api/sales/partner-follow-ups/', status_code=201)
+        api = APIClient(); api.force_authenticate(admin)
+        got = api.get(f'/api/activity/?target_type=channel-partner&target_id={cp.id}').json()['results']
+        self.assertEqual([r['summary'] for r in got], [f'Created follow up #{mine.id}'])
