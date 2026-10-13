@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from sales.models import Lead, MetaWebhookConfig
 
-GRAPH = 'https://graph.facebook.com/v19.0'
+GRAPH = 'https://graph.facebook.com/v26.0'
 
 
 def _last10(raw):
