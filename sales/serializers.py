@@ -383,6 +383,14 @@ class BookingSerializer(serializers.ModelSerializer):
             return False
         return self._is_accounts_approver_for(obj)
 
+
+    def validate_booking_date(self, value):
+        from .date_rules import problem
+        msg = problem(value, 'booking date')
+        if msg:
+            raise serializers.ValidationError(msg)
+        return value
+
     class Meta:
         model = Booking
         fields = '__all__'
@@ -517,6 +525,21 @@ class SiteVisitSerializer(serializers.ModelSerializer):
             return True
         return obj.stm_id is not None and obj.stm_id in (self.context.get('edit_ids') or ())
 
+
+    def validate(self, attrs):
+        from .date_rules import problem
+        attrs = super().validate(attrs)
+        status_ = attrs.get('status') or getattr(self.instance, 'status', None)
+        if attrs.get('visited_at'):
+            msg = problem(attrs['visited_at'], 'visit date')
+            if msg:
+                raise serializers.ValidationError({'visited_at': [msg]})
+        if attrs.get('scheduled_at'):
+            msg = problem(attrs['scheduled_at'], 'visit date', allow_future=(status_ != 'completed'), max_ahead_days=366)
+            if msg:
+                raise serializers.ValidationError({'scheduled_at': [msg]})
+        return attrs
+
     class Meta:
         model = SiteVisit
         fields = '__all__'
@@ -539,6 +562,14 @@ class ClosureSerializer(serializers.ModelSerializer):
         if obj.referred_by_telecaller_id:
             return obj.referred_by_telecaller.name
         return obj.lead.telecaller.name if obj.lead_id and obj.lead.telecaller_id else None
+
+
+    def validate_closure_date(self, value):
+        from .date_rules import problem
+        msg = problem(value, 'closure date')
+        if msg:
+            raise serializers.ValidationError(msg)
+        return value
 
     class Meta:
         model = Closure

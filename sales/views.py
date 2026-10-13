@@ -1611,6 +1611,9 @@ def _parse_visited_at(raw):
         dt = now.replace(year=d.year, month=d.month, day=d.day)
     if timezone.is_naive(dt):
         dt = timezone.make_aware(dt)
+    from .date_rules import MIN_YEAR
+    if not (MIN_YEAR <= dt.year <= timezone.localdate().year + 2):
+        return None                  # a mistyped year (2202, 0026) is not a visit date
     return dt
 
 
