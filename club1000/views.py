@@ -395,6 +395,19 @@ class InvestorListCreateView(APIView):
             qs = qs.filter(scheme_id=request.query_params['scheme_id'])
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
+        # The two dashboard tiles that count something no stored status holds.
+        # 'Due for renewal' is active-and-past-maturity (Investor.is_matured, which
+        # is computed because nothing ever flips status to 'matured'), and
+        # 'Maturing in 30 days' is a window on the date. Both are the same
+        # conditions the dashboard counts with — kept together so a tile and the
+        # list it opens cannot disagree about what it was counting.
+        bucket = request.query_params.get('bucket')
+        if bucket == 'due_for_renewal':
+            qs = qs.filter(status='active', maturity_date__isnull=False,
+                           maturity_date__lte=date.today())
+        elif bucket == 'maturing_soon':
+            qs = qs.filter(status='active', maturity_date__gte=date.today(),
+                           maturity_date__lte=date.today() + timedelta(days=30))
         approval_status = request.query_params.get('approval_status')
         if approval_status == 'all':
             pass  # Approvals page's "All" tab — no filter, includes rejected.
