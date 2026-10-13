@@ -380,6 +380,13 @@ def _distinct(qs, field):
     return sorted({str(v) for v in qs.order_by().values_list(field, flat=True).distinct() if v not in (None, '')})
 
 
+def _digits(value):
+    """Just the digits of a phone number, so +91 98765 43210 and 9876543210
+    compare equal. Used where the column is encrypted and has no blind index to
+    match on."""
+    return ''.join(c for c in str(value or '') if c.isdigit())
+
+
 def _parse_date(value):
     """A date from the client, or None when it is missing or unparseable."""
     if not value:
@@ -878,8 +885,67 @@ class ReferralRewardListView(APIView):
             qs = qs.filter(
                 Q(investor__lead__assigned_to=request.user) | (no_lead_owner & Q(investor__added_by=request.user))
             )
-        if request.query_params.get('status'):
-            qs = qs.filter(status=request.query_params['status'])
+        p = request.query_params
+        if p.get('status'):
+            qs = qs.filter(status=p['status'])
+        if p.get('scheme_id'):
+            qs = qs.filter(investor__scheme_id=p['scheme_id'])
+        if p.get('investor'):
+            qs = qs.filter(investor_id=p['investor'])
+        # The rate a reward was locked in at says what earned it: 0.5% a new
+        # investment, 0.25% a renewal at maturity. Nothing else records which.
+        if p.get('pct'):
+            try:
+                qs = qs.filter(pct=Decimal(str(p['pct'])))
+            except (InvalidOperation, ValueError):
+                pass
+        # Dated by when it was earned — the column the table shows.
+        d_from = _parse_date(p.get('date_from'))
+        d_to = _parse_date(p.get('date_to'))
+        if d_from:
+            qs = qs.filter(created_at__date__gte=d_from)
+        if d_to:
+            qs = qs.filter(created_at__date__lte=d_to)
+
+        # reference_name/phone and the investor's name are encrypted, so neither
+        # the referrer filter nor the search can be expressed in SQL. Both are
+        # matched over the already-scoped rows and fed back as an id filter —
+        # the same fallback the investor list uses, and the reason there is no
+        # blind index to lean on here.
+        ref = _digits(p.get('reference', ''))
+        search = p.get('search', '').strip().lower()
+        if ref or search:
+            hits = []
+            for pk, rn, rp, nm in qs.values_list('id', 'reference_name', 'reference_phone', 'investor__name'):
+                if ref and _digits(rp)[-10:] != ref[-10:]:
+                    continue
+                if search and not (search in (rn or '').lower() or search in (rp or '').lower()
+                                   or search in (nm or '').lower()):
+                    continue
+                hits.append(pk)
+            qs = qs.filter(id__in=hits)
+
+        if p.get('facets') in ('1', 'true'):
+            # Only the values these rows hold, so no picker offers a choice that
+            # returns nothing — same contract as the investor and payout lists.
+            # Referrers are grouped by phone, which is stable; the name beside
+            # it is free-typed and drifts.
+            referrers, seen = [], set()
+            for rn, rp in qs.values_list('reference_name', 'reference_phone'):
+                # Last ten digits, the same comparison ?reference= makes.
+                # Grouping on all the digits offered the same person twice when
+                # one reward was typed 8866339595 and another +91 88663 39595.
+                key = _digits(rp)[-10:] or (rn or '').strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                referrers.append({'phone': rp or '', 'name': rn or ''})
+            return Response({
+                'statuses': _distinct(qs, 'status'),
+                'scheme_ids': _distinct(qs, 'investor__scheme_id'),
+                'pcts': _distinct(qs, 'pct'),
+                'referrers': sorted(referrers, key=lambda r: (r['name'] or '').lower()),
+            })
         return Response(ReferralRewardSerializer(qs, many=True).data)
 
 
