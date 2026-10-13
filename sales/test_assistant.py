@@ -388,3 +388,21 @@ class BookingStageTests(TestCase):
             q([{'field': 'accounts_status', 'op': 'eq', 'value': 'approved'}])
         out = assistant.run_query(admin, None, {'entity': 'bookings', 'mode': 'count', 'group_by': ['stage']})
         self.assertEqual({g['stage']: g['count'] for g in out['groups']}, {'approved': 1, 'awaiting_accounts': 1, 'awaiting_sales': 1})
+
+
+class PeriodWordTests(TestCase):
+    """'this_month' with gte is still only this month — a future-dated booking does not count."""
+    def test_open_ended_period_is_closed(self):
+        from datetime import timedelta
+        from sales.models import Booking
+        co = Company.objects.create(code='PER', name='Per')
+        p = Project.objects.create(company=co, name='Waghodiya')
+        admin = User.objects.create(name='Boss', email='b@per.com', phone='9920000001', user_code='PE-A', role='Admin', company=co)
+        d = timezone.localdate()
+        Booking.objects.create(company=co, project=p, client_name='Now', status='sold', accounts_status='approved', booking_date=d)
+        Booking.objects.create(company=co, project=p, client_name='Future', status='sold', accounts_status='approved',
+                               booking_date=d + timedelta(days=70))
+        for op in ('gte', 'eq'):
+            out = assistant.run_query(admin, None, {'entity': 'bookings', 'mode': 'count', 'filters': [
+                {'field': 'stage', 'op': 'eq', 'value': 'approved'}, {'field': 'booking_date', 'op': op, 'value': 'this_month'}]})
+            self.assertEqual(out['total'], 1, op)

@@ -283,8 +283,9 @@ def tool_for(ents):
             "times as a question needs (e.g. this month and last month, then compare).\n"
             "Entities [module] and fields:\n" + '\n'.join(lines) + "\n"
             "Fields marked * are encrypted: they can be listed, filtered with eq/contains and summed "
-            "(amounts), but not grouped. Dates accept 'today', 'yesterday', 'this_week', 'this_month', "
-            "'last_month', or YYYY-MM-DD. For Sales entities `book` picks partner-sourced (cp), "
+            "(amounts), but not grouped. Dates: use op 'eq' with a period word — 'today', 'yesterday', "
+            "'this_week', 'this_month', 'last_month', 'this_quarter', 'last_quarter', 'this_fy', 'last_fy' "
+            "(Indian financial year, April–March) — or gte/lte with YYYY-MM-DD for exact ranges. For Sales entities `book` picks partner-sourced (cp), "
             "non-partner (sales) or both (all, the default). Use mode 'count' or 'sum' with group_by for "
             "breakdowns, 'list' for rows."
         ),
@@ -430,6 +431,10 @@ def _scoped(request_user, spec, book, company_id):
     return qs.order_by(), None
 
 
+PERIOD_WORDS = {'today', 'yesterday', 'this_week', 'this_month', 'last_month', 'this_quarter',
+                'last_quarter', 'this_fy', 'last_fy'}
+
+
 def _range(value):
     """A date keyword or YYYY-MM-DD → (start, end) local dates, inclusive."""
     today = timezone.localdate()
@@ -441,11 +446,26 @@ def _range(value):
         return y, y
     if v == 'this_week':
         return today - timedelta(days=today.weekday()), today
-    if v == 'this_month':
-        return today.replace(day=1), today
+    if v == 'this_month':                       # the whole month, as the screens' "1 Month"
+        from calendar import monthrange
+        return today.replace(day=1), today.replace(day=monthrange(today.year, today.month)[1])
     if v == 'last_month':
         end = today.replace(day=1) - timedelta(days=1)
         return end.replace(day=1), end
+    fy = today.year if today.month >= 4 else today.year - 1          # Indian FY: April–March
+    if v in ('this_fy', 'last_fy'):
+        y = fy if v == 'this_fy' else fy - 1
+        return today.replace(year=y, month=4, day=1), today.replace(year=y + 1, month=3, day=31)
+    if v in ('this_quarter', 'last_quarter'):
+        from calendar import monthrange
+        idx = (today.year * 12 + today.month - 1 - 3) // 3          # FY quarters start in April
+        if v == 'last_quarter':
+            idx -= 1
+        first = idx * 3 + 3                                       # months since year 0, 0-based
+        sy, sm = divmod(first, 12)
+        ey, em = divmod(first + 2, 12)
+        return (today.replace(year=sy, month=sm + 1, day=1),
+                today.replace(year=ey, month=em + 1, day=monthrange(ey, em + 1)[1]))
     d = parse_date(v[:10])
     if d is None:
         raise ValueError(f'Not a date: {value!r}')
@@ -469,6 +489,8 @@ def _apply_filters(qs, fields, filters):
         if kind in ('date', 'datetime') and op in ('eq', 'gte', 'lte'):
             start, end = _range(value)
             lk = f'{path}__date' if kind == 'datetime' else path
+            if str(value or '').strip().lower() in PERIOD_WORDS:
+                op = 'eq'          # "this month" is that month — never open-ended into the future
             if op == 'eq':
                 qs = qs.filter(**{f'{lk}__gte': start, f'{lk}__lte': end})
             elif op == 'gte':
@@ -581,6 +603,8 @@ def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT, mask=True):
                 continue
             if kind == 'date':
                 start, end = _range(value)
+                if str(value or '').strip().lower() in PERIOD_WORDS:
+                    op = 'eq'
                 if got is None or (op == 'eq' and not start <= got <= end) or (op == 'gte' and got < start) \
                         or (op == 'lte' and got > end):
                     return False
