@@ -161,6 +161,7 @@ def _entities():
             'remarks': ('remarks', 'enc'),
         }},
         'closures': {'module': SALES_MODULES, 'view': v.ClosureListView, 'date': 'closure_date', 'sales': True,
+                     'note': 'deals recorded by Sales, before Accounts approval — not the final closure count',
                      'fields': {
             'closure_date': ('closure_date', 'date'), 'status': ('status', 'choice'),
             'project': ('project__name', 'text'), 'stm': ('stm__name', 'text'),
@@ -171,7 +172,8 @@ def _entities():
         }},
         'bookings': {'module': SALES_MODULES, 'view': v.BookingListCreateView, 'date': 'booking_date', 'sales': True,
                      'params': {'mine': '1', 'scope': 'visible'},
-                     'note': 'status sold = approved by Sales/CP; accounts_status pending/approved/rejected',
+                     'note': 'THE closures/sales count: status sold AND accounts_status approved = approved by '
+                             'Sales and Accounts; status sold + accounts_status pending = awaiting Accounts',
                      'fields': {
             'booking_date': ('booking_date', 'date'), 'status': ('status', 'choice'),
             'accounts_status': ('accounts_status', 'choice'), 'project': ('project__name', 'text'),
@@ -325,7 +327,13 @@ SYSTEM = (
     "telecaller (TC) calls them and passes interested ones to an STM (sales executive), who books a "
     "site visit; a visit ends Hot/Warm/Cold/Not Interested; a deal becomes a closure and a booking, "
     "which Sales/CP approve (status sold) and then Accounts signs off (accounts_status approved). "
-    "An approved booking becomes an AR account whose instalments are collected. Projects include "
+    "An approved booking becomes an AR account whose instalments are collected.\n"
+    "IMPORTANT — what counts as a closure / sale / booking done: a booking with status 'sold' AND "
+    "accounts_status 'approved' (approved by both Sales and Accounts), dated by booking_date. Always "
+    "answer 'how many closures / bookings / sales' and their value from the bookings entity with those "
+    "two filters. The closures entity holds deals recorded by Sales before Accounts signs off — use it "
+    "only when asked about recorded / pending closures, and say so. If useful, mention how many more "
+    "are still awaiting Accounts approval. Projects include "
     "Pratishtha, Kalrav, Anahata Florenza, Tundav and others.\n\n"
     "Answering:\n"
     "- Query before you answer; for comparisons or 'why' questions run several queries (periods, "
