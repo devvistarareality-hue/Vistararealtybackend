@@ -294,7 +294,11 @@ SYSTEM = (
     "- The data is already limited to what this person may see; if a number looks small, say it "
     "covers their scope. If data looks inconsistent (missing dates, future dates), point it out.\n"
     "- If the question is about a module that is not in the tool (not given to this person, or not "
-    "built yet — Purchase, Land, Accounts Payable), say so plainly."
+    "built yet — Purchase, Land, Accounts Payable), say so plainly.\n"
+    "- When the person asks for a file — Excel, sheet, PDF, report, download — query to understand "
+    "the data, then call make_file once with tables built from queries (not retyped rows), and reply "
+    "in one or two lines. If make_file says they may not download lists, make a summary file instead "
+    "and say why."
 )
 
 
@@ -440,7 +444,7 @@ def _row_value(v, kind):
     return v
 
 
-def _run_rows(rows, fields, args, date_alias):
+def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT):
     """query_records over computed rows (dicts), all in Python."""
     def ok(r):
         for f in args.get('filters') or []:
@@ -480,7 +484,7 @@ def _run_rows(rows, fields, args, date_alias):
     mode = args.get('mode') or 'count'
     if mode == 'list':
         cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
-        limit = max(1, min(LIST_LIMIT, int(args.get('limit') or 25)))
+        limit = max(1, min(list_cap, int(args.get('limit') or 25)))
         order = args.get('order_by') or ('-' + date_alias)
         oalias = order.lstrip('-')
         if oalias in fields:
@@ -527,7 +531,7 @@ def _run_rows(rows, fields, args, date_alias):
     return {'groups': out[:200] if groups else None, 'total': len(rows)}
 
 
-def run_query(user, company_id, args):
+def run_query(user, company_id, args, list_cap=LIST_LIMIT):
     """Execute one query_records call; returns a JSON-able dict for the model."""
     from django.db.models import Count, F
     from django.db.models.functions import TruncDate, TruncMonth, TruncWeek
@@ -540,12 +544,12 @@ def run_query(user, company_id, args):
     mode = args.get('mode') or 'count'
     qs, rows = _scoped(user, spec, args.get('book'), company_id)
     if rows is not None:
-        return _run_rows(rows, fields, args, spec['date'])
+        return _run_rows(rows, fields, args, spec['date'], list_cap)
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
     if mode == 'list':
         cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
-        limit = max(1, min(LIST_LIMIT, int(args.get('limit') or 25)))
+        limit = max(1, min(list_cap, int(args.get('limit') or 25)))
         order = args.get('order_by') or ('-' + spec['date'])
         desc = order.startswith('-')
         oalias = order.lstrip('-')
@@ -655,6 +659,8 @@ def answer(user, company_id, question, history, module='dashboard'):
                   if module == 'cp' else f" They asked from the {where} screen — likely about that module, "
                   "but answer about whichever module the question names." if where else '') + "]\n\n")
     tool = tool_for(available(user))
+    from . import ai_files
+    files = []
     messages = []
     for turn in (history or [])[-6:]:            # earlier questions and answers, as text
         q, a = str(turn.get('q') or '')[:2000], str(turn.get('a') or '')[:4000]
@@ -665,7 +671,7 @@ def answer(user, company_id, question, history, module='dashboard'):
     queries = 0
     for _ in range(MAX_ROUNDS):
         resp = client.messages.create(
-            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool], messages=messages,
+            model=MODEL, max_tokens=16000, system=SYSTEM, tools=[tool, ai_files.TOOL], messages=messages,
             # Reuse the fixed instructions + tool between questions (cheaper input), effort
             # medium, and route a refused request to another model instead of stopping.
             extra_headers={'anthropic-beta': 'server-side-fallback-2026-07-01'},
@@ -678,7 +684,7 @@ def answer(user, company_id, question, history, module='dashboard'):
         usage['cache_read'] += getattr(u, 'cache_read_input_tokens', 0) or 0
         usage['cache_write'] += getattr(u, 'cache_creation_input_tokens', 0) or 0
         if resp.stop_reason == 'refusal':
-            return "I can't help with that one — try asking about your records in Nexora.", usage, queries
+            return "I can't help with that one — try asking about your records in Nexora.", usage, queries, files
         # The assistant turn goes back exactly as it came (append-only).
         content = resp.to_dict()['content']
         messages.append({'role': 'assistant', 'content': content})
@@ -687,11 +693,17 @@ def answer(user, company_id, question, history, module='dashboard'):
             text = '\n'.join(b.get('text', '') for b in content if b.get('type') == 'text').strip()
             if resp.stop_reason == 'max_tokens':
                 text += '\n\n_(The answer was cut short — ask a narrower question.)_'
-            return text or 'I could not work that out — try rephrasing.', usage, queries
+            return text or 'I could not work that out — try rephrasing.', usage, queries, files
         results = []
         for b in calls:
             queries += 1
             try:
+                if b.get('name') == 'make_file':
+                    made = ai_files.make(user, company_id, b.get('input') or {})
+                    files.append(made)
+                    results.append({'type': 'tool_result', 'tool_use_id': b['id'],
+                                    'content': json.dumps({'ready': True, 'name': made['name'], 'rows': made['rows']})})
+                    continue
                 out = run_query(user, company_id, b.get('input') or {})
                 results.append({'type': 'tool_result', 'tool_use_id': b['id'],
                                 'content': json.dumps(out, default=str)[:60000]})
@@ -699,7 +711,7 @@ def answer(user, company_id, question, history, module='dashboard'):
                 results.append({'type': 'tool_result', 'tool_use_id': b['id'],
                                 'content': f'Error: {e}', 'is_error': True})
         messages.append({'role': 'user', 'content': results})
-    return 'That needed more steps than allowed — try a narrower question.', usage, queries
+    return 'That needed more steps than allowed — try a narrower question.', usage, queries, files
 
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────
@@ -723,7 +735,7 @@ def _read(job):
         return None
 
 
-def _log(user, question, state, usage, queries, request_path, module='dashboard'):
+def _log(user, question, state, usage, queries, request_path, module='dashboard', files=()):
     try:
         from activity.models import ActivityLog
         rupees = _cost(usage)
@@ -732,7 +744,8 @@ def _log(user, question, state, usage, queries, request_path, module='dashboard'
             module=LOG_MODULE.get(module, 'Admin'), action='asked', target_type='ai question', target_id='',
             summary=('Asked Nexora AI — %s' % question)[:500],
             details=json.dumps({'question': question[:1000], 'status': state, 'queries': queries,
-                                'tokens': usage, 'approx_cost_inr': rupees, 'model': MODEL}),
+                                'tokens': usage, 'approx_cost_inr': rupees, 'model': MODEL,
+                                'files': [{'name': f['name'], 'rows': f['rows']} for f in files]}),
             method='POST', path=request_path, status_code=200)
     except Exception:
         pass
@@ -773,10 +786,11 @@ class AskView(APIView):
 
         def run():
             try:
-                text, usage, queries = answer(user, company_id, question, history, module)
+                text, usage, queries, files = answer(user, company_id, question, history, module)
                 _write(job, {'owner': user.id, 'status': 'done', 'answer': text,
-                             'approx_cost_inr': _cost(usage)})
-                _log(user, question, 'answered', usage, queries, path, module)
+                             'approx_cost_inr': _cost(usage),
+                             'files': [{'id': f['id'], 'name': f['name'], 'format': f['format']} for f in files]})
+                _log(user, question, 'answered', usage, queries, path, module, files)
             except Exception as e:
                 import anthropic
                 msg = 'Ask Nexora could not answer right now. Try again in a minute.'
@@ -808,4 +822,21 @@ class AskJobView(APIView):
         st = _read(job)
         if not st or st.get('owner') != request.user.id:
             return Response({'detail': 'That question has expired — ask it again.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response({k: st.get(k) for k in ('status', 'answer', 'detail')})
+        return Response({k: st.get(k) for k in ('status', 'answer', 'detail', 'files')})
+
+
+class AskFileView(APIView):
+    """GET → a file Ask Nexora made for this person (Excel or PDF), as a download."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, fid):
+        from django.http import FileResponse
+        from . import ai_files
+        found = ai_files.read(fid, request.user)
+        if not found:
+            return Response({'detail': 'That file has expired — ask Ask Nexora to make it again.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        path, name, mime = found
+        resp = FileResponse(open(path, 'rb'), as_attachment=True, filename=name, content_type=mime)
+        resp['Access-Control-Expose-Headers'] = 'Content-Disposition'
+        return resp

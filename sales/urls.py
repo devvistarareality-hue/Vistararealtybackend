@@ -33,6 +33,7 @@ urlpatterns = [
     # Ask Nexora (AI assistant) — see sales/assistant.py
     path('ai/ask/',                    assistant.AskView.as_view()),
     path('ai/ask/<str:job>/',          assistant.AskJobView.as_view()),
+    path('ai/files/<str:fid>/', assistant.AskFileView.as_view()),
     path('exports/<str:job>/file/',    views.ExportJobView.as_view(), {'file': True}),
     path('closures/',                  views.ClosureListView.as_view()),
     path('closures/<int:pk>/cancel/',  views.ClosureCancelView.as_view()),

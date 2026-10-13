@@ -183,3 +183,70 @@ class OtherModuleTests(TestCase):
         self.assertEqual(out['total'], 3)
         # The AR register hands its computed rows over (an admin has AR).
         self.assertEqual(assistant.run_query(self.admin, None, {'entity': 'ar_accounts', 'mode': 'count'})['total'], 0)
+
+
+@override_settings(AI_INLINE=True)
+class AiFileTests(TestCase):
+    """Ask Nexora makes Excel / PDF files: full query data, the asker's scope, lists
+    only with the Download Excel tick, and only the asker can fetch the file."""
+    def setUp(self):
+        cache.clear()
+        self.co = Company.objects.create(code='AIF', name='Aif Co')
+        self.p = Project.objects.create(company=self.co, name='Kalrav')
+        self.admin = User.objects.create(name='Boss', email='b@aif.com', phone='9500000001', user_code='AF-A',
+                                         role='Admin', company=self.co)
+        self.stm = User.objects.create(name='Stm', email='s@aif.com', phone='9500000002', user_code='AF-S',
+                                       role='Employee', designation='STM', company=self.co, modules=['Sales'],
+                                       can_use_ai=True, reporting_manager=self.admin)
+        for i in range(3):
+            Lead.objects.create(company=self.co, project=self.p, name=f'Shah {i}', phone=f'95000000{i:02d}',
+                                stm=self.stm)
+
+    def test_excel_and_pdf_from_queries(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        from sales import ai_files
+        spec = {'format': 'xlsx', 'title': 'Leads ₹ report', 'summary': 'Three leads.',
+                'tables': [{'heading': 'By project', 'query': {'entity': 'leads', 'mode': 'count', 'group_by': ['project']}},
+                           {'heading': 'All leads', 'query': {'entity': 'leads', 'mode': 'list', 'fields': ['name', 'project']}}]}
+        made = ai_files.make(self.admin, None, spec)
+        path, name, mime = ai_files.read(made['id'], self.admin)
+        self.assertTrue(name.endswith('.xlsx'))
+        with open(path, 'rb') as f:
+            wb = load_workbook(BytesIO(f.read()))
+        self.assertEqual(wb.sheetnames, ['Summary', 'By project', 'All leads'])
+        self.assertEqual(wb['All leads'].max_row, 4)                 # header + 3 leads
+        self.assertIsNone(ai_files.read(made['id'], self.stm))       # not theirs
+        pdf = ai_files.make(self.admin, None, {**spec, 'format': 'pdf'})
+        with open(ai_files.read(pdf['id'], self.admin)[0], 'rb') as f:
+            self.assertTrue(f.read(5).startswith(b'%PDF'))
+
+    def test_lists_need_the_download_tick(self):
+        from sales import ai_files
+        spec = {'format': 'xlsx', 'title': 'x',
+                'tables': [{'heading': 'L', 'query': {'entity': 'leads', 'mode': 'list'}}]}
+        with self.assertRaises(PermissionError):
+            ai_files.make(self.stm, None, spec)
+        summary = {'format': 'xlsx', 'title': 'x',
+                   'tables': [{'heading': 'C', 'query': {'entity': 'leads', 'mode': 'count'}}]}
+        self.assertTrue(ai_files.make(self.stm, None, summary)['id'])
+
+    @mock.patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'test'})
+    def test_file_reaches_the_panel_and_downloads(self):
+        fake = mock.MagicMock()
+        fake.messages.create.side_effect = [
+            _msg([{'type': 'tool_use', 'id': 'f1', 'name': 'make_file', 'input': {
+                'format': 'xlsx', 'title': 'Lead count',
+                'tables': [{'heading': 'Leads', 'query': {'entity': 'leads', 'mode': 'count'}}]}}], 'tool_use'),
+            _msg([{'type': 'text', 'text': 'Your Excel is ready.'}], 'end_turn'),
+        ]
+        c = APIClient(); c.force_authenticate(self.admin)
+        with mock.patch.object(assistant, '_client', return_value=fake):
+            res = c.post('/api/sales/ai/ask/', {'question': 'make an excel of my leads'}, format='json')
+        st = c.get(f"/api/sales/ai/ask/{res.json()['job']}/").json()
+        self.assertEqual(st['status'], 'done', st)
+        self.assertEqual(len(st['files']), 1)
+        dl = c.get(f"/api/sales/ai/files/{st['files'][0]['id']}/")
+        self.assertEqual(dl.status_code, 200)
+        other = APIClient(); other.force_authenticate(self.stm)
+        self.assertEqual(other.get(f"/api/sales/ai/files/{st['files'][0]['id']}/").status_code, 404)

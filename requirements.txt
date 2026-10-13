@@ -14,5 +14,6 @@ cryptography>=42.0
 django-storages==1.14.6
 boto3==1.42.97
 openpyxl==3.1.5
+reportlab>=4.2,<5
 python-dateutil>=2.9
 anthropic>=0.116,<1
