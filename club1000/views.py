@@ -331,6 +331,48 @@ class Club1000UsersView(APIView):
         return Response(data)
 
 
+def _lead_for_investor(investor, actor):
+    """The Club 1000 lead behind an approved investor, found or made.
+
+    An investor added straight from the Add Investor form has no lead, so the
+    funnel showed none of them: 42 investors against 0 converted. Every investor
+    came from someone enquiring, whether or not anybody typed a lead first.
+
+    Matched on phone (phone_key, the blind index — `phone` is encrypted and
+    cannot be looked up directly), within the company. An existing lead is reused
+    and converted rather than duplicated: the same person enquiring and then
+    investing is one lead, and a second row would split their history and
+    double-count the funnel.
+
+    Returns the lead, or None if there is nothing to go on.
+    """
+    if investor.lead_id:
+        return investor.lead
+    key = phone_blind_index(investor.phone)
+    if not key:
+        return None
+    lead = Lead.objects.filter(company=investor.company, phone_key=key).order_by('created_at').first()
+    if lead is None:
+        lead = Lead.objects.create(
+            company=investor.company,
+            name=investor.name,
+            phone=investor.phone,
+            source='other',
+            lead_date=investor.investment_date,
+            scheme_interest=investor.scheme,
+            amount_interested=investor.amount_invested,
+            total_return_pct=investor.total_return_pct,
+            assigned_to=investor.added_by,
+            created_by=actor,
+            status='new',          # flipped to converted by the caller, with history
+            remarks='Created from a direct investor entry.',
+        )
+    # Tie the two together so a later approval or revision finds it again.
+    Investor.objects.filter(pk=investor.pk).update(lead=lead)
+    investor.lead = lead
+    return lead
+
+
 def _distinct(qs, field):
     """Every value `field` takes in `qs`, as strings, blanks left out — what a
     filter picker may offer (?facets=1), so it never lists a choice that
@@ -737,8 +779,55 @@ class PayoutListView(APIView):
             qs = qs.filter(investor__added_by=request.user)
         if ai_capture(request, qs=qs):
             return Response({})
-        if request.query_params.get('status'):
-            qs = qs.filter(status=request.query_params['status'])
+        p = request.query_params
+        if p.get('status'):
+            qs = qs.filter(status=p['status'])
+        if p.get('payout_type'):
+            qs = qs.filter(payout_type=p['payout_type'])
+        if p.get('scheme_id'):
+            qs = qs.filter(investor__scheme_id=p['scheme_id'])
+        if p.get('investor'):
+            qs = qs.filter(investor_id=p['investor'])
+        # Dated by due date — the only date this ledger is read by. A paid row's
+        # paid_date is on the row for reference, not something to filter a
+        # "what's owed in March" question by.
+        d_from = _parse_date(p.get('date_from'))
+        d_to = _parse_date(p.get('date_to'))
+        if d_from:
+            qs = qs.filter(due_date__gte=d_from)
+        if d_to:
+            qs = qs.filter(due_date__lte=d_to)
+        # The two questions this screen actually exists to answer, neither of
+        # which any stored column holds: what has slipped, and what lands next.
+        # Both mean pending — a payout already made is not late, however old.
+        bucket = p.get('bucket')
+        today = date.today()
+        if bucket == 'overdue':
+            qs = qs.filter(status='pending', due_date__lt=today)
+        elif bucket == 'due_soon':
+            qs = qs.filter(status='pending', due_date__gte=today,
+                           due_date__lte=today + timedelta(days=30))
+        if p.get('facets') in ('1', 'true'):
+            # Only the values these rows hold, so no filter can empty the list
+            # for no reason — same contract as the investor list's ?facets=1.
+            return Response({
+                'statuses': _distinct(qs, 'status'),
+                'types': _distinct(qs, 'payout_type'),
+                'scheme_ids': _distinct(qs, 'investor__scheme_id'),
+            })
+        search = p.get('search', '').strip()
+        if search:
+            # investor name/phone are encrypted, so SQL cannot match them —
+            # a full ten-digit number goes through the blind index, anything
+            # else is matched in Python over the already-scoped rows.
+            digits = ''.join(c for c in search if c.isdigit())
+            if len(digits) >= 10 and not any(c.isalpha() for c in search):
+                qs = qs.filter(investor__phone_key=phone_blind_index(digits))
+            else:
+                needle = search.lower()
+                hits = [pk for pk, nm, ph in qs.values_list('id', 'investor__name', 'investor__phone')
+                        if needle in (nm or '').lower() or needle in (ph or '').lower()]
+                qs = qs.filter(id__in=hits)
         return Response(PayoutSerializer(qs, many=True).data)
 
 
@@ -1291,12 +1380,16 @@ class InvestorActionView(APIView):
                 investor.status = 'active'
                 investor.save(update_fields=['approval_status', 'status', 'updated_at'])
                 # Now — and only now — run the three deferred side effects.
-                if investor.lead_id:
-                    old_lead_status = investor.lead.status
-                    Lead.objects.filter(pk=investor.lead_id).update(status='converted', next_follow_up_date=None)
+                # An investor added directly has no lead; one is found by phone
+                # or made here, so every approved investment sits in the funnel
+                # it actually came through.
+                lead = _lead_for_investor(investor, request.user)
+                if lead is not None:
+                    old_lead_status = lead.status
+                    Lead.objects.filter(pk=lead.pk).update(status='converted', next_follow_up_date=None)
                     if old_lead_status != 'converted':
                         LeadStatusHistory.objects.create(
-                            lead_id=investor.lead_id, changed_by=request.user,
+                            lead_id=lead.pk, changed_by=request.user,
                             field_changed='status', old_value=old_lead_status, new_value='converted',
                             remarks='Converted via Investor approval',
                         )
