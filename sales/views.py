@@ -2015,6 +2015,17 @@ class LeadListView(APIView):
         # kicks in when nothing above already narrowed by a specific status value
         # (that path already date-filters correctly on its own terms).
         work = request.query_params.get('work')
+        # Date basis "called": the date range means "first called in this range" (any
+        # role) — the dashboard's Called / MQL tile, so admins and managers can open
+        # the same list. The worker's status field, as StatsView counts it.
+        if request.query_params.get('date_basis') == 'called' and (date_from_param or date_to_param) \
+                and not skip_created_at_filter:
+            _f = 'stm_status' if (is_stm(request.user) or is_cp(request.user)) else 'telecaller_status'
+            if not (is_stm(request.user) or is_cp(request.user)) and (request.query_params.get('stm_id')
+                                                                       and not request.query_params.get('telecaller_id')):
+                _f = 'stm_status'           # an STM picked on its own: their calls
+            qs = qs.filter(id__in=_leads_worked_in_range(qs, _f, '', date_from_param, date_to_param))
+            skip_created_at_filter = True
         if work == 'called' and (date_from_param or date_to_param) and not skip_created_at_filter:
             if is_telecaller(request.user):
                 ids = _leads_worked_in_range(qs, 'telecaller_status', '', date_from_param, date_to_param)
