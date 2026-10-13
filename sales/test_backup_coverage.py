@@ -26,6 +26,7 @@ EXCLUDED = {
     'accounts.OtpCode':     'short-lived login codes: a liability in a downloaded file, no value in a backup',
     'sales.BackupStamp':    'proof a backup was taken, used to gate a reset — about the backup, not in it',
     'sales.BackupSchedule': 'when to take a backup — configuration of the backup, not data in it',
+    'sales.MetaCapiEvent':  'a delivery log of lead stages already sent to Meta — restoring it would only stop them being resent',
 }
 
 

@@ -495,6 +495,9 @@ class Lead(models.Model):
     # The Meta Lead Ads form this lead came from — drives form→project routing and
     # lets a later mapping retroactively backfill the project.
     meta_form_id       = models.CharField(max_length=100, blank=True, db_index=True)
+    # Meta's own id for this form lead (leadgen_id). Sent back with every stage change
+    # (sales/meta_capi.py) so Meta knows which of its leads turned into a site visit.
+    meta_leadgen_id    = models.CharField(max_length=40, blank=True, db_index=True)
 
     # Overall status
     status = models.CharField(max_length=30, choices=LEAD_STATUS, default='new')
@@ -984,6 +987,12 @@ class MetaWebhookConfig(models.Model):
     subscribed_pages = models.JSONField(default=list, blank=True)
     pages_data = models.JSONField(default=list, blank=True)  # [{page_id, page_name, forms:[{id,name}]}]
     pages_refreshed_at = models.DateTimeField(null=True, blank=True)
+    # Conversions API (sales/meta_capi.py): the CRM dataset that lead stages are sent
+    # to, and its access token (encrypted). Off until switched on in Lead Setup.
+    capi_dataset_id = models.CharField(max_length=40, blank=True)
+    capi_token = EncryptedTextField(blank=True)
+    capi_enabled = models.BooleanField(default=False)
+    capi_test_code = models.CharField(max_length=40, blank=True)  # Events Manager → Test events
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1099,3 +1108,27 @@ class BackupSchedule(models.Model):
 
     def __str__(self):
         return f'{self.company_id}: {self.frequency} ({"on" if self.is_enabled else "off"})'
+
+
+
+class MetaCapiEvent(models.Model):
+    """One lead stage sent (or to be sent) to Meta's Conversions API. One per lead and
+    stage, so a stage is never reported twice; the reply is kept to show in Lead Setup."""
+    STATUS = [('pending', 'Pending'), ('sent', 'Sent'), ('failed', 'Failed'), ('skipped', 'Skipped')]
+    company = models.ForeignKey('companies.Company', on_delete=models.CASCADE, related_name='+')
+    lead = models.ForeignKey(Lead, on_delete=models.CASCADE, related_name='capi_events')
+    event_name = models.CharField(max_length=40)
+    event_time = models.DateTimeField()
+    status = models.CharField(max_length=10, choices=STATUS, default='pending')
+    attempts = models.PositiveSmallIntegerField(default=0)
+    reply = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['lead', 'event_name'], name='uniq_capi_event_per_lead')]
+        indexes = [models.Index(fields=['company', 'status'])]
+
+
+from . import meta_capi as _meta_capi  # noqa: E402  (connects the stage signals)
+_meta_capi.connect()

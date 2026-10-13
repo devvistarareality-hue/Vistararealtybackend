@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import hmac
@@ -16,6 +17,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from . import meta_capi
 
 logger = logging.getLogger(__name__)
 
@@ -8702,7 +8704,7 @@ def _record_meta_reenquiry(lead, email='', campaign_name='', adset_name='', ad_n
                {'lead_id': lead.id})
 
 
-def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', ad_name='', form_id=''):
+def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', ad_name='', form_id='', leadgen_id=''):
     """Parse Meta field_data list and create a Lead."""
     fields = {f['name']: f['values'][0] for f in field_data if f.get('values') and f.get('name')}
     name  = fields.get('full_name') or fields.get('name') or (fields.get('first_name', '') + ' ' + fields.get('last_name', '')).strip()
@@ -8772,6 +8774,7 @@ def _create_lead_from_meta(field_data, config, campaign_name='', adset_name='', 
         meta_adset_name=adset_name[:200] if adset_name else '',
         meta_ad_name=ad_name[:200] if ad_name else '',
         meta_form_id=str(form_id or '')[:100],
+        meta_leadgen_id=str(leadgen_id or '')[:40],
         status='new',
         is_duplicate=bool(existing),
         duplicate_of=existing if existing else None,
@@ -8863,7 +8866,8 @@ class MetaWebhookView(APIView):
                                 form_id = str(meta_data.get('form_id') or form_id or '')
                                 if ad_id and not campaign and not adset:
                                     campaign, adset = _fetch_ad_campaign_info(ad_id, config.page_access_token)
-                                _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id)
+                                _create_lead_from_meta(meta_data['field_data'], config, campaign, adset, ad, form_id,
+                                                       leadgen_id)
         except Exception:
             logger.exception('Meta webhook: unhandled error processing payload')
         return Response({'ok': True})
@@ -8954,6 +8958,12 @@ class MetaWebhookConfigView(APIView):
             'pages_data':           config.pages_data or [],
             'form_lead_counts':     form_lead_counts,
             'projects':             projects,
+            # Conversions API: lead stages sent back to Meta (sales/meta_capi.py).
+            'capi_dataset_id':      config.capi_dataset_id,
+            'capi_token_set':       bool(config.capi_token),
+            'capi_enabled':         config.capi_enabled,
+            'capi_test_code':       config.capi_test_code,
+            'capi':                 meta_capi.summary(config.company_id),
         })
 
     def post(self, request):
@@ -8983,6 +8993,39 @@ class MetaWebhookConfigView(APIView):
             else:
                 debug['accounts_error'] = pages_r.json()
             return Response(debug)
+        if action == 'save_capi':
+            # Only overwrite the token when one is typed, so saving the switch or the
+            # dataset id never wipes a token already stored.
+            ds = ''.join(c for c in str(request.data.get('capi_dataset_id', '') or '') if c.isdigit())[:40]
+            tok = str(request.data.get('capi_token', '') or '').strip()
+            config.capi_dataset_id = ds
+            if tok:
+                config.capi_token = tok
+            config.capi_test_code = str(request.data.get('capi_test_code', '') or '').strip()[:40]
+            config.capi_enabled = bool(request.data.get('capi_enabled')) and bool(ds and config.capi_token)
+            config.save(update_fields=['capi_dataset_id', 'capi_token', 'capi_enabled', 'capi_test_code'])
+            meta_capi.clear_cache(config.company_id)
+            from activity.recorder import note
+            note(request, 'Meta Conversions API %s (dataset %s)' % ('switched on' if config.capi_enabled else 'saved, off', ds),
+                 action='updated', target_type='meta setup', target_id=config.pk)
+            return Response({'capi_dataset_id': config.capi_dataset_id, 'capi_token_set': bool(config.capi_token),
+                             'capi_enabled': config.capi_enabled, 'capi_test_code': config.capi_test_code})
+        if action == 'capi_test':
+            # One test event for the latest Meta lead, shown under Events Manager →
+            # Test events when a test code is set. Not recorded as that lead's stage.
+            if not (config.capi_dataset_id and config.capi_token):
+                return Response({'detail': 'Add the dataset ID and access token first.'}, status=400)
+            lead = scope_to_company(Lead.objects.exclude(meta_form_id=''), request.user).order_by('-id').first()
+            if not lead:
+                return Response({'detail': 'No Meta lead yet to test with.'}, status=400)
+            ok, reply = meta_capi.post(config, meta_capi.payload(lead, 'Lead_Received', timezone.now(),
+                                                                 config.capi_test_code))
+            try:
+                err = json.loads(reply).get('error', {}).get('message', '')
+            except ValueError:
+                err = reply[:300]
+            return Response({'ok': ok, 'detail': 'Meta accepted the test event.' if ok else (err or 'Meta refused it.')},
+                            status=200 if ok else 400)
         if action == 'regenerate_token':
             config.verify_token = secrets.token_urlsafe(32)
             config.save(update_fields=['verify_token'])
