@@ -32,7 +32,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-GRAPH = 'https://graph.facebook.com/v19.0'
+GRAPH = 'https://graph.facebook.com/v26.0'  # Meta's CRM guide: latest API version
 EVENTS = ('Lead_Received', 'Qualified', 'Site_Visit_Scheduled', 'Site_Visit_Done', 'Booked', 'Disqualified')
 DISQUALIFIED = ('not_qualified', 'not_interested')
 MAX_ATTEMPTS = 5
