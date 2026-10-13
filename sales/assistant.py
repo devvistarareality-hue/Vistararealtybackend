@@ -347,6 +347,13 @@ SYSTEM = (
     "- Only list client names or phone numbers when the person asks for a list of records.\n"
     "- The data is already limited to what this person may see; if a number looks small, say it "
     "covers their scope. If data looks inconsistent (missing dates, future dates), point it out.\n"
+    "- Privacy, if asked who processes the data: Ask Nexora runs on Claude (model Claude Sonnet 5.5) by "
+    "Anthropic, through Anthropic's business API. Only the question, the chat so far and the query results "
+    "needed for the answer are sent — never passwords or the whole database. Under Anthropic's commercial "
+    "terms API data is not used to train their models by default and is kept only for a limited period "
+    "(see Anthropic's Commercial Terms and Privacy Policy). Phone numbers reach you masked (98XXXXX210); "
+    "Excel / PDF files are built inside Nexora with the full numbers, so offer a file for a call list. "
+    "Chats are stored encrypted in Nexora, visible only to the person who asked.\n"
     "- If the question is about a module that is not in the tool (not given to this person, or not "
     "built yet — Purchase, Land, Accounts Payable), say so plainly.\n"
     "- When the person asks for a file — Excel, sheet, PDF, report, download — query to understand "
@@ -494,6 +501,26 @@ def _passes(row, checks):
     return True
 
 
+def _mask_phone(v):
+    """98XXXXX210 — what the model sees of a phone number (files keep the real one)."""
+    d = ''.join(c for c in str(v or '') if c.isdigit())
+    if len(d) < 6:
+        return 'XXXX' if d else ''
+    d = d[-10:]
+    return d[:2] + 'X' * (len(d) - 5) + d[-3:]
+
+
+def _masked(rows, cols, mask):
+    if not mask:
+        return rows
+    ph = [c for c in cols if 'phone' in c]
+    for r in rows:
+        for c in ph:
+            if r.get(c):
+                r[c] = _mask_phone(r[c])
+    return rows
+
+
 def _fmt(value, kind):
     if value is None:
         return ''
@@ -519,7 +546,7 @@ def _row_value(v, kind):
     return v
 
 
-def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT):
+def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT, mask=True):
     """query_records over computed rows (dicts), all in Python."""
     def ok(r):
         for f in args.get('filters') or []:
@@ -567,7 +594,7 @@ def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT):
             rows = sorted(rows, key=lambda r: (_row_value(r.get(key), kind) is None,
                                                _row_value(r.get(key), kind) or 0 if kind in ('number', 'money')
                                                else str(r.get(key) or '')), reverse=order.startswith('-'))
-        return {'rows': [{c: r.get(fields[c][0]) for c in cols} for r in rows[:limit]],
+        return {'rows': _masked([{c: r.get(fields[c][0]) for c in cols} for r in rows[:limit]], cols, mask),
                 'shown': min(limit, len(rows)), 'total_matching': len(rows)}
     groups = args.get('group_by') or []
 
@@ -606,7 +633,7 @@ def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT):
     return {'groups': out[:200] if groups else None, 'total': len(rows)}
 
 
-def run_query(user, company_id, args, list_cap=LIST_LIMIT):
+def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     """Execute one query_records call; returns a JSON-able dict for the model."""
     from django.db.models import Count, F
     from django.db.models.functions import TruncDate, TruncMonth, TruncWeek
@@ -619,7 +646,7 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT):
     mode = args.get('mode') or 'count'
     qs, rows = _scoped(user, spec, args.get('book'), company_id)
     if rows is not None:
-        return _run_rows(rows, fields, args, spec['date'], list_cap)
+        return _run_rows(rows, fields, args, spec['date'], list_cap, mask)
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
     if mode == 'list':
@@ -638,7 +665,7 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT):
             rows.append({c: _fmt(r.get(fields[c][0]), fields[c][1]) for c in cols})
             if len(rows) >= limit:
                 break
-        return {'rows': rows, 'shown': len(rows),
+        return {'rows': _masked(rows, cols, mask), 'shown': len(rows),
                 'total_matching': None if checks else qs.count()}
 
     groups = args.get('group_by') or []

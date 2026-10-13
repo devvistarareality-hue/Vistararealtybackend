@@ -109,7 +109,7 @@ def build_tables(user, company_id, spec, fmt):
                     raise PermissionError('This person may not download record lists (no Download Excel tick in '
                                           'User Management). Offer a summary file with counts and totals instead.')
                 args['limit'] = cap
-            out = run_query(user, company_id, args, list_cap=cap)
+            out = run_query(user, company_id, args, list_cap=cap, mask=False)   # files keep real numbers
             cols, rows = _table_from_result(out, args)
         else:
             cols = [str(c) for c in (t.get('columns') or [])][:30]

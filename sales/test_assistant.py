@@ -351,3 +351,20 @@ class AvailabilityTests(TestCase):
         self.assertEqual(out['rows'], [{'name': 'Kavya', 'late_minutes': 45}])
         mine = assistant.run_query(stm, None, {'entity': 'availability', 'mode': 'count'})
         self.assertEqual(mine['total'], 1)          # only their own day
+
+
+class PhoneMaskTests(TestCase):
+    """The model sees masked phone numbers; a file built in Nexora keeps the real ones."""
+    def test_masked_for_model_full_in_file(self):
+        co = Company.objects.create(code='MSK', name='Msk')
+        p = Project.objects.create(company=co, name='Kalrav')
+        admin = User.objects.create(name='Boss', email='b@msk.com', phone='9900000001', user_code='MS-A', role='Admin', company=co)
+        Lead.objects.create(company=co, project=p, name='Asha', phone='9876543210')
+        out = assistant.run_query(admin, None, {'entity': 'leads', 'mode': 'list', 'fields': ['name', 'phone']})
+        self.assertEqual(out['rows'][0]['phone'], '98XXXXX210')
+        full = assistant.run_query(admin, None, {'entity': 'leads', 'mode': 'list', 'fields': ['phone']}, mask=False)
+        self.assertIn('9876543210', full['rows'][0]['phone'])
+        # filtering by the real number still works server-side
+        hit = assistant.run_query(admin, None, {'entity': 'leads', 'mode': 'count',
+                                                'filters': [{'field': 'phone', 'op': 'contains', 'value': '9876543210'}]})
+        self.assertEqual(hit['total'], 1)
