@@ -111,6 +111,46 @@ class InvestorBucketTests(TestCase):
         tile = self._tile('upcoming')['upcoming_maturities_count']
         self.assertEqual(tile, len(self._names('?bucket=maturing_soon')))
 
+    # ------------------------------------- the filters the dashboard implies
+
+    def test_the_investment_date_range_narrows_the_list(self):
+        """The dashboard narrows its figures by investment_date and the list
+        could not, so a tile's total had no list that matched it."""
+        today = date.today()
+        old = today - timedelta(days=500)
+        self.assertEqual(
+            self._names(f'?date_from={old.isoformat()}&date_to={old.isoformat()}'), set())
+        # Everything here was invested 400 days ago.
+        invested = (today - timedelta(days=400)).isoformat()
+        self.assertEqual(len(self._names(f'?date_from={invested}&date_to={invested}')), 5)
+
+    def test_payout_narrows_the_list(self):
+        # name is encrypted — filter(name=…) would match nothing and update()
+        # would touch no rows, silently. Update by primary key.
+        Investor.objects.filter(pk=self.overdue.pk).update(interest_payout='quarterly')
+        self.assertEqual(self._names('?interest_payout=quarterly'), {'Overdue One'})
+
+    def test_added_by_narrows_the_list(self):
+        other = User.objects.create_user(
+            'other@bkt.com', company=self.co, user_code='BKT002', password='p',
+            name='Someone Else', role='Employee', modules=['Club 1000'])
+        Investor.objects.filter(pk=self.far.pk).update(added_by=other)
+        self.assertEqual(self._names(f'?added_by={other.id}'), {'Far Off'})
+
+    def test_the_filters_combine(self):
+        # A bucket and a payout together, as the screen sends them.
+        Investor.objects.filter(pk=self.overdue.pk).update(interest_payout='quarterly')
+        self.assertEqual(
+            self._names('?bucket=due_for_renewal&interest_payout=quarterly'), {'Overdue One'})
+
+    def test_the_pickers_offer_only_values_that_are_there(self):
+        # Otherwise a filter can be chosen that empties the list for no reason.
+        r = self.api.get('/api/club1000/investors/?facets=1')
+        self.assertEqual(r.status_code, 200)
+        f = r.json()
+        self.assertEqual(f['payouts'], ['maturity'])
+        self.assertEqual([a['name'] for a in f['added_by']], ['Club Admin'])
+
     # ------------------------------------------------------------------- general
 
     def test_no_bucket_still_lists_everything(self):

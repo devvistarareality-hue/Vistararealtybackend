@@ -390,7 +390,15 @@ class InvestorListCreateView(APIView):
                 pool = pool.filter(approval_status=approval)
             elif not approval:
                 pool = pool.exclude(approval_status__in=('rejected', 'draft'))
-            return Response({'scheme_ids': _distinct(pool, 'scheme_id'), 'statuses': _distinct(pool, 'status')})
+            added = [{'id': str(u['added_by_id']), 'name': u['added_by__name'] or '—'}
+                     for u in pool.exclude(added_by__isnull=True)
+                     .order_by().values('added_by_id', 'added_by__name').distinct()]
+            return Response({
+                'scheme_ids': _distinct(pool, 'scheme_id'),
+                'statuses': _distinct(pool, 'status'),
+                'payouts': _distinct(pool, 'interest_payout'),
+                'added_by': sorted(added, key=lambda a: a['name']),
+            })
         if request.query_params.get('scheme_id'):
             qs = qs.filter(scheme_id=request.query_params['scheme_id'])
         if request.query_params.get('status'):
@@ -401,6 +409,20 @@ class InvestorListCreateView(APIView):
         # 'Maturing in 30 days' is a window on the date. Both are the same
         # conditions the dashboard counts with — kept together so a tile and the
         # list it opens cannot disagree about what it was counting.
+        # The dashboard filters its figures by investment date and by who added
+        # them (its Mine / Employee / Manager toggle). The list could do neither,
+        # so a tile's number had no list that matched it. Same fields, same
+        # meaning — investment_date, as the dashboard uses.
+        d_from = _parse_date(request.query_params.get('date_from'))
+        d_to = _parse_date(request.query_params.get('date_to'))
+        if d_from:
+            qs = qs.filter(investment_date__gte=d_from)
+        if d_to:
+            qs = qs.filter(investment_date__lte=d_to)
+        if request.query_params.get('added_by'):
+            qs = qs.filter(added_by_id=request.query_params['added_by'])
+        if request.query_params.get('interest_payout'):
+            qs = qs.filter(interest_payout=request.query_params['interest_payout'])
         bucket = request.query_params.get('bucket')
         if bucket == 'due_for_renewal':
             qs = qs.filter(status='active', maturity_date__isnull=False,

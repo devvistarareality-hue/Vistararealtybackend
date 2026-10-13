@@ -28,4 +28,8 @@ class Club1000FacetsTests(APITestCase):
 
         res = self.client.get('/api/club1000/investors/?facets=1')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json(), {'scheme_ids': [], 'statuses': []})
+        # Payout and added-by joined the pickers when the Investors page gained
+        # the dashboard's own filters; with no investors every list is empty,
+        # which is the property this asserts.
+        self.assertEqual(res.json(), {'scheme_ids': [], 'statuses': [],
+                                      'payouts': [], 'added_by': []})
