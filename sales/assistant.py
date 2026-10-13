@@ -348,10 +348,10 @@ SYSTEM = (
     "which Sales/CP approve and then Accounts signs off (bookings stage: awaiting_sales → "
     "awaiting_accounts → approved). "
     "An approved booking becomes an AR account whose instalments are collected.\n"
-    "Status questions about WORK DONE ('marked warm today', 'how many did each telecaller qualify this "
-    "week') use the status_changes entity (field telecaller_status or stm_status, to, changed = the day), "
-    "exactly like the Leads screen's status + date filter. leads.received is when a lead ARRIVED — use it "
-    "only for 'leads received'.\n"
+    "Lead counts by status and day ('warm leads today', 'not qualified this week', by telecaller / "
+    "STM / project): ALWAYS the leads entity with tc_status or stm_status eq X and received eq the "
+    "period — Nexora applies the Leads screen's own rules to that, so the number is the screen's. Use "
+    "status_changes only when asked about the changes themselves (who changed what, how many changes).\n"
     "Sales vs Channel Partner: the Sales screens count the Sales book only. Unless the person is in "
     "the Sales or CP module (see the note in their message), give the total and say how much of it "
     "came through Channel Partners (run the query with book 'sales' and 'cp').\n"
@@ -421,7 +421,30 @@ def _book_for(user, book):
     return book if book in ('sales', 'cp', 'all') else 'all'
 
 
-def _scoped(request_user, spec, book, company_id):
+def _screen_params(entity, filters):
+    """Filters the Leads screen applies itself, handed to it as its own query params so
+    the answer is exactly the screen's number (it has its own rules: a status + date
+    filter means 'changed to that status in the period' for some statuses and
+    'received in the period' for others). Returns (params, remaining filters)."""
+    if entity != 'leads':
+        return {}, filters
+    params, rest = {}, []
+    for f in filters or []:
+        field, op, value = f.get('field'), f.get('op'), f.get('value')
+        if field in ('tc_status', 'stm_status') and op == 'eq' and value:
+            params['telecaller_status' if field == 'tc_status' else 'stm_status'] = str(value)
+        elif field == 'received' and op in ('eq', 'gte', 'lte') and value:
+            start, end = _range(value)
+            if op in ('eq', 'gte'):
+                params['date_from'] = start.isoformat()
+            if op in ('eq', 'lte') or str(value).strip().lower() in PERIOD_WORDS:
+                params['date_to'] = end.isoformat()
+        else:
+            rest.append(f)
+    return params, rest
+
+
+def _scoped(request_user, spec, book, company_id, extra=None):
     """The entity's queryset (or rows) exactly as the asker's list screen would scope it."""
     if spec.get('own'):
         return spec['own'](request_user), None
@@ -429,6 +452,7 @@ def _scoped(request_user, spec, book, company_id):
         return None, spec['rows_fn'](request_user, company_id)
     from rest_framework.test import APIRequestFactory, force_authenticate
     params = dict(spec.get('params', {}))
+    params.update(extra or {})
     if spec.get('sales'):
         params['book'] = _book_for(request_user, book)
         # The lists read the book from `book`; Bookings reads the same split from the
@@ -715,7 +739,10 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     spec = ents[entity]
     fields = spec['fields']
     mode = args.get('mode') or 'count'
-    qs, rows = _scoped(user, spec, args.get('book'), company_id)
+    screen, rest = _screen_params(entity, args.get('filters'))
+    if screen:
+        args = {**args, 'filters': rest}
+    qs, rows = _scoped(user, spec, args.get('book'), company_id, screen)
     if rows is not None:
         return _run_rows(rows, fields, args, spec['date'], list_cap, mask)
     if 'stage' in fields and not any(f.get('field') == 'stage' and 'draft' in str(f.get('value')).lower()
