@@ -1714,3 +1714,21 @@ class KalravPlcTests(APITestCase):
         self.assertEqual(self.client.get(f'/api/sales/projects/{proj.id}/').json()['rate_master']['plc_corner_price'], 200000)
         self.assertIn('plc_corner', BookingSerializer().fields)
         self.assertIn('plc_clubhouse', BookingSerializer().fields)
+
+
+class DirectorSeesWholeCompanyTests(APITestCase):
+    """A Director keeps whole-company visibility (bookings included) even when they
+    report to someone — e.g. a CMO placed under the MD in the org chart."""
+
+    def test_director_under_md_still_sees_all(self):
+        from .views import _sees_all_company
+        co = Company.objects.create(name='Dir Co')
+        md = User.objects.create(email='md@x.com', company=co, role='Director', user_code='MD1')
+        cmo = User.objects.create(email='cmo@x.com', company=co, role='Director', user_code='CM1',
+                                  reporting_manager=md)
+        mgr = User.objects.create(email='m@x.com', company=co, role='Manager', user_code='MG1',
+                                  reporting_manager=md)
+        self.assertTrue(_sees_all_company(cmo, include_manager_role=False))
+        self.assertTrue(_sees_all_company(md, include_manager_role=False))
+        # A Manager under someone stays scoped for bookings, as before.
+        self.assertFalse(_sees_all_company(mgr, include_manager_role=False))

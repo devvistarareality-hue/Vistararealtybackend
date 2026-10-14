@@ -283,6 +283,11 @@ def _sees_all_company(user, request=None, include_manager_role=True):
     — they already return True unconditionally below."""
     if is_platform_admin(user) or user.is_staff or getattr(user, 'role', '') == 'Admin':
         return True
+    # A Director sees the whole company whoever they report to, so the department
+    # heads (CMO, CFO, CAO) can sit under the MD in the org chart without losing
+    # the whole-company bookings they had as the top of the tree.
+    if getattr(user, 'role', '') == 'Director':
+        return True
     if include_manager_role and is_manager_role(user):
         return True
     if (request is not None and request.query_params.get('admin_view') == '1'
