@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand
 from sales.models import Booking, Closure
 
 BOOKING_FIELDS = [
-    'land_rate', 'dev_rate', 'const_rate', 'sale_deed_rate', 'dev_agreement_rate', 'maint_rate',
+    'land_rate', 'dev_rate', 'const_rate', 'sale_deed_rate', 'dev_agreement_rate', 'lsd_rate', 'const_agreement_rate', 'maint_rate',
     'plot_basic', 'plot_dev', 'const_amt', 'sale_deed', 'dev_agreement', 'land_sale_deed',
     'const_agreement', 'stamp_duty', 'reg_fees', 'gst', 'maintenance', 'maint_deposit',
     'maint_advance', 'legal_charges', 'premium_location', 'total_extra', 'discount',

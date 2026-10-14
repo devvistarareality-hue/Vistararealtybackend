@@ -7382,6 +7382,8 @@ BOOKING_EXPORT_COLUMNS = [
     ('Construction Rate',        'const_rate',          'num'),
     ('Sale Deed Rate',           'sale_deed_rate',      'num'),
     ('Dev Agreement Rate',       'dev_agreement_rate',  'num'),
+    ('Land Sale Deed Rate',      'lsd_rate',            'num'),
+    ('Construction Agreement Rate', 'const_agreement_rate', 'num'),
     ('Sale Deed %',              'sale_deed_pct',       'num'),
     ('Maintenance Rate',         'maint_rate',          'num'),
     ('Maintenance Months',       'maint_months',        'num'),
@@ -7587,6 +7589,7 @@ class BookingExportView(APIView):
             'villa_type': b.villa_type or b.bunglow_type or '',
             'land_rate': b.land_rate, 'dev_rate': b.dev_rate, 'const_rate': b.const_rate,
             'sale_deed_rate': b.sale_deed_rate, 'dev_agreement_rate': b.dev_agreement_rate,
+            'lsd_rate': b.lsd_rate, 'const_agreement_rate': b.const_agreement_rate,
             'sale_deed_pct': b.sale_deed_pct, 'maint_rate': b.maint_rate, 'maint_months': b.maint_months,
             'plot_basic': b.plot_basic, 'plot_dev': b.plot_dev, 'const_amt': b.const_amt,
             'sale_deed': b.sale_deed, 'sale_deed_amount': b.sale_deed_amount,
@@ -7672,7 +7675,7 @@ class BookingExportView(APIView):
         from openpyxl.utils import get_column_letter
         MONEY = '#,##0.00'
         headings = ['Project', 'Unit', 'Client', 'Schedule', 'No.', 'Due Date',
-                    'Percent', 'Amount', 'Description']
+                    'Percent', 'Amount', 'Stage', 'Description']
         lines = []
         for r in rows:
             for label, items in (('Unit Price', r['_installments']),
@@ -7684,6 +7687,7 @@ class BookingExportView(APIView):
                         r['project_name'], r['unit'], r['client_name'], label,
                         i.get('no') or '', i.get('date') or '',
                         _as_float(i.get('pct')), _as_float(i.get('amt')),
+                        str(i.get('stage') or ''),
                         str(i.get('desc') or i.get('title') or ''),
                     ])
         if not lines:

@@ -694,6 +694,12 @@ class Booking(models.Model):
     plc_rate           = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     sale_deed_rate     = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     dev_agreement_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    # Kalrav: the Land Sale Deed and Construction Agreement as rates — LSD = rate ×
+    # Plot Area, Construction Agreement = rate × Construction Area. The amounts stay
+    # the source of truth (land_sale_deed / const_agreement); these are what the form
+    # shows beside them, either one typed and the other worked out.
+    lsd_rate             = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    const_agreement_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     # Ankhol sale-deed percentage (editable per booking; defaults to 60%).
     sale_deed_pct      = models.DecimalField(max_digits=5, decimal_places=2, default=60)
     # Exact Unit Price override (Ankhol): when set (>0), used verbatim as the sale deed
