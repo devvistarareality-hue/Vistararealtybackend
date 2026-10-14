@@ -1821,29 +1821,35 @@ def booking_stage_of(b):
 
 
 def _leads_with_closed_stage(leads_qs, stage):
-    """Lead ids (closed leads in `leads_qs`) whose latest booking is at `stage`."""
+    """Lead ids (closed leads in `leads_qs`) whose bookings put them at `stage`."""
     ids = list(leads_qs.filter(Q(status='closed') | Q(stm_status='closed')).values_list('id', flat=True)[:50000])
-    seen, out = set(), []
-    for b in (Booking.objects.filter(lead_id__in=ids).exclude(status='draft').order_by('lead_id', '-id')
-              .values('lead_id', 'status', 'accounts_status', 'approval_status')):
-        if b['lead_id'] in seen:
-            continue
-        seen.add(b['lead_id'])
-        if booking_stage_of(b) == stage:
-            out.append(b['lead_id'])
-    return out
+    return [lid for lid, st in _stage_map(ids).items() if st == stage]
+
+
+def _lead_stage(stages):
+    """One stage for a lead from all its bookings: a lead who bought several units, or
+    whose booking was revised, is Booked if any of them stands approved."""
+    for st in ('booked', 'booking_pending', 'booking_rejected', 'booking_cancelled'):
+        if st in stages:
+            return st
+    return None
+
+
+def _stage_map(lead_ids):
+    """Each deal counted once, at its CURRENT version — the same superseded-revision rule
+    as the Approvals and Bookings screens — so a revised deal's old approved copy does
+    not make a lead look booked."""
+    qs = Booking.objects.filter(lead_id__in=lead_ids).exclude(status='draft')
+    current = _drop_superseded_revisions(qs).values('lead_id', 'status', 'accounts_status', 'approval_status')
+    stages = {}
+    for b in current:
+        stages.setdefault(b['lead_id'], set()).add(booking_stage_of(b))
+    return {lid: _lead_stage(st) for lid, st in stages.items()}
 
 
 def closed_stages(leads):
-    """{lead id: stage} for the closed leads among `leads`, from each one's latest booking."""
-    ids = [l.id for l in leads if l.status == 'closed']
-    if not ids:
-        return {}
-    out = {}
-    for b in (Booking.objects.filter(lead_id__in=ids).exclude(status='draft').order_by('lead_id', '-id')
-              .values('lead_id', 'status', 'accounts_status', 'approval_status')):
-        out.setdefault(b['lead_id'], booking_stage_of(b))
-    return out
+    """{lead id: stage} for the closed leads among `leads`."""
+    return _stage_map([l.id for l in leads if l.status == 'closed' or l.stm_status == 'closed'])
 
 
 def _export_module(request):
