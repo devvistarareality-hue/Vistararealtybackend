@@ -419,6 +419,14 @@ class LeadListSerializer(serializers.ModelSerializer):
     def get_sv_outcome(self, obj):
         return getattr(obj, 'sv_outcome', None) or None
 
+    # A 'closed' lead only means a booking was submitted. Its real stage — pending,
+    # booked (approved by Sales and Accounts), rejected or cancelled — is worked out
+    # for the page in one query (LeadListView passes it in context).
+    closed_stage = serializers.SerializerMethodField()
+
+    def get_closed_stage(self, obj):
+        return (self.context.get('closed_stage') or {}).get(obj.id)
+
     class Meta:
         model = Lead
         fields = [

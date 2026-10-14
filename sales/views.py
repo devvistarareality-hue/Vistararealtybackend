@@ -1809,6 +1809,29 @@ def _book_label(request):
     return {'sales': 'Sales', 'cp': 'Channel Partner', 'all': 'Sales + CP'}[b]
 
 
+def booking_stage_of(b):
+    """One word for where a booking stands (dict with status / accounts_status / approval_status)."""
+    if str(b.get('approval_status') or '').upper() == 'CANCELLED':
+        return 'booking_cancelled'
+    if b.get('status') == 'rejected' or b.get('accounts_status') == 'rejected':
+        return 'booking_rejected'
+    if b.get('status') == 'sold' and b.get('accounts_status') == 'approved':
+        return 'booked'
+    return 'booking_pending'
+
+
+def closed_stages(leads):
+    """{lead id: stage} for the closed leads among `leads`, from each one's latest booking."""
+    ids = [l.id for l in leads if l.status == 'closed']
+    if not ids:
+        return {}
+    out = {}
+    for b in (Booking.objects.filter(lead_id__in=ids).exclude(status='draft').order_by('lead_id', '-id')
+              .values('lead_id', 'status', 'accounts_status', 'approval_status')):
+        out.setdefault(b['lead_id'], booking_stage_of(b))
+    return out
+
+
 def _export_module(request):
     return 'Channel Partner' if request.query_params.get('cp_only') == 'true' else 'Sales'
 
@@ -2117,9 +2140,10 @@ class LeadListView(APIView):
         offset = (page - 1) * PAGE_SIZE
         leads = qs[offset: offset + PAGE_SIZE]
 
+        leads = list(leads)
         return Response({
             'count': total,
-            'results': LeadListSerializer(leads, many=True).data,
+            'results': LeadListSerializer(leads, many=True, context={'closed_stage': closed_stages(leads)}).data,
         })
 
     @staticmethod
