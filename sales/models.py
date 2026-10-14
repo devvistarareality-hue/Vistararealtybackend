@@ -172,6 +172,13 @@ class Project(models.Model):
     # Standard LOI unit types, same shape: [{type, plot_area, const_area}, …]. Picked on
     # an LOI — a new one, or an EOI being converted — to fill Plot & Construction Area.
     loi_unit_types = models.JSONField(default=list, blank=True)
+    # Predefined payment plans that prefill a new booking's schedule — one for an LOI
+    # booked directly ('direct') and one for an EOI converted to an LOI ('eoi'):
+    #   {plan: {'extra': [{pct, days, stage}], 'unit': [{pct, days, stage}],
+    #           'legal': {days, stage}}}
+    # `days` is days after the booking date; amounts come from % at booking time.
+    # Every prefilled value stays editable on the booking.
+    payment_plans = models.JSONField(default=dict, blank=True)
     # Kiosk self-booking: when enabled, this project appears in the client-facing Kiosk flow
     # (a walk-in client can self-book a plot / raise an EOI, subject to staff approval).
     kiosk_enabled = models.BooleanField(default=False)

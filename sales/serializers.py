@@ -43,7 +43,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'id', 'company_id', 'name', 'description', 'location', 'project_type', 'is_active',
             'tagline', 'rera', 'total_area', 'total_plots', 'price_range', 'possession',
             'cover_image_url', 'logo_url', 'master_plan_url', 'site_map_image_url', 'site_map_zones',
-            'plot_type_plans', 'eoi_unit_types', 'loi_unit_types', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
+            'plot_type_plans', 'eoi_unit_types', 'loi_unit_types', 'payment_plans', 'formula_set', 'rate_master', 'allow_unit_switch', 'booking_approvers',
             'cp_booking_approvers', 'accounts_booking_approvers', 'accounts_cp_booking_approvers',
             'kiosk_enabled', 'floor_wise', 'block_industrial', 'floor_plans', 'loi_variant',
             'is_locked', 'locked_blocks',
@@ -51,6 +51,45 @@ class ProjectSerializer(serializers.ModelSerializer):
             'created_by_name', 'approved_by_name',
             'lead_count', 'plot_counts', 'created_at', 'updated_at',
         ]
+
+    def validate_payment_plans(self, value):
+        """Keep only the known shape: two plans, each with Extra Work and Unit Price
+        rows (% 0-100, days 0-3650, a short stage) and one Legal & Other line."""
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Payment plans must be an object.')
+
+        def num(v, lo, hi, cast=float):
+            try:
+                n = cast(v)
+            except (TypeError, ValueError):
+                return lo
+            return max(lo, min(hi, n))
+
+        def row(r):
+            r = r if isinstance(r, dict) else {}
+            return {'pct': round(num(r.get('pct'), 0, 100), 4),
+                    'days': num(r.get('days'), 0, 3650, int),
+                    'stage': str(r.get('stage') or '').strip()[:100]}
+
+        def legal(r):
+            # Blank days = no due date (the booking prints its usual "sale deed or
+            # possession" wording), so it is kept blank rather than read as 0.
+            r = r if isinstance(r, dict) else {}
+            blank = r.get('days') in (None, '')
+            return {'days': None if blank else num(r.get('days'), 0, 3650, int),
+                    'stage': str(r.get('stage') or '').strip()[:100]}
+
+        out = {}
+        for plan in ('direct', 'eoi'):
+            p = value.get(plan)
+            if not isinstance(p, dict):
+                continue
+            out[plan] = {
+                'extra': [row(r) for r in (p.get('extra') or [])[:24]],
+                'unit': [row(r) for r in (p.get('unit') or [])[:24]],
+                'legal': legal(p.get('legal')),
+            }
+        return out
 
     def get_plot_counts(self, obj):
         # Count over the prefetched plots in Python — the views prefetch_related('plots'),
