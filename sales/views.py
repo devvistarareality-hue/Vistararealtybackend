@@ -2468,6 +2468,7 @@ class LeadDetailView(APIView):
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         data = LeadDetailSerializer(lead).data
+        data['closed_stage'] = closed_stages([lead]).get(lead.id)
         # Most recent 30 events, returned oldest→newest so the timeline reads in order.
         # Tie-break by id keeps same-second events in their logical creation order
         # (e.g. status change → warm transfer → STM assigned).
