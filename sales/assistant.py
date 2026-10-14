@@ -131,7 +131,10 @@ def _entities():
     }
     return {
         # ── Sales / Channel Partner ──
-        'leads': {'module': SALES_MODULES, 'view': v.LeadListView, 'date': 'received', 'sales': True, 'fields': {
+        'leads': {'module': SALES_MODULES, 'view': v.LeadListView, 'date': 'received', 'sales': True,
+                  'note': "booking_stage (filter only) = a closed lead's booking: booking_pending, booked "
+                          "(approved by Sales and Accounts), booking_rejected, booking_cancelled — the Leads "
+                          "screen's Booking stage filter", 'fields': {
             'received': ('created_at', 'datetime'), 'name': ('name', 'enc'), 'phone': ('phone', 'enc'),
             'project': ('project__name', 'text'), 'source': ('source__name', 'text'),
             'status': ('status', 'choice'), 'tc_status': ('telecaller_status', 'choice'),
@@ -140,6 +143,10 @@ def _entities():
             'campaign': ('meta_campaign_name', 'text'), 'adset': ('meta_adset_name', 'enc'),
             'ad': ('meta_ad_name', 'enc'), 'city': ('city', 'text'), 'budget': ('budget_bucket', 'choice'),
             'duplicate': ('is_duplicate', 'bool'), 'stm_assigned': ('stm_assigned_at', 'datetime'),
+            # A closed lead's booking stage, applied by the Leads screen's own filter:
+            # booking_pending / booked (Sales AND Accounts approved) / booking_rejected /
+            # booking_cancelled. Filter only (eq), not groupable.
+            'booking_stage': ('__screen__', 'choice'),
         }},
         # Every status change on a lead the person can see — "who marked what, when".
         # The Leads screen's "TC Status = Warm + Today" means leads MARKED warm today
@@ -437,6 +444,10 @@ def _screen_params(entity, filters):
         field, op, value = f.get('field'), f.get('op'), f.get('value')
         if field in ('tc_status', 'stm_status') and op == 'eq' and value:
             params['telecaller_status' if field == 'tc_status' else 'stm_status'] = str(value)
+        elif field == 'booking_stage':
+            if op != 'eq' or not value:
+                raise ValueError("booking_stage takes op 'eq' with booking_pending, booked, booking_rejected or booking_cancelled.")
+            params['closed_stage'] = str(value)
         elif field == 'received' and op in ('eq', 'gte', 'lte') and value:
             start, end = _range(value)
             if op in ('eq', 'gte'):
@@ -755,7 +766,8 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
     if mode == 'list':
-        cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
+        cols = [c for c in (args.get('fields') or []) if c in fields and fields[c][0] != '__screen__'] \
+            or [c for c in fields if fields[c][0] != '__screen__'][:6]
         limit = max(1, min(list_cap, int(args.get('limit') or 25)))
         order = args.get('order_by') or ('-' + spec['date'])
         desc = order.startswith('-')
@@ -777,8 +789,8 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     gexpr = {}
     for g in groups:
         alias, _, unit = g.partition(':')
-        if alias not in fields or fields[alias][1] in ('enc', 'enc_money'):
-            raise ValueError(f'Cannot group by {alias!r}.')
+        if alias not in fields or fields[alias][1] in ('enc', 'enc_money') or fields[alias][0] == '__screen__':
+            raise ValueError(f'Cannot group by {alias!r} — filter by it instead.')
         path, kind = fields[alias]
         if kind in ('date', 'datetime'):
             fn = {'month': TruncMonth, 'week': TruncWeek}.get(unit, TruncDate)
