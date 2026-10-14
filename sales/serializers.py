@@ -435,7 +435,7 @@ class LeadListSerializer(serializers.ModelSerializer):
             'channel_partner', 'channel_partner_name',
             'meta_campaign_name', 'meta_adset_name', 'meta_ad_name',
             'status', 'telecaller', 'telecaller_name', 'telecaller_status',
-            'stm', 'stm_name', 'stm_status', 'sv_outcome', 'stm_assigned_at',
+            'stm', 'stm_name', 'stm_status', 'sv_outcome', 'closed_stage', 'stm_assigned_at',
             'disqualify_reason', 'disqualify_note',
             'city', 'address', 'purpose', 'budget_bucket',
             'is_duplicate', 'duplicate_count', 'created_at', 'updated_at',
