@@ -1820,6 +1820,20 @@ def booking_stage_of(b):
     return 'booking_pending'
 
 
+def _leads_with_closed_stage(leads_qs, stage):
+    """Lead ids (closed leads in `leads_qs`) whose latest booking is at `stage`."""
+    ids = list(leads_qs.filter(Q(status='closed') | Q(stm_status='closed')).values_list('id', flat=True)[:50000])
+    seen, out = set(), []
+    for b in (Booking.objects.filter(lead_id__in=ids).exclude(status='draft').order_by('lead_id', '-id')
+              .values('lead_id', 'status', 'accounts_status', 'approval_status')):
+        if b['lead_id'] in seen:
+            continue
+        seen.add(b['lead_id'])
+        if booking_stage_of(b) == stage:
+            out.append(b['lead_id'])
+    return out
+
+
 def closed_stages(leads):
     """{lead id: stage} for the closed leads among `leads`, from each one's latest booking."""
     ids = [l.id for l in leads if l.status == 'closed']
@@ -2130,6 +2144,11 @@ class LeadListView(APIView):
         if ordering in ('created_at', '-created_at', 'updated_at', '-updated_at', 'stm_assigned_at', '-stm_assigned_at'):
             qs = qs.order_by(ordering)
 
+        # Booking stage of a closed lead (Booking pending / Booked / Rejected / Cancelled),
+        # from its latest non-draft booking — the label the list shows.
+        _cstage = request.query_params.get('closed_stage')
+        if _cstage in ('booking_pending', 'booked', 'booking_rejected', 'booking_cancelled'):
+            qs = qs.filter(id__in=_leads_with_closed_stage(qs, _cstage))
         if _ai_capture(request, qs):
             return Response({})
         if request.query_params.get('export') == 'xlsx':
