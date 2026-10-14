@@ -10,7 +10,8 @@ Stages (the event names mapped in Events Manager → the CRM dataset):
                          hot / warm or books a visit (a visit means it qualified)
   Site_Visit_Scheduled   a site visit is booked
   Site_Visit_Done        the site visit is completed
-  Booked                 a booking on the lead is approved (sold)
+  Booked                 a booking on the lead is approved by Sales AND Accounts (not
+                         cancelled) — the same rule as the leads list's "Booked"
   Disqualified           marked not qualified / not interested
 
 Each stage is sent once per lead (MetaCapiEvent is unique per lead + stage). Only Meta
@@ -220,16 +221,14 @@ def _visit_post(sender, instance, created=False, raw=False, **kw):
         logger.exception('Meta CAPI: visit hook failed')
 
 
-def _booking_pre(sender, instance, raw=False, **kw):
-    instance._capi_old = None if (raw or not instance.pk) else \
-        sender.objects.filter(pk=instance.pk).values_list('status', flat=True).first()
-
-
 def _booking_post(sender, instance, created=False, raw=False, **kw):
-    if raw or not instance.lead_id or instance.status != 'sold':
+    # Sent once per lead (MetaCapiEvent is unique), the first time a booking is saved
+    # fully approved — whichever approval came last, Sales or Accounts.
+    if raw or not instance.lead_id:
         return
     try:
-        if created or getattr(instance, '_capi_old', None) != 'sold':
+        from .lead_sync import _approved
+        if _approved(instance):
             record(instance.lead, 'Booked')
     except Exception:
         logger.exception('Meta CAPI: booking hook failed')
@@ -241,7 +240,6 @@ def connect():
     post_save.connect(_lead_post, sender=Lead, dispatch_uid='capi_lead_post')
     pre_save.connect(_visit_pre, sender=SiteVisit, dispatch_uid='capi_visit_pre')
     post_save.connect(_visit_post, sender=SiteVisit, dispatch_uid='capi_visit_post')
-    pre_save.connect(_booking_pre, sender=Booking, dispatch_uid='capi_booking_pre')
     post_save.connect(_booking_post, sender=Booking, dispatch_uid='capi_booking_post')
 
 

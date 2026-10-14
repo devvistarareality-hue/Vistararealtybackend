@@ -76,7 +76,8 @@ class MetaCapiTests(TestCase):
         with mock.patch('requests.post', return_value=FakeResp()):
             meta_capi.send(ev.id)                                # the retry command's path
             with self.captureOnCommitCallbacks(execute=True):
-                Booking.objects.create(company=self.co, project=self.p, lead=lead, status='sold', client_name='Asha')
+                Booking.objects.create(company=self.co, project=self.p, lead=lead, status='sold', client_name='Asha',
+                                       accounts_status='approved')
         ev.refresh_from_db()
         self.assertEqual(ev.status, 'sent')
         self.assertTrue(MetaCapiEvent.objects.filter(lead=lead, event_name='Booked', status='sent').exists())
@@ -103,3 +104,19 @@ class StmDirectQualifiedTests(MetaCapiTests):
             with self.captureOnCommitCallbacks(execute=True):
                 SiteVisit.objects.create(lead=lead, project=self.p, scheduled_at=timezone.now())
         self.assertTrue(MetaCapiEvent.objects.filter(lead=lead, event_name='Qualified').exists())
+
+
+@override_settings(META_CAPI_INLINE=True)
+class BookedNeedsAccountsTests(MetaCapiTests):
+    """Booked goes to Meta only when Sales AND Accounts have approved — not on Sales alone."""
+    def test_booked_after_accounts(self):
+        with mock.patch('requests.post', return_value=FakeResp()):
+            lead = self._lead(meta_form_id='77')
+            with self.captureOnCommitCallbacks(execute=True):
+                b = Booking.objects.create(company=self.co, project=self.p, lead=lead, status='sold',
+                                           accounts_status='pending', client_name='Asha')
+            self.assertFalse(MetaCapiEvent.objects.filter(lead=lead, event_name='Booked').exists())
+            b.accounts_status = 'approved'
+            with self.captureOnCommitCallbacks(execute=True):
+                b.save()
+        self.assertTrue(MetaCapiEvent.objects.filter(lead=lead, event_name='Booked').exists())
