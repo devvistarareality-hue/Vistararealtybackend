@@ -1152,3 +1152,6 @@ class AiChat(models.Model):
 
 from . import meta_capi as _meta_capi  # noqa: E402  (connects the stage signals)
 _meta_capi.connect()
+
+from . import lead_sync as _lead_sync  # noqa: E402  (a lead follows its approved booking)
+_lead_sync.connect()
