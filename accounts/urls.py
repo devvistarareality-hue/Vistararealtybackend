@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     LoginView, MeView, ChangePasswordView,
-    UserListCreateView, UserDetailView,
+    UserListCreateView, UserDetailView, UserNotificationsView,
     CapabilityCatalogueView, DesignationListCreateView, DesignationDetailView,
     RoleDashboardView,
     NotificationTestView, NotificationListView, NotificationReadView,
@@ -20,6 +20,7 @@ urlpatterns = [
     path('change-password/',          ChangePasswordView.as_view(),       name='change-password'),
     path('users/',                    UserListCreateView.as_view(),        name='user-list'),
     path('users/<int:pk>/',           UserDetailView.as_view(),            name='user-detail'),
+    path('users/<int:pk>/notifications/', UserNotificationsView.as_view(), name='user-notifications'),
     path('designations/',             DesignationListCreateView.as_view(), name='designation-list'),
     path('designations/capabilities/', CapabilityCatalogueView.as_view(),  name='capability-catalogue'),
     path('designations/<int:pk>/',    DesignationDetailView.as_view(),     name='designation-detail'),

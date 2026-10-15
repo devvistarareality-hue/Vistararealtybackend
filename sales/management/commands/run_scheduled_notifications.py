@@ -25,7 +25,7 @@ from sales.models import FollowUp, SiteVisit, UserAvailability
 # workbook never competes with the working day; run_due decides who is due.
 BACKUP_HOUR = 2
 from accounts.models import User
-from notifications import notify, notify_many, reporting_chain
+from notifications import notify, notify_many, notify_team, reporting_chain
 
 
 def _is_tc_or_stm(user):
@@ -33,6 +33,21 @@ def _is_tc_or_stm(user):
     return any(k in d for k in (
         'telecaller', 'tele caller', 'stm', 'sales team', 'sales executive',
     ))
+
+
+DIGEST_HOUR = 9   # the team morning summary goes out from 9 a.m. (local time)
+
+
+def _team_ids(user, levels):
+    """Active people under `user`, `levels` deep (1 = direct reports only)."""
+    ids, frontier = set(), {user.id}
+    for _ in range(max(1, int(levels or 5))):
+        frontier = set(User.objects.filter(reporting_manager_id__in=frontier, is_active=True)
+                       .exclude(id__in=ids | {user.id}).values_list('id', flat=True))
+        if not frontier:
+            break
+        ids |= frontier
+    return ids
 
 
 def _overdue_phrase(scheduled_at, now):
@@ -72,6 +87,7 @@ class Command(BaseCommand):
             'sv_reminder': self._sv_reminders(now, dry),
             'sv_escalate': self._sv_escalations(now, cutoff, dry),
             'availability': self._availability_reminders(now, dry),
+            'team_digest': self._team_digests(now, dry),
         }
         try:
             from receivables import reminders as ar_reminders
@@ -95,7 +111,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
             f'site-visit: {c["sv_reminder"]} nudged / {c["sv_escalate"]} escalated · '
-            f'availability: {c["availability"]} reminded'
+            f'availability: {c["availability"]} reminded · team summaries: {c["team_digest"]}'
             f' · AR follow-ups: {c["ar_fu_reminder"]} nudged / {c["ar_fu_escalate"]} escalated'
             f' · AR digest: {c["ar_digest"]} sent · AR due soon: {c["ar_due_soon"]}'
             f' · Task due soon: {c["task_due_soon"]}'
@@ -144,12 +160,12 @@ class Command(BaseCommand):
         n = 0
         for f in qs.iterator():
             try:
-                mgrs = reporting_chain(f.assigned_to)
-                if mgrs:
-                    notify_many(mgrs, 'followup_overdue', 'Team follow-up overdue',
-                                f"{f.assigned_to.name}'s follow-up with {f.lead.name} is overdue "
-                                f'({_overdue_phrase(f.scheduled_at, now)}).',
-                                {'lead_id': f.lead_id, 'followup_id': f.id})
+                # Up the chain only as far as each manager's settings allow; those who
+                # take team alerts as a morning summary get it from _team_digests.
+                notify_team(f.assigned_to, 'followup_overdue', 'Team follow-up overdue',
+                            f"{f.assigned_to.name}'s follow-up with {f.lead.name} is overdue "
+                            f'({_overdue_phrase(f.scheduled_at, now)}).',
+                            {'lead_id': f.lead_id, 'followup_id': f.id}, kind='team_followup_overdue')
                 if not dry:
                     FollowUp.objects.filter(pk=f.pk).update(escalated_at=now)
                 n += 1
@@ -190,16 +206,64 @@ class Command(BaseCommand):
         for sv in qs.iterator():
             try:
                 owner = sv.stm or sv.referred_by_telecaller
-                mgrs = reporting_chain(owner) if owner else []
-                if mgrs:
+                if owner:
                     lead_name = sv.lead.name if sv.lead_id else 'a lead'
-                    who = owner.name if owner else 'A rep'
-                    notify_many(mgrs, 'sv_overdue', 'Team site visit overdue',
-                                f"{who}'s site visit with {lead_name} is overdue "
+                    notify_team(owner, 'sv_overdue', 'Team site visit overdue',
+                                f"{owner.name}'s site visit with {lead_name} is overdue "
                                 f'({_overdue_phrase(sv.scheduled_at, now)}).',
-                                {'lead_id': sv.lead_id, 'sv_id': sv.id})
+                                {'lead_id': sv.lead_id, 'sv_id': sv.id}, kind='team_sv_overdue')
                 if not dry:
                     SiteVisit.objects.filter(pk=sv.pk).update(escalated_at=now)
+                n += 1
+            except Exception:
+                pass
+        return n
+
+    # ── Team morning summary (managers who chose it instead of per-item alerts) ──
+    def _team_digests(self, now, dry):
+        """Once a day from DIGEST_HOUR: every manager whose settings take team follow-up
+        or site-visit alerts as a summary gets one notification with how many are
+        overdue in their team (as many levels down as their setting covers). Sent once
+        per day — the cron runs every five minutes."""
+        local = timezone.localtime(now)
+        if local.hour < DIGEST_HOUR:
+            return 0
+        from accounts.models import Notification
+        from accounts.notification_prefs import setting
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        done = set(Notification.objects.filter(type='team_digest', created_at__gte=start)
+                   .values_list('recipient_id', flat=True))
+        n = 0
+        for m in User.objects.filter(is_active=True, subordinates__is_active=True).distinct():
+            if m.id in done:
+                continue
+            try:
+                fu, sv = setting(m, 'team_followup_overdue'), setting(m, 'team_sv_overdue')
+                want_fu = fu.get('digest') and fu.get('mode') != 'off'
+                want_sv = sv.get('digest') and sv.get('mode') != 'off'
+                if not (want_fu or want_sv):
+                    continue
+                n_fu = n_sv = 0
+                if want_fu:
+                    team = _team_ids(m, fu.get('levels') or 5)
+                    n_fu = FollowUp.objects.filter(status='pending', scheduled_at__lt=now,
+                                                   assigned_to_id__in=team).count()
+                if want_sv:
+                    team = _team_ids(m, sv.get('levels') or 5)
+                    n_sv = SiteVisit.objects.filter(status='scheduled', scheduled_at__lt=now).filter(
+                        Q(stm_id__in=team) | Q(stm__isnull=True, referred_by_telecaller_id__in=team)).count()
+                if not (n_fu or n_sv):
+                    continue
+                parts = []
+                if n_fu:
+                    parts.append(f'{n_fu} follow-up{"s" if n_fu != 1 else ""}')
+                if n_sv:
+                    parts.append(f'{n_sv} site visit{"s" if n_sv != 1 else ""}')
+                total = n_fu + n_sv
+                body = f'{" and ".join(parts)} in your team {"is" if total == 1 else "are"} overdue.'
+                if not dry:
+                    notify(m, 'team_digest', 'Your team today', body, {'screen': 'followups', 'filter': 'overdue'},
+                           kind='team_followup_overdue' if want_fu else 'team_sv_overdue')
                 n += 1
             except Exception:
                 pass

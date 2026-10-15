@@ -5,11 +5,26 @@ ONESIGNAL_APP_ID  = os.environ.get('ONESIGNAL_APP_ID', '')
 ONESIGNAL_API_KEY = os.environ.get('ONESIGNAL_REST_API_KEY', '')
 
 
-def notify(recipient, ntype, title, body, data=None, push=True):
+def notify(recipient, ntype, title, body, data=None, push=True, kind=None):
     """Store an in-app/web notification AND (best-effort) fire a OneSignal push.
-    `recipient` is a User instance. Safe to call anywhere — never raises."""
+    `recipient` is a User instance. Safe to call anywhere — never raises.
+
+    Honours the recipient's notification settings (their designation's, then their
+    own — accounts/notification_prefs.py): a kind set to 'off' is not sent, 'inapp'
+    goes to the bell without a push. `kind` overrides the one the type implies (the
+    team escalations share a type with the rep's own reminder but are their own kind).
+    """
     if not recipient:
         return None
+    try:
+        from accounts.notification_prefs import kind_of, setting
+        pref = setting(recipient, kind or kind_of(ntype))
+    except Exception:
+        pref = {'mode': 'push'}
+    if pref.get('mode') == 'off':
+        return None
+    if pref.get('mode') == 'inapp':
+        push = False
     data = data or {}
     n = None
     try:
@@ -29,12 +44,24 @@ def notify(recipient, ntype, title, body, data=None, push=True):
     return n
 
 
-def notify_many(recipients, ntype, title, body, data=None, push=True):
+def notify_many(recipients, ntype, title, body, data=None, push=True, kind=None):
     seen = set()
     for r in recipients:
         if r and r.id not in seen:
             seen.add(r.id)
-            notify(r, ntype, title, body, data=data, push=push)
+            notify(r, ntype, title, body, data=data, push=push, kind=kind)
+
+
+def notify_team(owner, ntype, title, body, data=None, kind=None):
+    """A team alert about `owner`'s work, up their reporting chain — to each manager
+    only as far up as their settings allow (levels; 1 = direct manager), and not at
+    all to one who takes these as the morning summary instead (digest)."""
+    from accounts.notification_prefs import setting
+    for level, mgr in enumerate(reporting_chain(owner), start=1):
+        pref = setting(mgr, kind)
+        if pref.get('mode') == 'off' or pref.get('digest') or level > int(pref.get('levels') or 5):
+            continue
+        notify(mgr, ntype, title, body, data=data, kind=kind)
 
 
 def reporting_chain(user, depth=5):

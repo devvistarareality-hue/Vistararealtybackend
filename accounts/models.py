@@ -45,6 +45,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Exceptions for one person, on top of their designation's capabilities.
     extra_capabilities  = models.JSONField(default=list, blank=True)
     denied_capabilities = models.JSONField(default=list, blank=True)
+    # This person's own notification settings, over their designation's (same shape as
+    # Designation.notification_prefs; a kind not listed follows the designation).
+    notification_overrides = models.JSONField(default=dict, blank=True)
     modules            = models.JSONField(default=list, blank=True)
     manager_modules    = models.JSONField(default=list, blank=True)
     admin_modules      = models.JSONField(default=list, blank=True)
@@ -170,6 +173,10 @@ class Designation(models.Model):
     screens_modules  = models.JSONField(default=list, blank=True)
     # Which dashboard opens; '' decides from their permissions, as before.
     dashboard        = models.CharField(max_length=40, blank=True, default='')
+    # Which notifications people with this title get — per kind: push / in-app only /
+    # off, and for team alerts how many levels up and whether as a morning summary.
+    # Empty = everything as before. See accounts/notification_prefs.py.
+    notification_prefs = models.JSONField(default=dict, blank=True)
 
     class Meta:
         unique_together = ('company', 'name', 'module')

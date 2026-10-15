@@ -278,6 +278,44 @@ class UserListCreateView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+class UserNotificationsView(APIView):
+    """One person's notification settings, for User Management.
+
+    GET   → {designation: their designation's prefs, overrides: their own}
+    PATCH {notification_overrides: {...}} → saves their own (a kind not listed follows
+          the designation). Admins only, within their company.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _target(self, request, pk):
+        if not _may_manage_users(request.user):
+            return None
+        qs = User.objects.all() if is_platform_admin(request.user) else User.objects.filter(company=request.user.company)
+        return qs.filter(pk=pk).first()
+
+    def _payload(self, user):
+        from .capabilities import _designation_row
+        row = _designation_row(user)
+        return {'designation': (row.notification_prefs or {}) if row is not None else {},
+                'designation_name': user.designation or '',
+                'overrides': user.notification_overrides or {}}
+
+    def get(self, request, pk):
+        user = self._target(request, pk)
+        if not user:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._payload(user))
+
+    def patch(self, request, pk):
+        user = self._target(request, pk)
+        if not user:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        from .notification_prefs import clean
+        user.notification_overrides = clean(request.data.get('notification_overrides'))
+        user.save(update_fields=['notification_overrides'])
+        return Response(self._payload(user))
+
+
 class UserDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -401,6 +439,7 @@ class CapabilityCatalogueView(APIView):
         from .capabilities import (CAPABILITIES, DASHBOARD_ROLES, DASHBOARDS, DATA_SCOPES,
                                    PRESETS, PRESET_LABELS, PRESET_MODULES, PRESET_SCREENS,
                                    SCREENS)
+        from .notification_prefs import DEFAULT as NOTIF_DEFAULT, KINDS as NOTIF_KINDS, PRESETS as NOTIF_PRESETS
         return Response({
             'capabilities': [{'key': k, 'label': l, 'module': m, 'help': h} for k, l, m, h in CAPABILITIES],
             'screens': [{'key': k, 'label': l, 'module': m} for k, l, m in SCREENS],
@@ -411,6 +450,12 @@ class CapabilityCatalogueView(APIView):
             'presets': [{'key': k, 'label': PRESET_LABELS.get(k, k), 'capabilities': v,
                          'module': PRESET_MODULES.get(k, ''),
                          'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
+            # The Notifications tab: every kind, grouped, and its one-click presets.
+            'notifications': [{'key': k, 'label': l, 'group': g, 'help': h, 'team': t}
+                              for k, l, g, h, t in NOTIF_KINDS],
+            'notification_presets': [{'key': k, 'label': v['label'], 'prefs': v['prefs']}
+                                     for k, v in NOTIF_PRESETS.items()],
+            'notification_default': NOTIF_DEFAULT,
         })
 
 
@@ -546,8 +591,12 @@ class DesignationDetailView(APIView):
             if scope not in [s for s, _ in DATA_SCOPES]:
                 return Response({'data_scope': 'Unknown scope.'}, status=status.HTTP_400_BAD_REQUEST)
             desig.data_scope = scope
+        if 'notification_prefs' in request.data:
+            from .notification_prefs import clean as clean_notif
+            desig.notification_prefs = clean_notif(request.data.get('notification_prefs'))
         desig.save(update_fields=['capabilities', 'capabilities_set', 'data_scope',
-                                  'screens', 'screens_set', 'screens_modules', 'dashboard'])
+                                  'screens', 'screens_set', 'screens_modules', 'dashboard',
+                                  'notification_prefs'])
         # Anything this company has cached was worked out under the old rules.
         bump_permissions_version(desig.company_id)
         return Response(DesignationSerializer(desig).data)

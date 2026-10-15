@@ -121,7 +121,7 @@ class DesignationSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'module', 'company_code', 'company_name',
                   'capabilities', 'capabilities_set', 'effective_capabilities', 'data_scope',
                   'screens', 'screens_set', 'effective_screens',
-                  'screens_modules', 'effective_screen_modules', 'dashboard']
+                  'screens_modules', 'effective_screen_modules', 'dashboard', 'notification_prefs']
 
 
 class UserListSerializer(serializers.ModelSerializer):
