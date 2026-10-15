@@ -2510,8 +2510,30 @@ class LeadDetailView(APIView):
         except Lead.DoesNotExist:
             return None
 
+    def _lead_being_worked(self, request, pk):
+        """A lead this user is working on without owning it — read-only.
+
+        A follow-up or site visit can be assigned to someone who is neither the
+        lead's telecaller nor its STM, and Follow-Ups shows it to them with the
+        name and number on the row. The History button behind that row fetches
+        the lead, which scope_leads_to_role refuses, so the button was dead:
+        "Could not load the history" for a call they are the one making.
+
+        Deliberately NOT folded into _get_lead, which patch and delete also
+        use. Being told to call someone is a reason to see what happened on
+        that lead before, not a reason to be able to edit or delete it.
+        Company-scoped like everything else.
+        """
+        qs = scope_to_company(
+            Lead.objects.select_related('project', 'source', 'telecaller', 'stm').defer(*PROJECT_BLOBS),
+            request.user,
+        )
+        return qs.filter(
+            Q(follow_ups__assigned_to=request.user) | Q(site_visits__stm=request.user)
+        ).filter(pk=pk).first()
+
     def get(self, request, pk):
-        lead = self._get_lead(request, pk)
+        lead = self._get_lead(request, pk) or self._lead_being_worked(request, pk)
         if not lead:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         data = LeadDetailSerializer(lead).data
@@ -3765,6 +3787,48 @@ class ChannelPartnerLookupView(APIView):
         })
 
 
+def _cp_parse_date(value):
+    """A date from the client, or None when missing or unparseable — a typo in
+    a query string should narrow nothing rather than 500."""
+    if not value:
+        return None
+    # Imported here, as the rest of this module does — `date` is deliberately
+    # not among the module-level datetime imports at the top.
+    from datetime import date as date_cls
+    try:
+        return date_cls.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _cp_places(qs):
+    """Every place these partners sit in, for the Location picker.
+
+    Area and city are two columns holding the same kind of value and the table
+    shows them together, so the picker offers them together. Deduped
+    case-insensitively — AHMEDABAD and Ahmedabad are one place, and offering
+    both would split a filter that matches either anyway. The spelling kept is
+    whichever is used most, so the list reads the way the data mostly does.
+    """
+    from collections import Counter
+    counts = Counter()
+    for city, area in qs.order_by().values_list('city', 'area'):
+        for v in (city, area):
+            if v and v.strip():
+                counts[v.strip()] += 1
+    best = {}
+    for value, n in counts.most_common():          # most-used spelling first
+        best.setdefault(value.lower(), value)
+    return sorted(best.values(), key=str.lower)
+
+
+def _cp_distinct(qs, field):
+    """Every value `field` takes in `qs`, blanks left out — what a filter picker
+    may offer (?facets=1), so it never lists a choice that returns nothing."""
+    return sorted({v for v in qs.order_by().values_list(field, flat=True).distinct()
+                   if v not in (None, '')})
+
+
 class ChannelPartnerListCreateView(APIView):
     """Admin-only directory of external referral partners (CP Details) — distinct
     from a 'CP Executive' employee, who manages the relationship with these."""
@@ -3787,9 +3851,55 @@ class ChannelPartnerListCreateView(APIView):
         )
         if request.query_params.get('company_id') and is_platform_admin(request.user):
             qs = qs.filter(company_id=request.query_params['company_id'])
-        if request.query_params.get('category'):
-            qs = qs.filter(category=request.query_params['category'])
-        search = request.query_params.get('search', '').strip()
+        p = request.query_params
+        if p.get('category'):
+            qs = qs.filter(category=p['category'])
+        if p.get('segment'):
+            qs = qs.filter(segment=p['segment'])
+        # The Location column shows area and city together, so the filter has to
+        # match either — city alone would be nearly useless here, since 439 of
+        # the 594 partners on the live directory have no city at all and are
+        # placed entirely by area.
+        if p.get('location'):
+            loc = p['location']
+            qs = qs.filter(Q(city__iexact=loc) | Q(area__iexact=loc))
+        if p.get('status') in ('active', 'inactive'):
+            qs = qs.filter(is_active=p['status'] == 'active')
+        if p.get('created_by'):
+            qs = qs.filter(created_by_id=p['created_by'])
+        # Dated by when the partner was added — the Added column.
+        d_from = _cp_parse_date(p.get('date_from'))
+        d_to = _cp_parse_date(p.get('date_to'))
+        if d_from:
+            qs = qs.filter(created_at__date__gte=d_from)
+        if d_to:
+            qs = qs.filter(created_at__date__lte=d_to)
+        # The question a 594-row directory is actually opened with: which of
+        # these have produced anything, and which has nobody touched? Neither
+        # is a stored field — both are the annotated counts above.
+        bucket = p.get('bucket')
+        if bucket == 'with_leads':
+            qs = qs.filter(lead_count__gt=0)
+        elif bucket == 'no_leads':
+            qs = qs.filter(lead_count=0)
+        elif bucket == 'untouched':
+            qs = qs.filter(lead_count=0, follow_up_count=0, site_visit_count=0)
+        if p.get('facets') in ('1', 'true'):
+            # Only the values these rows hold, so a picker never offers a choice
+            # that returns nothing — same contract as the Club 1000 lists.
+            return Response({
+                'categories': _cp_distinct(qs, 'category'),
+                'segments': _cp_distinct(qs, 'segment'),
+                'locations': _cp_places(qs),
+                'created_by': [
+                    {'id': u.id, 'name': u.name}
+                    for u in User.objects.filter(
+                        id__in=qs.exclude(created_by__isnull=True)
+                        .values_list('created_by_id', flat=True).distinct()
+                    ).order_by('name')
+                ],
+            })
+        search = p.get('search', '').strip()
         if search:
             # name/contact_no/firm_name — matched in Python like Lead's search,
             # since name/contact_no are encrypted and can't be filtered in SQL.
