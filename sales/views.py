@@ -115,6 +115,23 @@ def _is_sales_admin(user):
     )
 
 
+def is_director(user):
+    """A Director, who may be appointed an approver anywhere.
+
+    Every other approver pool is built from access to that module — you can be
+    named on Accounts approvals because you have Accounts, on CP approvals
+    because you work the partner desk. A Director's authority does not come
+    from a module grant, so those tests kept them off the pickers for modules
+    they had not been granted: of four Directors here, none could be named a CP
+    approver and only two an Accounts approver.
+
+    Being listed is not itself authority — _can_approve_project and its
+    siblings still require the Director to have actually been named on that
+    project or scheme. This only makes them available to appoint.
+    """
+    return getattr(user, 'role', '') == 'Director'
+
+
 CP_MODULE = 'Channel Partner'
 
 
@@ -4335,27 +4352,31 @@ class TelecallerListView(APIView):
         elif crm_role == 'cp_module':
             # Everyone with access to the Channel Partner module — admins/staff/
             # Sales Admin-Modules users, CP Executives and CP-designation Managers
-            # (is_cp_designated) — plus anyone who currently owns a CP lead as its
-            # stm even without a CP designation (a lead transferred to a regular
-            # STM, say). Not a designation substring, so filtered in Python like
-            # the other cross-cutting permission checks in this file.
+            # (is_cp_designated), every Director (see is_director — appointable
+            # anywhere, module grant or not) — plus anyone who currently owns a
+            # CP lead as its stm even without a CP designation (a lead
+            # transferred to a regular STM, say). Not a designation substring,
+            # so filtered in Python like the other cross-cutting permission
+            # checks in this file.
             company_ids = base_qs.values_list('company_id', flat=True).distinct()
             cp_lead_stm_ids = set(
                 Lead.objects.filter(cp_lead_q(), company_id__in=company_ids)
                 .exclude(stm__isnull=True).values_list('stm_id', flat=True)
             )
             users = sorted(
-                (u for u in base_qs if _is_sales_admin(u) or is_cp_designated(u) or u.id in cp_lead_stm_ids),
+                (u for u in base_qs if _is_sales_admin(u) or is_cp_designated(u)
+                 or is_director(u) or u.id in cp_lead_stm_ids),
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'accounts_module':
             # Everyone with access to the Accounts & Finance module — admins/
-            # staff, an Accounts Admin-Modules user, and anyone granted the
-            # 'Accounts & Finance' module (employee-level `modules` or
-            # manager-level `manager_modules`) — the pool the Accounts
-            # Approvers picker offers, mirroring cp_module above.
+            # staff, every Director (see is_director), an Accounts
+            # Admin-Modules user, and anyone granted the 'Accounts & Finance'
+            # module (employee-level `modules` or manager-level
+            # `manager_modules`) — the pool the Accounts Approvers picker
+            # offers, mirroring cp_module above.
             users = sorted(
-                (u for u in base_qs if _is_hard_admin(u)
+                (u for u in base_qs if _is_hard_admin(u) or is_director(u)
                  or 'Accounts & Finance' in (getattr(u, 'admin_modules', None) or [])
                  or 'Accounts & Finance' in (getattr(u, 'modules', None) or [])
                  or 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])),
