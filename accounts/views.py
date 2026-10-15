@@ -451,8 +451,8 @@ class CapabilityCatalogueView(APIView):
                          'module': PRESET_MODULES.get(k, ''),
                          'screens': PRESET_SCREENS.get(k, [])} for k, v in PRESETS.items()],
             # The Notifications tab: every kind, grouped, and its one-click presets.
-            'notifications': [{'key': k, 'label': l, 'group': g, 'help': h, 'team': t}
-                              for k, l, g, h, t in NOTIF_KINDS],
+            'notifications': [{'key': k, 'label': l, 'group': g, 'help': h, 'team': t, 'module': m}
+                              for k, l, g, h, t, m in NOTIF_KINDS],
             'notification_presets': [{'key': k, 'label': v['label'], 'prefs': v['prefs']}
                                      for k, v in NOTIF_PRESETS.items()],
             'notification_default': NOTIF_DEFAULT,

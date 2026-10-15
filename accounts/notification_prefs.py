@@ -23,34 +23,37 @@ DEFAULT = {'mode': 'push', 'levels': 5, 'digest': False}
 MODES = ('push', 'inapp', 'off')
 MAX_LEVELS = 5
 
-# key, label, group, what it is, team kind?
+# key, label, group, what it is, team kind?, module — the module whose menu it belongs to
+# (the editor shows a designation only the modules its menu answers for; Channel
+# Partner shares the Sales notifications).
 KINDS = [
-    ('new_lead', 'New lead assigned', 'Leads', 'A lead (or a batch) is handed to them.', False),
-    ('re_enquiry', 'Lead enquired again', 'Leads', 'One of their leads came in again.', False),
-    ('lead_transfer', 'Lead transfers', 'Leads', 'A transfer is asked of them, or theirs is approved / rejected.', False),
-    ('followup', 'New follow-up', 'Follow-ups', 'A follow-up is booked for them.', False),
-    ('followup_overdue', 'My follow-up overdue', 'Follow-ups', 'Their own follow-up has passed its time.', False),
-    ('team_followup_overdue', 'Team follow-up overdue', 'Follow-ups', 'Someone under them missed a follow-up by a day.', True),
-    ('sv', 'Site visit scheduled', 'Site visits', 'A site visit is booked on their lead.', False),
-    ('sv_done', 'Site visit done', 'Site visits', 'A site visit on their lead is completed.', False),
-    ('sv_overdue', 'My site visit overdue', 'Site visits', 'Their own visit was not marked done in time.', False),
-    ('team_sv_overdue', 'Team site visit overdue', 'Site visits', 'A visit under them is a day past and not done.', True),
-    ('booking_submitted', 'Booking submitted', 'Bookings', 'A booking they made is waiting for approval.', False),
-    ('booking_approval', 'Booking needs my approval', 'Bookings', 'A booking (or its revision) on a project they approve.', False),
-    ('booking_result', 'Booking approved / rejected / cancelled', 'Bookings', 'The outcome of a booking they made, and new closures.', False),
-    ('accounts_booking_approval', 'Accounts approval needed', 'Accounts', 'A booking waits for their Accounts sign-off.', False),
-    ('accounts_booking_result', 'Accounts approved / rejected / cancelled', 'Accounts', 'The Accounts outcome of a booking.', False),
-    ('ar_followup', 'Collection follow-ups', 'AR', 'A collection follow-up is assigned to them or falls due.', False),
-    ('ar_followup_overdue', 'Collection follow-up overdue', 'AR', 'A collection follow-up passed its time.', False),
-    ('ar_collections_digest', "Today's collections", 'AR', 'The morning summary of overdue and due-soon accounts.', False),
-    ('ar_due_soon', 'Payment due soon', 'AR', 'A customer instalment falls due in a few days.', False),
-    ('task', 'Tasks', 'Tasks', 'A task is assigned, commented on or nearly due.', False),
-    ('investor', 'Club 1000 investors', 'Club 1000', 'An investor waits for approval, or theirs is decided.', False),
-    ('project_pending_approval', 'New project needs approval', 'Other', 'A new project waits for their approval.', False),
-    ('availability_reminder', 'Mark yourself available', 'Other', 'The morning reminder to sign in for leads.', False),
+    ('new_lead', 'New lead assigned', 'Leads', 'A lead (or a batch) is handed to them.', False, 'Sales'),
+    ('re_enquiry', 'Lead enquired again', 'Leads', 'One of their leads came in again.', False, 'Sales'),
+    ('lead_transfer', 'Lead transfers', 'Leads', 'A transfer is asked of them, or theirs is approved / rejected.', False, 'Sales'),
+    ('followup', 'New follow-up', 'Follow-ups', 'A follow-up is booked for them.', False, 'Sales'),
+    ('followup_overdue', 'My follow-up overdue', 'Follow-ups', 'Their own follow-up has passed its time.', False, 'Sales'),
+    ('team_followup_overdue', 'Team follow-up overdue', 'Follow-ups', 'Someone under them missed a follow-up by a day.', True, 'Sales'),
+    ('sv', 'Site visit scheduled', 'Site visits', 'A site visit is booked on their lead.', False, 'Sales'),
+    ('sv_done', 'Site visit done', 'Site visits', 'A site visit on their lead is completed.', False, 'Sales'),
+    ('sv_overdue', 'My site visit overdue', 'Site visits', 'Their own visit was not marked done in time.', False, 'Sales'),
+    ('team_sv_overdue', 'Team site visit overdue', 'Site visits', 'A visit under them is a day past and not done.', True, 'Sales'),
+    ('booking_submitted', 'Booking submitted', 'Bookings', 'A booking they made is waiting for approval.', False, 'Sales'),
+    ('booking_approval', 'Booking needs my approval', 'Bookings', 'A booking (or its revision) on a project they approve.', False, 'Sales'),
+    ('booking_result', 'Booking approved / rejected / cancelled', 'Bookings', 'The outcome of a booking they made, and new closures.', False, 'Sales'),
+    ('accounts_booking_approval', 'Accounts approval needed', 'Accounts', 'A booking waits for their Accounts sign-off.', False, 'Accounts & Finance'),
+    ('accounts_booking_result', 'Accounts approved / rejected / cancelled', 'Accounts', 'The Accounts outcome of a booking.', False, 'Accounts & Finance'),
+    ('ar_followup', 'Collection follow-ups', 'AR', 'A collection follow-up is assigned to them or falls due.', False, 'AR'),
+    ('ar_followup_overdue', 'Collection follow-up overdue', 'AR', 'A collection follow-up passed its time.', False, 'AR'),
+    ('ar_collections_digest', "Today's collections", 'AR', 'The morning summary of overdue and due-soon accounts.', False, 'AR'),
+    ('ar_due_soon', 'Payment due soon', 'AR', 'A customer instalment falls due in a few days.', False, 'AR'),
+    ('task', 'Tasks', 'Tasks', 'A task is assigned, commented on or nearly due.', False, 'Task Allocation'),
+    ('investor', 'Club 1000 investors', 'Club 1000', 'An investor waits for approval, or theirs is decided.', False, 'Club 1000'),
+    ('project_pending_approval', 'New project needs approval', 'Other', 'A new project waits for their approval.', False, 'Sales'),
+    ('availability_reminder', 'Mark yourself available', 'Other', 'The morning reminder to sign in for leads.', False, 'Sales'),
 ]
 KIND_KEYS = [k[0] for k in KINDS]
 TEAM_KINDS = {k[0] for k in KINDS if k[4]}
+KIND_MODULE = {k[0]: k[5] for k in KINDS}
 
 # notify() type → kind, where they differ. Anything not listed is its own kind.
 TYPE_KIND = {
