@@ -8682,18 +8682,12 @@ class BookingActionView(APIView):
                     except Exception:
                         # Never let this block an approval — the booking is what matters.
                         logger.exception('Could not back-fill lead/site visit for booking %s', b.pk)
-                # Notify the STM (approved) and — on a fresh closure — their manager chain.
-                from notifications import notify_many, reporting_chain
-                _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
                 # Rep, the project's Sales/CP approvers, and its Accounts approvers
                 # (who now have to act on it).
                 _notify_booking_event(company, b, 'sales_approved', request.user,
                                       'approved by %s, awaiting Accounts' % (request.user.name or 'Sales'), request=request)
-                if b.stm:
-                    if not is_rev:
-                        notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
-                                    f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
-                                    {'booking_id': b.id})
+                # "New Closure" to the manager chain waits for Accounts: until they sign
+                # off the unit is still on Hold, not sold (AccountsBookingActionView).
             elif action == 'reject':
                 b.status = 'rejected'
                 b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
@@ -8760,6 +8754,15 @@ class AccountsBookingActionView(APIView):
                 b.save(update_fields=['accounts_status', 'accounts_approved_by', 'accounts_approved_at'])
                 _notify_booking_event(company, b, 'accounts_approved', request.user,
                                       'approved by %s (Accounts)' % (request.user.name or 'Accounts'), request=request)
+                # Only now is it a closure: tell the rep's manager chain. Sent from here,
+                # not at Sales approval, which used to announce "New Closure" on a deal
+                # Accounts had not seen yet. A revision is the same deal, so it stays quiet.
+                if b.stm and not (b.revision_no or 0):
+                    from notifications import notify_many, reporting_chain
+                    _unit = (b.plot_numbers or (b.plot.number if b.plot_id else b.area))
+                    notify_many(reporting_chain(b.stm), 'closure', 'New Closure',
+                                f'{b.stm.name} closed {b.client_name or "a unit"} · Unit {_unit} · ₹{int(b.final_amount or 0)}',
+                                {'booking_id': b.id})
             elif action == 'reject':
                 reason = (request.data.get('reason') or '').strip()
                 if not reason:

@@ -118,6 +118,19 @@ class BookingNotificationTests(APITestCase):
         self.assertEqual((row.actor_id, row.module, row.action), (self.admin.id, 'Accounts & Finance', 'approved'))
         self.assertIn('Approved (Accounts) booking — Asha', row.summary)
 
+    def test_new_closure_waits_for_accounts(self):
+        # Sales approving is not a closure yet — the unit is still on Hold.
+        auth(self.client, self.admin)
+        sent = self._sent(lambda: self.assertEqual(self.client.post(
+            f'/api/sales/bookings/{self.booking.id}/action/', {'action': 'approve'},
+            format='json').status_code, 200))
+        self.assertNotIn('closure', [s[1] for s in sent])
+        # Accounts signing off is: the rep's manager hears "New Closure".
+        sent = self._sent(lambda: self.assertEqual(self.client.post(
+            f'/api/sales/bookings/{self.booking.id}/accounts-action/', {'action': 'approve'},
+            format='json').status_code, 200))
+        self.assertIn((self.sales_mgr.id, 'closure', 'New Closure'), sent)
+
     def test_cancel_endpoint_notifies_accounts(self):
         lead = Lead.objects.create(company=self.co, name='Asha', phone='9000000200',
                                    stm=self.stm, status='closed', stm_status='closed')
