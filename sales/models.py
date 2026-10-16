@@ -726,7 +726,7 @@ class Booking(models.Model):
     # Industrial and Kalrav: the Maintenance Advance has its own rate; maint_rate is then
     # the Deposit's rate. 0 elsewhere — other sets charge one maintenance rate.
     maint_advance_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
-    # Industrial and Kalrav: the Advance has its own months too (Area × Rate × Months);
+    # Kalrav: the Advance has its own months too (Area × Advance Rate × Advance Months);
     # maint_rate / maint_months are then the Deposit's. 0 elsewhere.
     maint_advance_months = models.IntegerField(default=0)
 
