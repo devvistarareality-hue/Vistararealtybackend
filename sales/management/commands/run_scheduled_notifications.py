@@ -24,7 +24,7 @@ from sales.models import FollowUp, SiteVisit, UserAvailability
 # schedule never ran. Only in this hour (local time, IST), so building a large
 # workbook never competes with the working day; run_due decides who is due.
 BACKUP_HOUR = 2
-NOTIFICATION_KEEP_DAYS = 90   # read notifications older than this are deleted nightly
+NOTIFICATION_KEEP_DAYS = 60   # read notifications older than this are deleted nightly
 from accounts.models import User
 from notifications import notify, notify_many, notify_team, reporting_chain
 
