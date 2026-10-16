@@ -16,7 +16,9 @@ around it, since this endpoint writes a permission-bearing list.
 """
 import threading
 
-from django.db import connections
+import unittest
+
+from django.db import connection, connections
 from django.test import TransactionTestCase
 from rest_framework.test import APIClient
 
@@ -90,6 +92,11 @@ class ProjectApproverToggleTests(TransactionTestCase):
         self.assertEqual(sorted(self._stored()), sorted([self.a.id, self.b.id]),
                          'a concurrent toggle was dropped — the bug this endpoint fixes')
 
+    # Six writers at once is a Postgres row-lock test. SQLite (the local and CI test
+    # database) has no row locks — it refuses concurrent writers with "database is
+    # locked", which the threads swallow, so the list stays empty there. The two-
+    # writer test above still runs everywhere.
+    @unittest.skipUnless(connection.vendor == 'postgresql', 'needs real row locks (Postgres)')
     def test_many_toggles_at_once_all_survive(self):
         people = [User.objects.create_user(
             f'p{i}@pat.com', company=self.co, user_code=f'PAT1{i:02d}', password='p',
