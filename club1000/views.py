@@ -943,8 +943,17 @@ class PayoutMarkPaidView(APIView):
         notes = request.data.get('notes')
         if notes is not None:
             payout.notes = notes
+        # The day the money actually went out — the Pay dialog sends it per payout
+        # (a transfer made yesterday is entered today). Defaults to today; never later.
+        paid_on = date.today()
+        if request.data.get('paid_date'):
+            paid_on = _parse_date(request.data.get('paid_date'))
+            if not paid_on:
+                return Response({'detail': 'Invalid paid date.'}, status=status.HTTP_400_BAD_REQUEST)
+            if paid_on > date.today():
+                return Response({'detail': 'The paid date cannot be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
         payout.status = 'paid'
-        payout.paid_date = date.today()
+        payout.paid_date = paid_on
         payout.paid_by = request.user
         payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
         return Response(PayoutSerializer(payout).data)
