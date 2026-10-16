@@ -1,5 +1,5 @@
-"""A saved draft holds its units only while someone is working on it, and signing in
-stamps "Last login"."""
+"""A saved draft holds its units until it is deleted, a bare pick expires, and signing
+in stamps "Last login"."""
 from datetime import timedelta
 
 from django.test import TestCase
@@ -9,7 +9,7 @@ from accounts.models import User
 from accounts.views import get_tokens_for_user
 from companies.models import Company
 from sales.models import Booking, Plot, Project
-from sales.views import DRAFT_HOLD_TIMEOUT, _release_expired_holds
+from sales.views import _release_expired_holds
 
 
 class DraftHoldTimeoutTests(TestCase):
@@ -29,14 +29,18 @@ class DraftHoldTimeoutTests(TestCase):
         self.plot.refresh_from_db()
         self.assertEqual(self.plot.status, 'hold')
 
-    def test_abandoned_draft_frees_the_unit_but_is_kept(self):
-        Booking.objects.filter(pk=self.draft.pk).update(
-            updated_at=timezone.now() - DRAFT_HOLD_TIMEOUT - timedelta(hours=1))
+    def test_an_old_draft_keeps_the_unit_until_it_is_deleted(self):
+        # Drafted by an STM stays theirs however old the draft — only deleting it frees the unit.
+        Booking.objects.filter(pk=self.draft.pk).update(updated_at=timezone.now() - timedelta(days=60))
+        _release_expired_holds(Plot.objects.filter(pk=self.plot.pk))
+        self.plot.refresh_from_db()
+        self.assertEqual(self.plot.status, 'hold')
+
+    def test_a_pick_without_a_draft_still_expires(self):
+        Booking.objects.filter(pk=self.draft.pk).delete()
         _release_expired_holds(Plot.objects.filter(pk=self.plot.pk))
         self.plot.refresh_from_db()
         self.assertEqual(self.plot.status, 'available')
-        self.assertIsNone(self.plot.held_by_id)
-        self.assertTrue(Booking.objects.filter(pk=self.draft.pk, status='draft').exists())
 
 
 class LastLoginTests(TestCase):

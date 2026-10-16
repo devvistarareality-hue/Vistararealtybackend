@@ -2972,11 +2972,6 @@ class ProjectDetailView(APIView):
 
 
 PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
-# A saved draft keeps its units held only while someone is still working on it. A draft
-# left untouched this long stops holding them (the draft itself is kept): drafts
-# abandoned for weeks were keeping units off the map for every other rep. Submitting
-# it later still works if the unit is free, and is refused if someone else took it.
-DRAFT_HOLD_TIMEOUT = timedelta(days=3)
 
 
 def _release_plots(plot_ids, booking=None):
@@ -3085,8 +3080,8 @@ def _release_expired_holds(plots_qs):
     submission time), and never an admin's manual hold via PlotDetailView.patch (which
     never sets held_by). A hold pinned by a saved draft is also exempt — the rep is
     still mid-way through the form, not just browsing; it only frees on submit,
-    discard, an explicit release — or once the draft has sat untouched for
-    DRAFT_HOLD_TIMEOUT."""
+    discard, or an explicit release. A drafted unit shows as "Drafted by <STM>" on
+    the map and stays theirs, however old the draft, until someone deletes it."""
     cutoff = timezone.now() - PLOT_HOLD_TIMEOUT
     candidates = list(plots_qs.filter(status='hold', held_by__isnull=False, held_at__lt=cutoff)
                                .values_list('id', 'project_id'))
@@ -3095,9 +3090,7 @@ def _release_expired_holds(plots_qs):
     candidate_ids = {pid for pid, _ in candidates}
     project_ids   = {proj for _, proj in candidates}
     pinned = set()
-    for b in (Booking.objects.filter(status='draft', project_id__in=project_ids,
-                                     updated_at__gte=timezone.now() - DRAFT_HOLD_TIMEOUT)
-              .only('plot_id', 'plot_ids')):
+    for b in Booking.objects.filter(status='draft', project_id__in=project_ids).only('plot_id', 'plot_ids'):
         if b.plot_id:
             pinned.add(b.plot_id)
         pinned.update(b.plot_ids or [])

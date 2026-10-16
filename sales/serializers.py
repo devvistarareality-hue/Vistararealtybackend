@@ -139,6 +139,26 @@ def _plot_agent_map(project_id):
     return out
 
 
+def _plot_client_map(project_id):
+    """{plot_id: client name} for every unit a live booking stands on — submitted and
+    waiting (Hold) or approved (Sold) — so the unit map can say whose unit it is.
+    Drafts are left out: a draft's details stay with its drafter. One query per
+    project; where a unit has been booked more than once the latest booking wins."""
+    from sales.models import Booking
+    out = {}
+    rows = (Booking.objects
+            .filter(project_id=project_id, status__in=('pending', 'sold'))
+            .order_by('created_at')
+            .only('id', 'plot_id', 'plot_ids', 'client_name'))
+    for b in rows:
+        name = (b.client_name or '').strip()
+        if not name:
+            continue
+        for pid in (b.plot_ids or ([b.plot_id] if b.plot_id else [])):
+            out[pid] = name
+    return out
+
+
 def _plot_draft_map(project_id):
     """{plot_id: draft Booking id} for every unit a saved (unsubmitted) draft still
     references in this project. Lets the picker show a distinct "drafted" colour —
@@ -187,6 +207,21 @@ class PlotSerializer(serializers.ModelSerializer):
             self._agent_cache = cache
         if obj.project_id not in cache:
             cache[obj.project_id] = _plot_agent_map(obj.project_id)
+        return cache[obj.project_id].get(obj.id)
+
+    # The buyer on a Hold or Sold unit, for the map's tooltip. Not for a unit back on
+    # the market as resale — the old sale is history there.
+    client_name = serializers.SerializerMethodField()
+
+    def get_client_name(self, obj):
+        if obj.status not in (Plot.HOLD, Plot.SOLD):
+            return None
+        cache = getattr(self, '_client_cache', None)
+        if cache is None:
+            cache = {}
+            self._client_cache = cache
+        if obj.project_id not in cache:
+            cache[obj.project_id] = _plot_client_map(obj.project_id)
         return cache[obj.project_id].get(obj.id)
 
     # Who currently soft-holds this unit on the plot-map picker (None once it's
@@ -248,7 +283,7 @@ class PlotSerializer(serializers.ModelSerializer):
         model = Plot
         fields = ['id', 'project', 'number', 'status', 'size', 'construction_area', 'cluster_type',
                   'facing', 'price', 'notes', 'floor', 'terrace_area', 'price_book', 'agent_name',
-                  'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold', 'manual_hold',
+                  'client_name', 'held_by_name', 'drafted_booking_id', 'pending_booking_id', 'can_cancel_hold', 'manual_hold',
                   'is_corner', 'is_clubhouse_facing']
         read_only_fields = ['id', 'project']
 
