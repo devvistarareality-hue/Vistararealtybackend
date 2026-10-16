@@ -204,3 +204,41 @@ class InvestorLeadTests(TestCase):
         self.assertEqual(Lead.objects.filter(company=self.co).count(), 0)
         inv.refresh_from_db()
         self.assertEqual(inv.approval_status, 'approved')
+
+
+class OneLeadPerInvestmentTests(InvestorLeadTests):
+    """One number, several investments: each gets its own lead."""
+
+    def test_a_second_investment_on_the_same_number_gets_its_own_lead(self):
+        first = self._investor(name='First', phone='+919812300090')
+        self._act(first)
+        second = self._investor(name='Second', phone='+919812300090')
+        self._act(second)
+        first.refresh_from_db(); second.refresh_from_db()
+        self.assertNotEqual(first.lead_id, second.lead_id)
+        self.assertEqual(Lead.objects.filter(phone_key=phone_blind_index('+919812300090')).count(), 2)
+
+    def test_an_enquiry_for_another_scheme_is_not_borrowed(self):
+        other = Scheme.objects.create(company=self.co, name='GROWTH', tenure_months=24, min_ticket_size=1,
+                                      interest_payout_options=['maturity'])
+        enquiry = self._lead(phone='+919812300091', scheme_interest=other)
+        inv = self._investor(phone='+919812300091')
+        self._act(inv)
+        inv.refresh_from_db()
+        self.assertNotEqual(inv.lead_id, enquiry.pk)
+
+    def test_the_backfill_splits_a_shared_lead_and_fills_the_gaps(self):
+        from django.core.management import call_command
+        a = self._investor(name='A', phone='+919812300092'); a.approval_status = 'approved'; a.save()
+        b = self._investor(name='B', phone='+919812300092'); b.approval_status = 'approved'; b.save()
+        shared = self._lead(phone='+919812300092', scheme_interest=self.scheme)
+        Investor.objects.filter(pk__in=[a.pk, b.pk]).update(lead=shared)
+        c = self._investor(name='C', phone='+919812300093'); c.approval_status = 'approved'; c.save()
+        call_command('link_investor_leads', '--dry-run')
+        self.assertIsNone(Investor.objects.get(pk=c.pk).lead_id, 'a dry run wrote something')
+        call_command('link_investor_leads')
+        a, b, c = (Investor.objects.get(pk=x.pk) for x in (a, b, c))
+        self.assertEqual(a.lead_id, shared.pk)
+        self.assertNotEqual(b.lead_id, shared.pk)
+        self.assertIsNotNone(c.lead_id)
+        self.assertTrue(all(Lead.objects.get(pk=x.lead_id).status == 'converted' for x in (a, b, c)))

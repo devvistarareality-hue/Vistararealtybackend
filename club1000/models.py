@@ -249,6 +249,10 @@ class Investor(models.Model):
     # live fields on approval (see InvestorActionView) — a rejected revision
     # leaves the original terms and loi_document completely untouched.
     revision_no = models.IntegerField(default=0)
+    # Who signed the investment off, and when — the latest approval, a revision's
+    # included. Shown on the Approved tab.
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')
+    approved_at = models.DateTimeField(null=True, blank=True)
     # The date the current revision was agreed — printed on the revised LOI and
     # kept afterwards. Deliberately NOT investment_date: a revision re-agrees
     # the terms, it does not re-date the money, so maturity and the payout

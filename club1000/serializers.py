@@ -87,6 +87,7 @@ class SchemeSerializer(serializers.ModelSerializer):
 
 class InvestorListSerializer(serializers.ModelSerializer):
     scheme_name = serializers.CharField(source='scheme.name', read_only=True)
+    approved_by_name = serializers.CharField(source='approved_by.name', read_only=True, default='')
     added_by_name = serializers.CharField(source='added_by.name', read_only=True, default=None)
     document_url = serializers.SerializerMethodField()
     loi_document_url = serializers.SerializerMethodField()
@@ -120,12 +121,12 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
             'loi_no', 'loi_document_url', 'revision_no', 'revision_date', 'revision_draft',
             'pending_revision', 'pending_revision_type',
-            'pending_loi_document_url', 'created_at', 'updated_at',
+            'pending_loi_document_url', 'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
         ]
         # revision_draft is written only through InvestorReviseDraftView, never
         # as a side effect of editing an investor.
         read_only_fields = ['id', 'company_id', 'maturity_date', 'status', 'approval_status', 'added_by',
-                             'lead', 'loi_no', 'revision_no', 'revision_draft',
+                             'lead', 'loi_no', 'revision_no', 'revision_draft', 'approved_by', 'approved_at',
                              'pending_revision', 'pending_revision_type',
                              'created_at', 'updated_at']
 

@@ -336,32 +336,46 @@ class Club1000UsersView(APIView):
 
 
 def _lead_for_investor(investor, actor):
-    """The Club 1000 lead behind an approved investor, found or made.
+    """The Club 1000 lead behind an approved investor, found or made — one lead per
+    investment.
 
     An investor added straight from the Add Investor form has no lead, so the
-    funnel showed none of them: 42 investors against 0 converted. Every investor
-    came from someone enquiring, whether or not anybody typed a lead first.
+    funnel showed none of them. Every investment came from someone enquiring,
+    whether or not anybody typed a lead first.
 
-    Matched on phone (phone_key, the blind index — `phone` is encrypted and
-    cannot be looked up directly), within the company. An existing lead is reused
-    and converted rather than duplicated: the same person enquiring and then
-    investing is one lead, and a second row would split their history and
-    double-count the funnel.
+    One person can invest many times, in the same scheme or another, under one
+    mobile number — and one number is sometimes shared by several clients (23
+    investments on one live number). So a phone match alone is not a person: an
+    investment takes a lead with the same number AND the same scheme (or an enquiry
+    that named no scheme) that no other investment already holds, preferring one
+    dated on the investment date; failing that a lead is made for it. Two investments therefore never share one lead, and
+    a second investment never borrows the first one's history.
 
-    Returns the lead, or None if there is nothing to go on.
+    Matched through phone_key, the blind index — `phone` is encrypted and cannot be
+    looked up directly — within the company. Returns the lead, or None if there is
+    nothing to go on.
     """
     if investor.lead_id:
         return investor.lead
     key = phone_blind_index(investor.phone)
     if not key:
         return None
-    lead = Lead.objects.filter(company=investor.company, phone_key=key).order_by('created_at').first()
+    taken = Investor.objects.exclude(pk=investor.pk).exclude(lead__isnull=True).values('lead_id')
+    free = Lead.objects.filter(company=investor.company, phone_key=key).exclude(pk__in=taken).order_by('created_at')
+    same_scheme = free.filter(scheme_interest=investor.scheme)
+    # An enquiry that named no scheme can be this investment too; one that named
+    # another scheme belongs to that one.
+    lead = (same_scheme.filter(lead_date=investor.investment_date).first() or same_scheme.first()
+            or free.filter(scheme_interest__isnull=True).first())
     if lead is None:
         lead = Lead.objects.create(
             company=investor.company,
             name=investor.name,
             phone=investor.phone,
-            source='other',
+            email=investor.email or '',
+            source=investor.source or 'other',
+            reference_name=investor.reference_name or '',
+            reference_phone=investor.reference_phone or '',
             lead_date=investor.investment_date,
             scheme_interest=investor.scheme,
             amount_interested=investor.amount_invested,
@@ -1513,7 +1527,8 @@ class InvestorActionView(APIView):
                 investor.pending_revision = None
                 investor.pending_revision_type = 'revise'
                 investor.approval_status = 'approved'
-                investor.save(update_fields=update_fields)
+                investor.approved_by, investor.approved_at = request.user, timezone.now()
+                investor.save(update_fields=update_fields + ['approved_by', 'approved_at'])
                 # Regenerate the payout schedule from the revised terms — only
                 # still-pending entries; anything already paid is left untouched.
                 Payout.objects.filter(investor=investor, status='pending').delete()
@@ -1521,7 +1536,8 @@ class InvestorActionView(APIView):
             else:
                 investor.approval_status = 'approved'
                 investor.status = 'active'
-                investor.save(update_fields=['approval_status', 'status', 'updated_at'])
+                investor.approved_by, investor.approved_at = request.user, timezone.now()
+                investor.save(update_fields=['approval_status', 'status', 'approved_by', 'approved_at', 'updated_at'])
                 # Now — and only now — run the three deferred side effects.
                 # An investor added directly has no lead; one is found by phone
                 # or made here, so every approved investment sits in the funnel
