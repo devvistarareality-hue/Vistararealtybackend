@@ -7649,7 +7649,7 @@ BOOKING_EXPORT_COLUMNS = [
     ('Dev Agreement Rate',       'dev_agreement_rate',  'num'),
     ('Land Sale Deed Rate',      'lsd_rate',            'num'),
     ('Construction Agreement Rate', 'const_agreement_rate', 'num'),
-    ('Sale Deed %',              'sale_deed_pct',       'num'),
+    ('Documentation %',          'sale_deed_pct',       'num'),
     ('Maintenance Rate',         'maint_rate',          'num'),
     ('Maintenance Months',       'maint_months',        'num'),
 
