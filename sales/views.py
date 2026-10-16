@@ -8291,7 +8291,8 @@ BOOKING_EVENTS = {
         'directors': ('booking_update', 'Booking rejected by Sales'),
     },
     'accounts_approved': {
-        'owner':    ('accounts_booking_approved', 'Approved by Accounts — booking confirmed'),
+        # Both Sales and Accounts have signed off — the rep's booking is done.
+        'owner':    ('accounts_booking_approved', 'Plot booking done ✅ — approved by Sales & Accounts'),
         'sales':    ('booking_update', 'Approved by Accounts'),
         'accounts': ('accounts_booking_update', 'Approved by Accounts'),
         'directors': ('booking_update', 'Approved by Accounts — booking confirmed'),
