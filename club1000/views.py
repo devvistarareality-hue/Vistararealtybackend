@@ -104,6 +104,11 @@ class StatsView(APIView):
 
         date_from = request.query_params.get('date_from')
         date_to = request.query_params.get('date_to')
+        # Scheme filter (?scheme=1,2): every figure on the dashboard — the book, the
+        # portfolio snapshot, leads, follow-ups, approvals — for just those schemes.
+        scheme_ids = [int(x) for x in str(request.query_params.get('scheme') or '').split(',') if x.strip().isdigit()]
+        if scheme_ids:
+            investors = investors.filter(scheme_id__in=scheme_ids)
         if date_from:
             investors = investors.filter(investment_date__gte=date_from)
         if date_to:
@@ -125,6 +130,8 @@ class StatsView(APIView):
         paid_amount = sum((p.amount_due or Decimal('0') for p in paid), Decimal('0'))
 
         leads = scope_leads_to_role(_company_filtered(Lead.objects.all(), request), request.user)
+        if scheme_ids:
+            leads = leads.filter(scheme_interest_id__in=scheme_ids)
         if date_from:
             leads = leads.filter(lead_date__gte=date_from)
         if date_to:
@@ -141,6 +148,8 @@ class StatsView(APIView):
             Investor.objects.select_related('scheme'), request).filter(approval_status='approved')
         if not manager:
             portfolio = portfolio.filter(added_by=request.user)
+        if scheme_ids:
+            portfolio = portfolio.filter(scheme_id__in=scheme_ids)
 
         # is_matured() is computed on the fly (nothing ever flips status to
         # 'matured' — see the model) — an investor sitting active past its
@@ -161,6 +170,8 @@ class StatsView(APIView):
         followups = _company_filtered(FollowUp.objects.all(), request, field='lead__company').filter(status='pending')
         if not manager:
             followups = followups.filter(assigned_to=request.user)
+        if scheme_ids:
+            followups = followups.filter(lead__scheme_interest_id__in=scheme_ids)
         now = timezone.now()
         followups_overdue = followups.filter(scheduled_at__lt=now).count()
         followups_today = followups.filter(scheduled_at__date=today).count()
@@ -195,8 +206,13 @@ class StatsView(APIView):
         }
         if manager:
             data['active_scheme_count'] = _company_filtered(Scheme.objects.filter(is_active=True), request).count()
-            data['pending_approval_count'] = _investor_visibility_qs(request).filter(approval_status='pending').count()
-            top = portfolio.order_by('-amount_invested')[:5]
+            pending_q = _investor_visibility_qs(request).filter(approval_status='pending')
+            if scheme_ids:
+                pending_q = pending_q.filter(scheme_id__in=scheme_ids)
+            data['pending_approval_count'] = pending_q.count()
+            # Sorted here, not by the database: amount_invested is encrypted, so an
+            # ORDER BY sorted the ciphertext and the "top" five came out in any order.
+            top = sorted(portfolio, key=lambda i: i.amount_invested or Decimal('0'), reverse=True)[:5]
             data['top_investors'] = [
                 {'name': i.name, 'amount': i.amount_invested, 'scheme': i.scheme.name, 'status': i.status}
                 for i in top
