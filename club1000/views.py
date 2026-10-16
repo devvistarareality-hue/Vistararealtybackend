@@ -1457,7 +1457,8 @@ class InvestorActionView(APIView):
                     investor.amount_invested = Decimal(str(pr['amount_invested']))
                 if 'total_return_pct' in pr:
                     investor.total_return_pct = Decimal(str(pr['total_return_pct']))
-                for f in ('interest_payout', 'security', 'notes', 'name', 'phone'):
+                for f in ('interest_payout', 'security', 'notes', 'name', 'phone',
+                          'email', 'pan', 'source', 'reference_name', 'reference_phone'):
                     if f in pr:
                         setattr(investor, f, pr[f])
                 # The date the revised terms were agreed. Kept on the record
@@ -1469,9 +1470,28 @@ class InvestorActionView(APIView):
                 update_fields = [
                     'amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes',
                     'name', 'phone', 'phone_key', 'revision_date',
+                    'email', 'pan', 'source', 'reference_name', 'reference_phone',
                     'loi_document', 'pending_loi_document', 'pending_revision', 'pending_revision_type',
                     'approval_status', 'updated_at',
                 ]
+                if not is_renewal and ('scheme' in pr or 'investment_date' in pr):
+                    # A revised scheme or investment date moves maturity with it; the
+                    # still-pending payouts are rebuilt from these below.
+                    if pr.get('scheme'):
+                        investor.scheme = Scheme.objects.get(pk=int(pr['scheme']))
+                    new_date = _parse_date(pr.get('investment_date'))
+                    if new_date:
+                        investor.investment_date = new_date
+                    investor.maturity_date = investor.investment_date + relativedelta(months=investor.scheme.tenure_months)
+                    update_fields += ['scheme', 'investment_date', 'maturity_date']
+                if pr.get('document_name'):
+                    if investor.document:
+                        try:
+                            investor.document.delete(save=False)
+                        except Exception:
+                            pass
+                    investor.document.name = pr['document_name']
+                    update_fields.append('document')
                 if is_renewal:
                     # A renewal restarts the investment term from the renewal
                     # date — same row, fresh maturity_date, back to 'active'
@@ -1541,7 +1561,16 @@ class InvestorActionView(APIView):
                 if existing_reward:
                     new_amount = (investor.amount_invested * existing_reward.pct / Decimal('100')).quantize(Decimal('0.01'))
                     existing_reward.amount = new_amount
-                    existing_reward.save(update_fields=['amount'])
+                    # A revision may correct who referred the investor.
+                    existing_reward.reference_name, existing_reward.reference_phone = ref_name, ref_phone
+                    existing_reward.save(update_fields=['amount', 'reference_name', 'reference_phone'])
+                elif not investor.referral_rewards.exists():
+                    # A reference added by the revision, on an investor that never had
+                    # one: the maiden reward it would have earned.
+                    new_amount = (investor.amount_invested * REFERRAL_REWARD_PCT / Decimal('100')).quantize(Decimal('0.01'))
+                    ReferralReward.objects.create(
+                        investor=investor, reference_name=ref_name, reference_phone=ref_phone, amount=new_amount, pct=REFERRAL_REWARD_PCT,
+                    )
             try:
                 approved_label = 'Investor renewal approved' if is_renewal else ('Investor revision approved' if is_revision else 'Investor approved')
                 notify(investor.added_by, 'investor_approved', approved_label,
@@ -1555,6 +1584,13 @@ class InvestorActionView(APIView):
                 # approved terms and signed LOI are completely untouched.
                 if investor.pending_loi_document:
                     investor.pending_loi_document.delete(save=False)
+                staged_doc = (investor.pending_revision or {}).get('document_name')
+                if staged_doc:
+                    try:
+                        from django.core.files.storage import default_storage
+                        default_storage.delete(staged_doc)
+                    except Exception:
+                        pass
                 investor.pending_revision = None
                 investor.pending_revision_type = 'revise'
                 investor.approval_status = 'approved'
@@ -1572,6 +1608,51 @@ class InvestorActionView(APIView):
             except Exception:
                 pass
         return Response(InvestorListSerializer(investor).data)
+
+
+# Everything the Add Investor form holds can be revised (owner, 16 Oct 2026): the
+# Revise LOI dialog IS that form, prefilled. Changing the scheme or the investment
+# date moves maturity, and on approval every still-pending payout is rebuilt from
+# the new terms (paid ones are history and stay). revision_date is still accepted
+# from older clients.
+REVISION_FIELDS = (
+    'scheme', 'investment_date', 'amount_invested', 'total_return_pct', 'interest_payout',
+    'security', 'notes', 'name', 'phone', 'email', 'pan', 'source',
+    'reference_name', 'reference_phone', 'revision_date',
+)
+
+
+def _revision_terms(request, investor):
+    """The proposed terms from a Revise LOI request, checked: a scheme of this
+    investor's company, a real date, and at least that scheme's minimum ticket.
+    Returns (terms, error_response)."""
+    terms = {f: request.data[f] for f in REVISION_FIELDS if f in request.data}
+    scheme = investor.scheme
+    if terms.get('scheme') not in (None, ''):
+        try:
+            scheme = Scheme.objects.get(pk=int(terms['scheme']))
+        except (Scheme.DoesNotExist, TypeError, ValueError):
+            return None, Response({'detail': 'Unknown scheme.'}, status=status.HTTP_400_BAD_REQUEST)
+        if scheme.company_id and scheme.company_id != investor.company_id:
+            return None, Response({'detail': 'Invalid scheme for this company.'}, status=status.HTTP_400_BAD_REQUEST)
+        terms['scheme'] = scheme.id
+    else:
+        terms.pop('scheme', None)
+    if terms.get('investment_date') not in (None, ''):
+        if not _parse_date(terms['investment_date']):
+            return None, Response({'detail': 'Invalid investment_date.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        terms.pop('investment_date', None)
+    if terms.get('source') and terms['source'] != 'referral':
+        terms['reference_name'], terms['reference_phone'] = '', ''
+    try:
+        amount = Decimal(str(terms.get('amount_invested', investor.amount_invested)))
+    except Exception:
+        return None, Response({'detail': 'Invalid amount_invested.'}, status=status.HTTP_400_BAD_REQUEST)
+    if amount < scheme.min_ticket_size:
+        return None, Response({'detail': f'Minimum ticket size for {scheme.name} is {scheme.min_ticket_size}.'},
+                              status=status.HTTP_400_BAD_REQUEST)
+    return terms, None
 
 
 class InvestorReviseDraftView(APIView):
@@ -1594,8 +1675,7 @@ class InvestorReviseDraftView(APIView):
 
     # The same fields the submit path accepts, minus the signed LOI — a draft
     # exists precisely because that file is not in hand yet.
-    FIELDS = ('amount_invested', 'total_return_pct', 'interest_payout', 'security',
-              'notes', 'name', 'phone', 'revision_date')
+    FIELDS = REVISION_FIELDS
 
     def _investor(self, request, pk):
         if not has_club1000_access(request.user):
@@ -1652,24 +1732,25 @@ class InvestorReviseView(APIView):
         if not isinstance(loi, dict) or not loi.get('data'):
             return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        pending = {}
-        # name/phone are editable on a revision (unlike scheme/investment_date,
-        # which genuinely can't change without becoming a different deal) — a
-        # revision is also the natural place to fix a typo or an updated
-        # number caught after the original LOI was signed.
-        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security',
-                  'notes', 'name', 'phone', 'revision_date'):
-            if f in request.data:
-                pending[f] = request.data[f]
-        try:
-            amount = Decimal(str(pending.get('amount_invested', investor.amount_invested)))
-        except Exception:
-            return Response({'detail': 'Invalid amount_invested.'}, status=status.HTTP_400_BAD_REQUEST)
-        if amount < investor.scheme.min_ticket_size:
-            return Response(
-                {'detail': f'Minimum ticket size for {investor.scheme.name} is {investor.scheme.min_ticket_size}.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        pending, err = _revision_terms(request, investor)
+        if err:
+            return err
+        # A new KYC / ID scan waits with the rest of the revision: stored under its
+        # own name now, swapped in on approval, deleted if the revision is rejected.
+        doc = request.data.get('document_file')
+        if isinstance(doc, dict) and doc.get('data'):
+            import base64
+            from django.core.files.base import ContentFile
+            from django.core.files.storage import default_storage
+            ext = (doc.get('name') or '').rsplit('.', 1)[-1][:10] or 'bin'
+            try:
+                pending['document_name'] = default_storage.save(
+                    f'club1000/investor_{investor.id}_doc_r{investor.revision_no + 1}.{ext}',
+                    ContentFile(base64.b64decode(doc['data'])))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Investor revision document save failed for %s', investor.id)
+                return Response({'detail': 'Could not save the scan document.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         payout_schedule = request.data.get('payout_schedule')
         if isinstance(payout_schedule, list):
             pending['payout_schedule'] = payout_schedule
