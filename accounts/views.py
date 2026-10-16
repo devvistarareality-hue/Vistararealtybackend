@@ -51,6 +51,14 @@ def is_platform_admin(user):
 def get_tokens_for_user(user, platform='app', impersonator=None):
     refresh = SessionRefreshToken.for_user(user, platform=platform,
                                            impersonator=impersonator)
+    # Every real sign-in passes through here, so "Last login" is stamped here — it was
+    # never set, and 36 of 38 people read "never logged in". An admin viewing as
+    # someone is not that person signing in.
+    if impersonator is None and getattr(user, 'pk', None):
+        try:
+            type(user).objects.filter(pk=user.pk).update(last_login=timezone.now())
+        except Exception:
+            pass
     return {
         'refresh': str(refresh),
         'access':  str(refresh.access_token),

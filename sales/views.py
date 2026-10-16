@@ -217,7 +217,10 @@ def _cp_people_ids(company_id):
     side (CP Executive or CP Manager). Decided by designation, so worked out here
     once per request rather than per row."""
     users = User.objects.filter(company_id=company_id) if company_id else User.objects.all()
-    return [u.id for u in users.only('id', 'role', 'designation', 'company_id') if is_cp_designated(u)]
+    from accounts.capabilities import attach_designation_rows
+    people = attach_designation_rows(users.only(
+        'id', 'role', 'designation', 'company_id', 'extra_capabilities', 'denied_capabilities'))
+    return [u.id for u in people if is_cp_designated(u)]
 
 
 def sales_handled_visit_q(company_id, prefix=''):
@@ -2917,6 +2920,11 @@ class ProjectDetailView(APIView):
 
 
 PLOT_HOLD_TIMEOUT = timedelta(minutes=10)
+# A saved draft keeps its units held only while someone is still working on it. A draft
+# left untouched this long stops holding them (the draft itself is kept): drafts
+# abandoned for weeks were keeping units off the map for every other rep. Submitting
+# it later still works if the unit is free, and is refused if someone else took it.
+DRAFT_HOLD_TIMEOUT = timedelta(days=3)
 
 
 def _release_plots(plot_ids, booking=None):
@@ -3025,7 +3033,8 @@ def _release_expired_holds(plots_qs):
     submission time), and never an admin's manual hold via PlotDetailView.patch (which
     never sets held_by). A hold pinned by a saved draft is also exempt — the rep is
     still mid-way through the form, not just browsing; it only frees on submit,
-    discard, or an explicit release."""
+    discard, an explicit release — or once the draft has sat untouched for
+    DRAFT_HOLD_TIMEOUT."""
     cutoff = timezone.now() - PLOT_HOLD_TIMEOUT
     candidates = list(plots_qs.filter(status='hold', held_by__isnull=False, held_at__lt=cutoff)
                                .values_list('id', 'project_id'))
@@ -3034,7 +3043,9 @@ def _release_expired_holds(plots_qs):
     candidate_ids = {pid for pid, _ in candidates}
     project_ids   = {proj for _, proj in candidates}
     pinned = set()
-    for b in Booking.objects.filter(status='draft', project_id__in=project_ids).only('plot_id', 'plot_ids'):
+    for b in (Booking.objects.filter(status='draft', project_id__in=project_ids,
+                                     updated_at__gte=timezone.now() - DRAFT_HOLD_TIMEOUT)
+              .only('plot_id', 'plot_ids')):
         if b.plot_id:
             pinned.add(b.plot_id)
         pinned.update(b.plot_ids or [])
@@ -3989,7 +4000,13 @@ class FollowUpListView(APIView):
 
     def get(self, request):
         qs = scope_to_company(
-            FollowUp.objects.select_related('lead', 'assigned_to'),
+            # Only the lead / assignee columns the serializer reads: loading every
+            # lead column (most of them encrypted) for ~20k rows was half the wait.
+            FollowUp.objects.select_related('lead', 'assigned_to').only(
+                *[f.attname for f in FollowUp._meta.concrete_fields],
+                'lead__id', 'lead__name', 'lead__phone', 'lead__telecaller_status',
+                'lead__stm_status', 'lead__project_id', 'lead__telecaller_id',
+                'assigned_to__id', 'assigned_to__name'),
             request.user, 'lead__company',
         )
         if not _sees_all_company(request.user, request):

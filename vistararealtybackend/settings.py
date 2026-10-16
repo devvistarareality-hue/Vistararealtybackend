@@ -18,6 +18,17 @@ if not _SECRET_KEY:
 SECRET_KEY = _SECRET_KEY
 
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+
+# HTTPS hardening (Django `check --deploy`). Railway ends TLS at its proxy and passes
+# X-Forwarded-Proto, which is what tells Django a request was secure. No SSL redirect:
+# every client already uses https, and Railway's health check calls plain http.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+    SECURE_CONTENT_TYPE_NOSNIFF = True
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
 
 # Local-dev convenience only: accept a fixed "000000" OTP so login works when

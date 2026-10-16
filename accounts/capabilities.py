@@ -304,7 +304,11 @@ def legacy_capabilities(title, module=None):
 
 
 def _designation_row(user):
-    """The user's designation in their company's master, matched by name."""
+    """The user's designation in their company's master, matched by name. A caller
+    checking many people at once can set `_designation_row_cache` on each (see
+    designation_rows_by_name) so this does not query once per person."""
+    if hasattr(user, '_designation_row_cache'):
+        return user._designation_row_cache
     title = (getattr(user, 'designation', '') or '').strip()
     company_id = getattr(user, 'company_id', None)
     if not (title and company_id):
@@ -312,6 +316,21 @@ def _designation_row(user):
     from .models import Designation
     return (Designation.objects.filter(company_id=company_id, name__iexact=title)
             .order_by('id').first())
+
+
+def attach_designation_rows(users):
+    """Look up the designation rows of many users in one query and attach them, so
+    capabilities_for() on each of them needs no further query."""
+    from .models import Designation
+    users = list(users)
+    company_ids = {u.company_id for u in users if getattr(u, 'company_id', None)}
+    rows = {}
+    for d in Designation.objects.filter(company_id__in=company_ids).order_by('-id'):
+        rows[(d.company_id, (d.name or '').strip().lower())] = d   # lowest id wins, as above
+    for u in users:
+        title = (getattr(u, 'designation', '') or '').strip()
+        u._designation_row_cache = rows.get((u.company_id, title.lower())) if title and u.company_id else None
+    return users
 
 
 def capabilities_for(user):

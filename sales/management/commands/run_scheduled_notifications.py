@@ -107,6 +107,13 @@ class Command(BaseCommand):
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception('Scheduled backups failed')
+        c['holds_freed'] = 0
+        if not dry and timezone.localtime(now).hour == BACKUP_HOUR:
+            try:
+                c['holds_freed'] = self._free_stale_holds()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Nightly stale-hold sweep failed')
         tag = '[dry-run] ' if dry else ''
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
@@ -116,7 +123,20 @@ class Command(BaseCommand):
             f' · AR digest: {c["ar_digest"]} sent · AR due soon: {c["ar_due_soon"]}'
             f' · Task due soon: {c["task_due_soon"]}'
             f' · backups taken: {c["backups"]}'
+            f' · stale holds freed: {c["holds_freed"]}'
         ))
+
+    # ── Nightly: free unit holds nobody is working on ──────────────────────
+    def _free_stale_holds(self):
+        """A soft hold only expired when someone opened that project's unit map, so a
+        quiet project kept stale holds for weeks. Sweep every project once a night
+        with the same rule the map uses (_release_expired_holds)."""
+        from sales.models import Plot
+        from sales.views import _release_expired_holds
+        held = Plot.objects.filter(status='hold', held_by__isnull=False)
+        before = held.count()
+        _release_expired_holds(Plot.objects.all())
+        return before - held.count()
 
     # ── One-time backfill (suppress the existing backlog) ─────────────────
     def _backfill(self, now):

@@ -599,6 +599,13 @@ class LeadStatusHistory(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            # The dashboards and Stats count status transitions in a date range
+            # (WHERE field_changed=… AND new_value/old_value IN … AND created_at …).
+            # Without these every Stats load read the whole table row by row.
+            models.Index(fields=['field_changed', 'new_value', 'created_at'], name='lsh_field_new_created_idx'),
+            models.Index(fields=['field_changed', 'old_value', 'created_at'], name='lsh_field_old_created_idx'),
+        ]
 
 
 class FollowUp(models.Model):
@@ -626,6 +633,8 @@ class FollowUp(models.Model):
             # ORDER BY scheduled_at.
             models.Index(fields=['assigned_to', 'scheduled_at'], name='followup_assignee_sched_idx'),
             models.Index(fields=['lead'], name='followup_lead_idx'),
+            # The 5-minute reminder job: WHERE status='pending' AND scheduled_at < now.
+            models.Index(fields=['status', 'scheduled_at'], name='followup_status_sched_idx'),
         ]
 
 
