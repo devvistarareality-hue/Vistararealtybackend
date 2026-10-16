@@ -1,3 +1,4 @@
+import re
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
@@ -351,6 +352,21 @@ class Club1000UsersView(APIView):
         return Response(data)
 
 
+def _name_words(name):
+    return [w for w in re.split(r'[^a-z0-9]+', (name or '').lower()) if w]
+
+
+def _same_person(lead_name, investor_name):
+    """Do a lead's name and an investor's name belong to one person? Every word of
+    the shorter name must be in the longer one, so "Ketan Shah" matches "KETAN SHAH -
+    REF JIGNESH SHAH - FORTUNE 55" but not "Tejas Mogra" on the same shared number."""
+    a, b = _name_words(lead_name), _name_words(investor_name)
+    if not a or not b:
+        return False
+    short, long_ = (a, set(b)) if len(a) <= len(b) else (b, set(a))
+    return all(w in long_ for w in short)
+
+
 def _lead_for_investor(investor, actor):
     """The Club 1000 lead behind an approved investor, found or made — one lead per
     investment.
@@ -362,7 +378,7 @@ def _lead_for_investor(investor, actor):
     One person can invest many times, in the same scheme or another, under one
     mobile number — and one number is sometimes shared by several clients (23
     investments on one live number). So a phone match alone is not a person: an
-    investment takes a lead with the same number AND the same scheme (or an enquiry
+    investment takes a lead with the same number, the same name AND the same scheme (or an enquiry
     that named no scheme) that no other investment already holds, preferring one
     dated on the investment date; failing that a lead is made for it. Two investments therefore never share one lead, and
     a second investment never borrows the first one's history.
@@ -378,11 +394,14 @@ def _lead_for_investor(investor, actor):
         return None
     taken = Investor.objects.exclude(pk=investor.pk).exclude(lead__isnull=True).values('lead_id')
     free = Lead.objects.filter(company=investor.company, phone_key=key).exclude(pk__in=taken).order_by('created_at')
-    same_scheme = free.filter(scheme_interest=investor.scheme)
+    # Same number AND same person: names are encrypted, so compared here in Python.
+    free = [l for l in free if _same_person(l.name, investor.name)]
+    same_scheme = [l for l in free if l.scheme_interest_id == investor.scheme_id]
     # An enquiry that named no scheme can be this investment too; one that named
     # another scheme belongs to that one.
-    lead = (same_scheme.filter(lead_date=investor.investment_date).first() or same_scheme.first()
-            or free.filter(scheme_interest__isnull=True).first())
+    lead = (next((l for l in same_scheme if l.lead_date == investor.investment_date), None)
+            or next(iter(same_scheme), None)
+            or next((l for l in free if l.scheme_interest_id is None), None))
     if lead is None:
         lead = Lead.objects.create(
             company=investor.company,

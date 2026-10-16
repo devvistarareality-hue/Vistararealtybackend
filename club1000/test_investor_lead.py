@@ -55,7 +55,7 @@ class InvestorLeadTests(TestCase):
             total_return_pct=18, interest_payout='maturity',
             status='active', approval_status='pending', lead=lead)
 
-    def _lead(self, name='Enquired Earlier', phone='+919812300001', company=None, **over):
+    def _lead(self, name='Direct Entry', phone='+919812300001', company=None, **over):
         fields = dict(company=company or self.co, name=name, phone=phone, status='new')
         fields.update(over)
         return Lead.objects.create(**fields)
@@ -107,7 +107,7 @@ class InvestorLeadTests(TestCase):
     # ------------------------------------------------- an enquiry already there
 
     def test_an_existing_lead_on_the_same_phone_is_reused_not_duplicated(self):
-        existing = self._lead(phone='+919812300002')
+        existing = self._lead(name='SAME PERSON - REF X', phone='+919812300002')
         inv = self._investor(name='Same Person', phone='+919812300002')
         self._act(inv)
         self.assertEqual(Lead.objects.filter(company=self.co).count(), 1,
@@ -156,12 +156,21 @@ class InvestorLeadTests(TestCase):
     def test_the_oldest_matching_lead_wins(self):
         # Duplicates exist in live data. Converting the first enquiry keeps the
         # funnel's dates honest rather than crediting the newest row.
-        first = self._lead(name='First Enquiry', phone='+919812300007')
-        self._lead(name='Duplicate Enquiry', phone='+919812300007')
+        first = self._lead(phone='+919812300007')
+        self._lead(phone='+919812300007')
         inv = self._investor(phone='+919812300007')
         self._act(inv)
         inv.refresh_from_db()
         self.assertEqual(inv.lead_id, first.pk)
+
+    def test_a_shared_number_under_another_name_is_not_borrowed(self):
+        # One number, two different people: the lead stays the other person's.
+        theirs = self._lead(name='Tejas Mogra', phone='+919812300010')
+        inv = self._investor(name='Ketan Shah', phone='+919812300010')
+        self._act(inv)
+        inv.refresh_from_db()
+        self.assertNotEqual(inv.lead_id, theirs.pk)
+        self.assertEqual(Lead.objects.filter(company=self.co).count(), 2)
 
     # ------------------------------------------------------ what must not change
 
