@@ -266,6 +266,7 @@ def _entities():
             'interest_payout': ('interest_payout', 'choice'), 'return_pct': ('total_return_pct', 'number'),
             'status': ('status', 'choice'), 'approval': ('approval_status', 'choice'),
             'added_by': ('added_by__name', 'text'),
+            'approved_by': ('approved_by__name', 'text'), 'approved_on': ('approved_at', 'date'),
         }},
         'payouts': {'module': ('Club 1000',), 'view': PayoutListView, 'date': 'due',
                     'company': 'investor__company_id', 'note': 'interest / principal payouts to investors',
