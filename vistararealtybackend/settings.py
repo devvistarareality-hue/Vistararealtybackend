@@ -29,7 +29,29 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365
     SECURE_HSTS_INCLUDE_SUBDOMAINS = False
     SECURE_CONTENT_TYPE_NOSNIFF = True
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',')
+# Which addresses this server answers to. On Railway: its own public and private
+# domains, Railway's health checker, and the web front-ends in CORS_ALLOWED_ORIGINS
+# (the website and app reach the API through the Vercel proxy). An explicit
+# ALLOWED_HOSTS list still wins; '*' (or unset) only applies off Railway, i.e. locally.
+def _allowed_hosts():
+    from urllib.parse import urlparse
+    explicit = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '').split(',') if h.strip()]
+    if explicit and explicit != ['*']:
+        return explicit
+    public = os.getenv('RAILWAY_PUBLIC_DOMAIN', '').strip()
+    if not public:
+        return ['*']
+    hosts = {public, 'healthcheck.railway.app'}
+    if os.getenv('RAILWAY_PRIVATE_DOMAIN'):
+        hosts.add(os.getenv('RAILWAY_PRIVATE_DOMAIN').strip())
+    for origin in os.getenv('CORS_ALLOWED_ORIGINS', '').split(','):
+        host = urlparse(origin.strip()).hostname
+        if host and host not in ('localhost', '127.0.0.1'):
+            hosts.add(host)
+    return sorted(hosts)
+
+
+ALLOWED_HOSTS = _allowed_hosts()
 
 # Local-dev convenience only: accept a fixed "000000" OTP so login works when
 # outbound email isn't configured. Must never be set in Railway/production env vars.
@@ -222,7 +244,12 @@ if _cors_origins:
     # Always allow local dev origins (any localhost / 127.0.0.1 port) even when a fixed
     # production origin list is set — so the web app on localhost can talk to a local
     # backend without being blocked by CORS.
-    CORS_ALLOWED_ORIGIN_REGEXES = [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$']
+    if DEBUG:
+        CORS_ALLOWED_ORIGIN_REGEXES = [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$']
+    else:
+        # Live: a page on someone's own computer is not one of our websites.
+        CORS_ALLOWED_ORIGINS = [o for o in CORS_ALLOWED_ORIGINS
+                                if not o.startswith(('http://localhost', 'http://127.0.0.1'))]
 else:
     CORS_ALLOW_ALL_ORIGINS = True
 # X-Nexora-Module: which module's screen made the call (activity/recorder.py).
