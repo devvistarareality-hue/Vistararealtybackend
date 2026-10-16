@@ -9,7 +9,6 @@ def health(request):
 
 urlpatterns = [
     path('health/', health),
-    path('admin/', admin.site.urls),
     path('api/company/', include('companies.urls')),
     path('api/auth/', include('accounts.urls')),
     path('api/attendance/', include('attendance.urls')),
@@ -19,6 +18,11 @@ urlpatterns = [
     path('api/activity/', include('activity.urls')),
     path('api/tasks/', include('tasks.urls')),
 ]
+
+# Django's own admin site only in local development: no account can use it on the
+# live server (nobody is staff), so its public login page was attack surface only.
+if settings.DEBUG:
+    urlpatterns.append(path('admin/', admin.site.urls))
 
 # Serve uploaded media (signed LOIs) in development.
 if settings.DEBUG:

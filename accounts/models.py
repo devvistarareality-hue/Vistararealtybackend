@@ -67,6 +67,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_staff          = models.BooleanField(default=False)
     date_joined       = models.DateTimeField(auto_now_add=True)
     session_token_app = models.UUIDField(default=uuid.uuid4)
+    # Wrong passwords in a row, and until when sign-in is refused after too many
+    # (LoginView). Kept on the account, not per server worker, so the limit holds
+    # across workers and deploys.
+    failed_logins = models.IntegerField(default=0)
+    login_locked_until = models.DateTimeField(null=True, blank=True)
     session_token_web = models.UUIDField(default=uuid.uuid4)
 
     # Not a column: set per-request by SessionJWTAuthentication to the id of the
@@ -126,6 +131,7 @@ class OtpCode(models.Model):
     code       = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)
     is_used    = models.BooleanField(default=False)
+    attempts   = models.IntegerField(default=0)   # wrong codes entered; the OTP dies at OTP_MAX_ATTEMPTS
 
     class Meta:
         ordering = ['-created_at']

@@ -1,5 +1,5 @@
 import uuid
-import random
+import secrets
 import datetime
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -65,6 +65,30 @@ def get_tokens_for_user(user, platform='app', impersonator=None):
     }
 
 
+# Wrong passwords in a row before the account is locked, and for how long. Counted
+# on the account itself, so it holds across server workers and deploys (the per-IP
+# throttle alone was counted per worker and reset on every deploy).
+LOGIN_MAX_FAILS = 10
+LOGIN_LOCK_MINUTES = 15
+# Wrong codes one OTP accepts before it is thrown away and the person must sign in again.
+OTP_MAX_ATTEMPTS = 5
+
+
+def _locked_response(user):
+    left = max(1, int((user.login_locked_until - timezone.now()).total_seconds() // 60) + 1)
+    return Response({'detail': f'Too many wrong passwords. Try again in {left} minute{"s" if left != 1 else ""}.'},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+def _note_failed_login(user):
+    fails = (user.failed_logins or 0) + 1
+    if fails >= LOGIN_MAX_FAILS:
+        User.objects.filter(pk=user.pk).update(
+            failed_logins=0, login_locked_until=timezone.now() + datetime.timedelta(minutes=LOGIN_LOCK_MINUTES))
+    else:
+        User.objects.filter(pk=user.pk).update(failed_logins=fails)
+
+
 class LoginView(APIView):
     permission_classes = [AllowAny]
     # Brute-force / credential-stuffing protection: cap login attempts per client IP.
@@ -93,15 +117,20 @@ class LoginView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
+        if user.login_locked_until and user.login_locked_until > timezone.now():
+            return _locked_response(user)
         if not user.check_password(password):
+            _note_failed_login(user)
             return Response({'detail': 'Invalid user code or password.'}, status=status.HTTP_401_UNAUTHORIZED)
+        if user.failed_logins or user.login_locked_until:
+            User.objects.filter(pk=user.pk).update(failed_logins=0, login_locked_until=None)
 
         # If the user has an email, require OTP verification (delivered by email) before
         # issuing tokens. SMS/Twilio OTP has been removed.
         email = (user.email or '').strip()
         if email:
             OtpCode.objects.filter(user=user, is_used=False).delete()
-            code = f'{random.randint(0, 999999):06d}'
+            code = f'{secrets.randbelow(1_000_000):06d}'
             otp = OtpCode.objects.create(user=user, code=code)
             from notifications import send_email_otp
             send_email_otp(email, code)
@@ -642,6 +671,12 @@ class VerifyOtpView(APIView):
 
         dev_bypass = getattr(settings, 'DEV_OTP_BYPASS', False) and code == '000000'
         if otp.code != code and not dev_bypass:
+            otp.attempts = (otp.attempts or 0) + 1
+            if otp.attempts >= OTP_MAX_ATTEMPTS:
+                otp.delete()
+                return Response({'detail': 'Too many wrong codes. Please log in again.'},
+                                status=status.HTTP_401_UNAUTHORIZED)
+            otp.save(update_fields=['attempts'])
             return Response({'detail': 'Incorrect OTP. Please try again.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         otp.is_used = True
@@ -682,7 +717,7 @@ class ResendOtpView(APIView):
 
         user = otp.user
         otp.delete()
-        code = f'{random.randint(0, 999999):06d}'
+        code = f'{secrets.randbelow(1_000_000):06d}'
         new_otp = OtpCode.objects.create(user=user, code=code)
         from notifications import send_email_otp
         if (user.email or '').strip():
