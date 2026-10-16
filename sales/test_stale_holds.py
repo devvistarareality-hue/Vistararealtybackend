@@ -50,3 +50,18 @@ class LastLoginTests(TestCase):
         get_tokens_for_user(rep)
         rep.refresh_from_db()
         self.assertIsNotNone(rep.last_login)
+
+
+class OldNotificationCleanupTests(TestCase):
+    def test_only_old_read_notifications_are_deleted(self):
+        from accounts.models import Notification
+        from sales.management.commands.run_scheduled_notifications import Command, NOTIFICATION_KEEP_DAYS
+        co = Company.objects.create(code='AAA', name='Alpha')
+        u = User.objects.create(email='u@x.com', company=co, role='STM', user_code='U1')
+        old = timezone.now() - timedelta(days=NOTIFICATION_KEEP_DAYS + 1)
+        keep_unread = Notification.objects.create(recipient=u, title='old unread')
+        drop = Notification.objects.create(recipient=u, title='old read', is_read=True)
+        keep_recent = Notification.objects.create(recipient=u, title='new read', is_read=True)
+        Notification.objects.filter(pk__in=[keep_unread.pk, drop.pk]).update(created_at=old)
+        self.assertEqual(Command()._drop_old_notifications(timezone.now()), 1)
+        self.assertEqual(set(Notification.objects.values_list('pk', flat=True)), {keep_unread.pk, keep_recent.pk})

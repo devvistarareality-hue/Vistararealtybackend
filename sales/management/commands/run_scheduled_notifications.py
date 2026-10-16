@@ -24,6 +24,7 @@ from sales.models import FollowUp, SiteVisit, UserAvailability
 # schedule never ran. Only in this hour (local time, IST), so building a large
 # workbook never competes with the working day; run_due decides who is due.
 BACKUP_HOUR = 2
+NOTIFICATION_KEEP_DAYS = 90   # read notifications older than this are deleted nightly
 from accounts.models import User
 from notifications import notify, notify_many, notify_team, reporting_chain
 
@@ -108,12 +109,18 @@ class Command(BaseCommand):
                 import logging
                 logging.getLogger(__name__).exception('Scheduled backups failed')
         c['holds_freed'] = 0
+        c['old_notifications'] = 0
         if not dry and timezone.localtime(now).hour == BACKUP_HOUR:
             try:
                 c['holds_freed'] = self._free_stale_holds()
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception('Nightly stale-hold sweep failed')
+            try:
+                c['old_notifications'] = self._drop_old_notifications(now)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Nightly notification cleanup failed')
         tag = '[dry-run] ' if dry else ''
         self.stdout.write(self.style.SUCCESS(
             f'{tag}follow-up: {c["fu_reminder"]} nudged / {c["fu_escalate"]} escalated · '
@@ -124,7 +131,18 @@ class Command(BaseCommand):
             f' · Task due soon: {c["task_due_soon"]}'
             f' · backups taken: {c["backups"]}'
             f' · stale holds freed: {c["holds_freed"]}'
+            f' · old notifications removed: {c["old_notifications"]}'
         ))
+
+    # ── Nightly: drop old read notifications ───────────────────────────────
+    def _drop_old_notifications(self, now):
+        """The bell's history grew forever (55k rows). A notification that was read
+        and is older than NOTIFICATION_KEEP_DAYS is deleted; an unread one is never
+        touched, however old."""
+        from accounts.models import Notification
+        gone, _ = Notification.objects.filter(
+            is_read=True, created_at__lt=now - timedelta(days=NOTIFICATION_KEEP_DAYS)).delete()
+        return gone
 
     # ── Nightly: free unit holds nobody is working on ──────────────────────
     def _free_stale_holds(self):
