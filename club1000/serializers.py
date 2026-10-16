@@ -165,11 +165,15 @@ class InvestorCreateSerializer(serializers.ModelSerializer):
 class PayoutSerializer(serializers.ModelSerializer):
     investor_name = serializers.CharField(source='investor.name', read_only=True)
     scheme_name = serializers.CharField(source='investor.scheme.name', read_only=True)
+    # The Payouts screen is one card per investor (AR Collections' layout), which
+    # shows who to pay and their LOI alongside the money.
+    investor_phone = serializers.CharField(source='investor.phone', read_only=True, default='')
+    investor_loi_no = serializers.CharField(source='investor.loi_no', read_only=True, default='')
 
     class Meta:
         model = Payout
         fields = [
-            'id', 'investor', 'investor_name', 'scheme_name', 'payout_type', 'due_date',
+            'id', 'investor', 'investor_name', 'investor_phone', 'investor_loi_no', 'scheme_name', 'payout_type', 'due_date',
             'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due',
