@@ -2461,6 +2461,57 @@ class LeadListView(APIView):
         return Response(LeadDetailSerializer(lead).data, status=status.HTTP_201_CREATED)
 
 
+def _transfer_events(lead):
+    """Timeline entries for a lead's STM transfers, shaped like LeadStatusHistory rows.
+
+    A transfer moves lead.stm and writes nothing else, so opening the lead
+    showed it in someone else's hands with nothing to say when it moved, who
+    asked, or who signed it off — that lived only on the Approvals screen.
+
+    Read off the transfers themselves rather than written at approval time, the
+    same way follow-ups are handled above. That is not only consistency: every
+    transfer already approved shows up too, which a write-time row could only
+    manage with a backfill.
+
+    Rejected and withdrawn requests are included. "A transfer was asked for and
+    refused" is part of a lead's story, and its absence reads as though nobody
+    ever asked.
+    """
+    def iso(dt):
+        return timezone.localtime(dt).isoformat() if dt else None
+    out = []
+    for t in lead.transfers.select_related('from_stm', 'to_stm', 'requested_by', 'decided_by').all():
+        frm = (t.from_stm.name if t.from_stm_id else '') or '—'
+        to = (t.to_stm.name if t.to_stm_id else '') or '—'
+        asked_by = (t.requested_by.name if t.requested_by_id else '') or 'someone'
+        decided_by = (t.decided_by.name if t.decided_by_id else '') or ''
+        out.append({
+            'id': f'tr-{t.id}', 'field_changed': 'transfer_requested', 'old_value': '',
+            'new_value': f'{frm} → {to}',
+            'remarks': (f'Requested by {asked_by}' + (f' — "{t.reason}"' if t.reason else '')),
+            'changed_by_name': asked_by,
+            'created_at': iso(t.created_at),
+        })
+        if t.status == 'pending':
+            continue
+        # Who signed it off is the half that was missing entirely.
+        verb = {'approved': 'Approved', 'rejected': 'Rejected', 'cancelled': 'Withdrawn'}.get(
+            t.status, t.status.title())
+        remark = (f'{verb} by {decided_by}' if decided_by
+                  else ('Withdrawn by the requester' if t.status == 'cancelled' else verb))
+        if t.decision_note:
+            remark += f' · {t.decision_note}'
+        out.append({
+            'id': f'tr-{t.id}-{t.status}', 'field_changed': f'transfer_{t.status}',
+            'old_value': frm if t.status == 'approved' else '',
+            'new_value': to if t.status == 'approved' else f'{frm} → {to}',
+            'remarks': remark,
+            'changed_by_name': decided_by or None,
+            'created_at': iso(t.decided_at or t.updated_at),
+        })
+    return out
+
+
 def _follow_up_events(lead):
     """Timeline entries for a lead's follow-ups, shaped like LeadStatusHistory rows
     (field_changed follow_up / follow_up_done / follow_up_missed)."""
@@ -2548,6 +2599,7 @@ class LeadDetailView(APIView):
         # them. Read them off the follow-ups themselves (past ones included): when one
         # was scheduled, and when it was done or missed.
         events += _follow_up_events(lead)
+        events += _transfer_events(lead)
         from django.utils.dateparse import parse_datetime
         _epoch = timezone.make_aware(datetime(2000, 1, 1))
         events.sort(key=lambda e: parse_datetime(str(e['created_at'])) if e['created_at'] else _epoch)
@@ -3432,6 +3484,78 @@ class ProjectApprovalActionView(APIView):
         return Response(ProjectSerializer(
             Project.objects.annotate(lead_count=Count('leads')).prefetch_related('plots').get(pk=project.pk)
         ).data)
+
+
+class ProjectToggleApproverView(APIView):
+    """Add or remove one approver on one of a project's approver lists, atomically.
+
+    The obvious client-side approach — read the list, compute the new array,
+    PATCH the whole thing — races the moment two toggles for the SAME project
+    are in flight together, which is exactly what setting up a dozen projects
+    looks like. Each request computes its new array from whatever it read
+    before either had saved, so whichever write lands LAST at the DB wins
+    regardless of which was sent last, silently dropping the other click with
+    no error on either side.
+
+    That is not hypothetical here: the activity log shows every Sales and CP
+    list on this company emptied this way, a pair of writes landing in the same
+    second — "4 → 4, 5" immediately followed by "4, 5 → —", the second request
+    having computed [] from a stale [4].
+
+    select_for_update() forces concurrent toggles for the same project to
+    serialize on the row lock, each reading the true post-previous-toggle
+    state, so nothing is lost however the requests interleave. Mirrors
+    club1000.SchemeToggleApproverView, which exists for the same reason.
+    """
+    permission_classes = [IsAuthenticated]
+
+    # Who may change each list — the same split ProjectDetailView.patch enforces.
+    # Sales and CP: a real admin or a Sales Admin-Modules user. Accounts: a real
+    # admin only, since deciding who signs off at the money stage does not come
+    # with admin rights over that module.
+    SALES_FIELDS = ('booking_approvers', 'cp_booking_approvers')
+    ACCOUNTS_FIELDS = ('accounts_booking_approvers', 'accounts_cp_booking_approvers')
+
+    def post(self, request, pk):
+        field = request.data.get('field') or 'booking_approvers'
+        if field not in self.SALES_FIELDS + self.ACCOUNTS_FIELDS:
+            return Response({'detail': 'Unknown approver list.'}, status=status.HTTP_400_BAD_REQUEST)
+        allowed = (
+            _is_hard_admin(request.user) if field in self.ACCOUNTS_FIELDS
+            else (_is_hard_admin(request.user)
+                  or 'Sales' in (getattr(request.user, 'admin_modules', None) or []))
+        )
+        if not allowed:
+            noun = 'Accounts approvers' if field in self.ACCOUNTS_FIELDS else 'booking approvers'
+            return Response({'detail': f'Only an administrator can change {noun}.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            user_id = int(request.data.get('user_id'))
+        except (TypeError, ValueError):
+            return Response({'detail': 'user_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            project = scope_to_company(
+                Project.objects.select_for_update(), request.user).filter(pk=pk).first()
+            if not project:
+                return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+            # The approver must be someone real in this company — otherwise a
+            # stale or hand-made id could park a non-existent user on the list,
+            # leaving a project that looks configured and can never be approved.
+            if not User.objects.filter(pk=user_id, company=project.company, is_active=True).exists():
+                return Response({'detail': 'That user is not in this company.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            current = list(getattr(project, field) or [])
+            updated = ([u for u in current if u != user_id] if user_id in current
+                       else [*current, user_id])
+            setattr(project, field, updated)
+            project.save(update_fields=[field])
+        # Imported here as the rest of this module does; it only annotates the
+        # request — the middleware still writes the single log entry.
+        from activity.recorder import note
+        note(request, f'{project.name} — {field.replace("_", " ")}: '
+                      f'{", ".join(map(str, current)) or "—"} → {", ".join(map(str, updated)) or "—"}',
+             action='update', target_type='Project', target_id=project.pk, module='Sales')
+        return Response({'id': project.pk, field: updated})
 
 
 class ProjectApproversView(APIView):
@@ -10193,6 +10317,7 @@ class LeadTransferActionView(APIView):
                 t.decision_note = note
                 t.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note',
                                       'from_stm', 'updated_at'])
+
         else:
             t.status = 'rejected' if action == 'reject' else 'cancelled'
             t.decided_by = request.user
