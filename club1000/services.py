@@ -1,5 +1,5 @@
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
 from .models import Payout, PAYOUT_TYPE_CHOICES
@@ -86,6 +86,28 @@ def default_monthly_dates(investment_date, tenure_months):
     return dates
 
 
+def accrual_end(due_date, maturity_date):
+    """The last day an instalment's interest accrues to.
+
+    A payout DATE is when the money is handed over, not the period it covers.
+    Investing 1 Jul with quarterly payouts, the first instalment falls due
+    10 Oct but pays the quarter that ENDED 30 Sep — accruing all the way to
+    the 10th charged ten days that belong to the next quarter.
+
+    So an instalment accrues to the day before its payout month begins. The
+    final instalment is the exception: it is capped at the maturity date, and
+    maturity is a real end rather than a payment day, so it accrues to itself.
+
+    Periods stay contiguous (each starts where the last ended) and the last
+    ends at maturity, so the instalments still sum to exactly the scheme's
+    promised total return — this shifts where the boundaries fall, it does not
+    change what is paid overall.
+    """
+    if due_date >= maturity_date:
+        return maturity_date
+    return date(due_date.year, due_date.month, 1) - timedelta(days=1)
+
+
 def maturity_value(principal, total_return_pct, investment_date, maturity_date):
     """Principal + the scheme's total return, applied once over the whole
     tenure — total_return_pct is the total return BY maturity (e.g. a
@@ -139,6 +161,11 @@ def generate_payout_schedule(investor, custom_entries=None):
             payout_type = entry.get('payout_type')
             if payout_type not in valid_types:
                 payout_type = 'interest'
+            # The client previews a zero for an instalment whose period had not
+            # started at the investment date (see accrual_end); the auto path
+            # omits that row, so a reviewed schedule must not create it either.
+            if payout_type == 'interest' and amount_due <= 0:
+                continue
             rows.append(Payout(investor=investor, payout_type=payout_type, due_date=due_date, amount_due=amount_due))
         if rows:
             Payout.objects.bulk_create(rows)
@@ -158,7 +185,17 @@ def generate_payout_schedule(investor, custom_entries=None):
         daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal(tenure_days)
         prev_date = investor.investment_date
         for due_date in dates:
-            days_elapsed = (due_date - prev_date).days
+            # Accrue to the end of the period this instalment pays for, not to
+            # the day it is handed over — see accrual_end.
+            period_end = accrual_end(due_date, investor.maturity_date)
+            days_elapsed = (period_end - prev_date).days
+            if days_elapsed <= 0:
+                # Invested on or after the period's own end (e.g. 30 Sep, with
+                # the 10 Oct instalment covering up to 30 Sep). There is nothing
+                # to pay yet, and a zero row is noise; prev_date deliberately
+                # stays put so the next instalment runs from the investment
+                # date and no day goes uncounted.
+                continue
             amount_due = (daily_rate * Decimal(days_elapsed)).quantize(Decimal('0.01'))
             Payout.objects.create(
                 investor=investor,
@@ -166,7 +203,7 @@ def generate_payout_schedule(investor, custom_entries=None):
                 due_date=due_date,
                 amount_due=amount_due,
             )
-            prev_date = due_date
+            prev_date = period_end
         Payout.objects.create(
             investor=investor,
             payout_type='maturity',
