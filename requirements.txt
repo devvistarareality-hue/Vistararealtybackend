@@ -1,4 +1,7 @@
-Django>=4.2,<5.0
+# 5.2 LTS (supported to April 2028). A local Python 3.9 venv can't run 5.x, so it
+# stays on 4.2 there — the test suite passes on both.
+Django>=5.2,<5.3; python_version >= "3.10"
+Django>=4.2,<5.0; python_version < "3.10"
 djangorestframework>=3.14
 djangorestframework-simplejwt>=5.3
 django-cors-headers>=4.3
