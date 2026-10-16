@@ -69,6 +69,9 @@ class ProjectApproverToggleTests(TransactionTestCase):
 
     # ------------------------------------------------------------ the race
 
+    # Concurrent writers need Postgres row locks; SQLite (local + CI) refuses the second
+    # writer with "database table is locked", so this failed there at random.
+    @unittest.skipUnless(connection.vendor == 'postgresql', 'needs real row locks (Postgres)')
     def test_two_approvers_ticked_at_once_both_survive(self):
         """The whole reason this endpoint exists. Both toggles are sent
         together, as two quick clicks are; neither may be lost."""

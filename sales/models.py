@@ -723,6 +723,9 @@ class Booking(models.Model):
     sale_deed_amount   = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
     maint_rate         = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
     maint_months       = models.IntegerField(default=0)
+    # Industrial: the Maintenance Advance has its own rate (× Plot Area); maint_rate is
+    # then the Deposit's rate. 0 elsewhere — other sets charge one maintenance rate.
+    maint_advance_rate = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
 
     # Amounts
     plot_basic       = EncryptedDecimalField(max_digits=16, decimal_places=2, default=0)
