@@ -118,11 +118,15 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
             'maturity_date', 'is_matured', 'maturity_value', 'interest_payout', 'total_return_pct', 'document_url', 'status',
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
-            'loi_no', 'loi_document_url', 'revision_no', 'pending_revision', 'pending_revision_type',
+            'loi_no', 'loi_document_url', 'revision_no', 'revision_date', 'revision_draft',
+            'pending_revision', 'pending_revision_type',
             'pending_loi_document_url', 'created_at', 'updated_at',
         ]
+        # revision_draft is written only through InvestorReviseDraftView, never
+        # as a side effect of editing an investor.
         read_only_fields = ['id', 'company_id', 'maturity_date', 'status', 'approval_status', 'added_by',
-                             'lead', 'loi_no', 'revision_no', 'pending_revision', 'pending_revision_type',
+                             'lead', 'loi_no', 'revision_no', 'revision_draft',
+                             'pending_revision', 'pending_revision_type',
                              'created_at', 'updated_at']
 
 

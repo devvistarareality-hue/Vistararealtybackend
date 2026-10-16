@@ -16,6 +16,7 @@ urlpatterns = [
     path('investors/<int:pk>/redeem/', views.InvestorRedeemView.as_view()),
     path('investors/<int:pk>/action/', views.InvestorActionView.as_view()),
     path('investors/<int:pk>/revise/', views.InvestorReviseView.as_view()),
+    path('investors/<int:pk>/revise/draft/', views.InvestorReviseDraftView.as_view()),
     path('investors/<int:pk>/renew/', views.InvestorRenewView.as_view()),
     path('investors/<int:pk>/mature-payout/', views.InvestorMaturityPayoutView.as_view()),
     path('investors/<int:pk>/loi-no/', views.InvestorLoiNoView.as_view()),

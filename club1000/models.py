@@ -249,7 +249,19 @@ class Investor(models.Model):
     # live fields on approval (see InvestorActionView) — a rejected revision
     # leaves the original terms and loi_document completely untouched.
     revision_no = models.IntegerField(default=0)
+    # The date the current revision was agreed — printed on the revised LOI and
+    # kept afterwards. Deliberately NOT investment_date: a revision re-agrees
+    # the terms, it does not re-date the money, so maturity and the payout
+    # schedule are unaffected. Null until an investor has been revised at all.
+    revision_date = models.DateField(null=True, blank=True)
     pending_revision = models.JSONField(null=True, blank=True)
+    # A revision typed but not yet submitted. The signed LOI has to be
+    # downloaded, signed and uploaded before a revision can go for approval,
+    # which can take days — without somewhere to put the work in between, the
+    # form had to be filled again from scratch. Held separately from
+    # pending_revision so an unsubmitted draft never looks like a revision
+    # awaiting an approver.
+    revision_draft = models.JSONField(null=True, blank=True)
     pending_loi_document = models.FileField(max_length=300, null=True, blank=True)
     # Which kind of proposed change pending_revision holds — a plain "Revise LOI"
     # edit (terms change, dates untouched) or a maturity "Renew" (investment_date

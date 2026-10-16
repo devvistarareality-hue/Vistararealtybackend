@@ -188,6 +188,10 @@ class StatsView(APIView):
             'referral_pending_count': referral_pending.count(),
             'referral_pending_amount': referral_pending_amount,
             'referral_paid_amount': referral_paid_amount,
+            # Live snapshot, like the other portfolio figures above — what is
+            # coming is not a fact about investments made in a chosen range, so
+            # it reads `portfolio` rather than the date-filtered `investors`.
+            'payout_forecast': _payout_forecast(portfolio, today),
         }
         if manager:
             data['active_scheme_count'] = _company_filtered(Scheme.objects.filter(is_active=True), request).count()
@@ -378,6 +382,53 @@ def _distinct(qs, field):
     filter picker may offer (?facets=1), so it never lists a choice that
     returns nothing."""
     return sorted({str(v) for v in qs.order_by().values_list(field, flat=True).distinct() if v not in (None, '')})
+
+
+def _payout_forecast(portfolio, as_of, months=3):
+    """Pending payouts grouped into the current month, the next two, then
+    everything later, then anything undated — the same shape AR's "Falling due"
+    uses (receivables/engine.py::compute), so the two dashboards read alike.
+
+    The months are built from `as_of` rather than stored anywhere, so the
+    columns move with the calendar: in November the first column is Nov.
+
+    Only what is NOT yet due, matching AR: a payout whose date has passed is
+    overdue, which is a different question from what is coming. Undated
+    payouts cannot happen today (due_date is non-null), so that column is
+    appended only if one ever appears rather than sitting there empty.
+    """
+    pending = Payout.objects.filter(investor__in=portfolio, status='pending')
+
+    labels, y, m = [], as_of.year, as_of.month
+    for _ in range(months):
+        labels.append(date(y, m, 1))
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    names = [d.strftime('%b-%y') for d in labels]
+    last_month_start = labels[-1]
+
+    # amount_due is encrypted, so this cannot be a SQL GROUP BY — the rows are
+    # summed in Python, the same reason _sum_money exists on the Sales side.
+    buckets = {n: Decimal('0') for n in names}
+    after = Decimal('0')
+    undated = Decimal('0')
+    for due, amount in pending.values_list('due_date', 'amount_due'):
+        amount = amount or Decimal('0')
+        if due is None:
+            undated += amount
+        elif due <= as_of:
+            continue                      # overdue, not "falling due"
+        elif date(due.year, due.month, 1) > last_month_start:
+            after += amount
+        else:
+            buckets[due.strftime('%b-%y')] += amount
+
+    out = [{'label': n, 'amount': buckets[n]} for n in names]
+    out.append({'label': f'After {names[-1]}', 'amount': after})
+    if undated:
+        out.append({'label': 'No date', 'amount': undated})
+    return out
 
 
 def _digits(value):
@@ -1409,9 +1460,15 @@ class InvestorActionView(APIView):
                 for f in ('interest_payout', 'security', 'notes', 'name', 'phone'):
                     if f in pr:
                         setattr(investor, f, pr[f])
+                # The date the revised terms were agreed. Kept on the record
+                # rather than only printed on the LOI, so a later reader can
+                # tell when the figures in front of them started applying.
+                rev_on = _parse_date(pr.get('revision_date'))
+                if rev_on:
+                    investor.revision_date = rev_on
                 update_fields = [
                     'amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes',
-                    'name', 'phone', 'phone_key',
+                    'name', 'phone', 'phone_key', 'revision_date',
                     'loi_document', 'pending_loi_document', 'pending_revision', 'pending_revision_type',
                     'approval_status', 'updated_at',
                 ]
@@ -1517,6 +1574,62 @@ class InvestorActionView(APIView):
         return Response(InvestorListSerializer(investor).data)
 
 
+class InvestorReviseDraftView(APIView):
+    """Save a half-finished "Revise LOI" without submitting it.
+
+    A revision cannot go for approval until the revised LOI has been
+    downloaded, signed and uploaded again, which takes days. Until now the form
+    had to be held open or filled again from scratch, so the work was simply
+    retyped — or lost.
+
+    Deliberately NOT stored in pending_revision: that field means "a revision
+    is waiting for an approver", and putting an unsubmitted draft there would
+    put the investor in front of approvers with nothing signed to approve. The
+    investor stays exactly as it is — still approved, still live, nothing about
+    the current terms touched.
+
+    POST saves (and replaces) the draft; DELETE discards it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    # The same fields the submit path accepts, minus the signed LOI — a draft
+    # exists precisely because that file is not in hand yet.
+    FIELDS = ('amount_invested', 'total_return_pct', 'interest_payout', 'security',
+              'notes', 'name', 'phone', 'revision_date')
+
+    def _investor(self, request, pk):
+        if not has_club1000_access(request.user):
+            return None, _no_access()
+        investor = _investor_visibility_qs(request).filter(pk=pk).first()
+        if not investor:
+            return None, Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if investor.approval_status != 'approved':
+            return None, Response({'detail': 'Only an approved investor can be revised.'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        return investor, None
+
+    def post(self, request, pk):
+        investor, err = self._investor(request, pk)
+        if err:
+            return err
+        draft = {f: request.data[f] for f in self.FIELDS if f in request.data}
+        schedule = request.data.get('payout_schedule')
+        if isinstance(schedule, list):
+            draft['payout_schedule'] = schedule
+        # Nothing filled in is a discard, not a draft of emptiness.
+        investor.revision_draft = draft or None
+        investor.save(update_fields=['revision_draft', 'updated_at'])
+        return Response(InvestorListSerializer(investor).data)
+
+    def delete(self, request, pk):
+        investor, err = self._investor(request, pk)
+        if err:
+            return err
+        investor.revision_draft = None
+        investor.save(update_fields=['revision_draft', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class InvestorReviseView(APIView):
     """Propose revised terms + a newly signed LOI for an already-approved
     investor ("Revise LOI") — mirrors sales' Booking revision flow, adapted to
@@ -1544,7 +1657,8 @@ class InvestorReviseView(APIView):
         # which genuinely can't change without becoming a different deal) — a
         # revision is also the natural place to fix a typo or an updated
         # number caught after the original LOI was signed.
-        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security', 'notes', 'name', 'phone'):
+        for f in ('amount_invested', 'total_return_pct', 'interest_payout', 'security',
+                  'notes', 'name', 'phone', 'revision_date'):
             if f in request.data:
                 pending[f] = request.data[f]
         try:
@@ -1564,6 +1678,9 @@ class InvestorReviseView(APIView):
         investor.pending_revision_type = 'revise'
         investor.revision_no += 1
         investor.approval_status = 'pending'
+        # The draft has become a real submission; leaving it behind would
+        # prefill the next revision with these same figures.
+        investor.revision_draft = None
         import base64
         from django.core.files.base import ContentFile
         try:
@@ -1574,7 +1691,7 @@ class InvestorReviseView(APIView):
             import logging
             logging.getLogger(__name__).exception('Investor pending LOI save failed for %s', investor.id)
             return Response({'detail': 'Could not save the signed LOI.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        investor.save(update_fields=['pending_revision', 'pending_revision_type', 'revision_no', 'approval_status', 'pending_loi_document', 'updated_at'])
+        investor.save(update_fields=['pending_revision', 'pending_revision_type', 'revision_no', 'approval_status', 'pending_loi_document', 'revision_draft', 'updated_at'])
         _notify_investor_approvers(investor.company, investor, request.user)
         return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
