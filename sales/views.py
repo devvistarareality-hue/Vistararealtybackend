@@ -7653,6 +7653,7 @@ BOOKING_EXPORT_COLUMNS = [
     ('Maintenance Rate',         'maint_rate',          'num'),
     ('Maintenance Months',       'maint_months',        'num'),
     ('Maint. Advance Rate',      'maint_advance_rate',  'num'),
+    ('Maint. Advance Months',    'maint_advance_months', 'num'),
 
     ('Plot Basic',               'plot_basic',          'money'),
     ('Plot Development',         'plot_dev',            'money'),
