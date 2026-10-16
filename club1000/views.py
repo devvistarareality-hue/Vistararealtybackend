@@ -1200,7 +1200,7 @@ class FollowUpListCreateView(APIView):
         if not has_club1000_access(request.user):
             return _no_access()
         qs = _company_filtered(
-            FollowUp.objects.select_related('lead', 'assigned_to'), request, field='lead__company'
+            FollowUp.objects.select_related('lead', 'lead__scheme_interest', 'assigned_to'), request, field='lead__company'
         )
         if not is_club1000_manager(request.user):
             qs = qs.filter(assigned_to=request.user)
@@ -1234,7 +1234,7 @@ class FollowUpDetailView(APIView):
         if not has_club1000_access(request.user):
             return _no_access()
         qs = _company_filtered(
-            FollowUp.objects.select_related('lead', 'assigned_to'), request, field='lead__company'
+            FollowUp.objects.select_related('lead', 'lead__scheme_interest', 'assigned_to'), request, field='lead__company'
         )
         if not is_club1000_manager(request.user):
             qs = qs.filter(assigned_to=request.user)

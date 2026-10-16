@@ -45,11 +45,13 @@ class FollowUpSerializer(serializers.ModelSerializer):
     lead_name = serializers.CharField(source='lead.name', read_only=True)
     lead_status = serializers.CharField(source='lead.status', read_only=True)
     assigned_to_name = serializers.CharField(source='assigned_to.name', read_only=True, default=None)
+    # The lead's scheme, so the Follow-Ups page can filter by it like the other screens.
+    lead_scheme_name = serializers.CharField(source='lead.scheme_interest.name', read_only=True, default=None)
 
     class Meta:
         model = FollowUp
         fields = [
-            'id', 'lead', 'lead_name', 'lead_status', 'assigned_to', 'assigned_to_name',
+            'id', 'lead', 'lead_name', 'lead_status', 'lead_scheme_name', 'assigned_to', 'assigned_to_name',
             'scheduled_at', 'completed_at', 'status', 'remarks', 'outcome',
             'created_by', 'created_at', 'updated_at',
         ]
