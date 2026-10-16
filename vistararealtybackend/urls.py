@@ -19,9 +19,9 @@ urlpatterns = [
     path('api/tasks/', include('tasks.urls')),
 ]
 
-# Django's own admin site only in local development: no account can use it on the
+# Django's own admin site only off Railway (local development): no account can use it on the
 # live server (nobody is staff), so its public login page was attack surface only.
-if settings.DEBUG:
+if not settings.ON_RAILWAY:
     urlpatterns.append(path('admin/', admin.site.urls))
 
 # Serve uploaded media (signed LOIs) in development.

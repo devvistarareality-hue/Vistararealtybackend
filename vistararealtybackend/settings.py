@@ -18,11 +18,14 @@ if not _SECRET_KEY:
 SECRET_KEY = _SECRET_KEY
 
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+# The live server, as opposed to someone's Mac. Local .env runs with DEBUG=False too,
+# so "not DEBUG" can't tell them apart — Railway sets RAILWAY_ENVIRONMENT, a Mac doesn't.
+ON_RAILWAY = bool(os.getenv('RAILWAY_ENVIRONMENT'))
 
 # HTTPS hardening (Django `check --deploy`). Railway ends TLS at its proxy and passes
 # X-Forwarded-Proto, which is what tells Django a request was secure. No SSL redirect:
 # every client already uses https, and Railway's health check calls plain http.
-if not DEBUG:
+if ON_RAILWAY:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -244,7 +247,7 @@ if _cors_origins:
     # Always allow local dev origins (any localhost / 127.0.0.1 port) even when a fixed
     # production origin list is set — so the web app on localhost can talk to a local
     # backend without being blocked by CORS.
-    if DEBUG:
+    if not ON_RAILWAY:
         CORS_ALLOWED_ORIGIN_REGEXES = [r'^http://localhost:\d+$', r'^http://127\.0\.0\.1:\d+$']
     else:
         # Live: a page on someone's own computer is not one of our websites.
