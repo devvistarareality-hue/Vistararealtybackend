@@ -104,6 +104,18 @@ class InvestorLeadTests(TestCase):
         self.assertIsNotNone(h)
         self.assertEqual(h.new_value, 'converted')
 
+    def test_approving_a_revision_gives_a_lead_to_an_investor_without_one(self):
+        # Approved before leads were made on approval: the next approval fills it in.
+        inv = self._investor(name='Old Investor', phone='+919812300011')
+        Investor.objects.filter(pk=inv.pk).update(
+            approval_status='pending', pending_revision={'amount_invested': '600000'})
+        r = self._act(inv)
+        self.assertEqual(r.status_code, 200, r.data)
+        inv.refresh_from_db()
+        self.assertIsNotNone(inv.lead_id, 'the revised investor was left with no lead')
+        self.assertEqual(inv.lead.status, 'converted')
+        self.assertEqual(inv.lead.name, 'Old Investor')
+
     # ------------------------------------------------- an enquiry already there
 
     def test_an_existing_lead_on_the_same_phone_is_reused_not_duplicated(self):

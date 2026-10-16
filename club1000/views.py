@@ -367,6 +367,21 @@ def _same_person(lead_name, investor_name):
     return all(w in long_ for w in short)
 
 
+def _ensure_converted_lead(investor, actor):
+    """On any approval: the investment's lead — found by number + name, or made
+    from the investor's details — marked converted, with a history row."""
+    lead = _lead_for_investor(investor, actor)
+    if lead is None:
+        return None
+    if lead.status != 'converted':
+        old = lead.status
+        Lead.objects.filter(pk=lead.pk).update(status='converted', next_follow_up_date=None)
+        LeadStatusHistory.objects.create(
+            lead_id=lead.pk, changed_by=actor, field_changed='status', old_value=old,
+            new_value='converted', remarks='Converted via Investor approval')
+    return lead
+
+
 def _lead_for_investor(investor, actor):
     """The Club 1000 lead behind an approved investor, found or made — one lead per
     investment.
@@ -1577,6 +1592,9 @@ class InvestorActionView(APIView):
                 # still-pending entries; anything already paid is left untouched.
                 Payout.objects.filter(investor=investor, status='pending').delete()
                 generate_payout_schedule(investor, custom_entries=payout_schedule)
+                # An investment approved before leads were made on approval may
+                # still have none — every approval makes sure it has one.
+                _ensure_converted_lead(investor, request.user)
             else:
                 investor.approval_status = 'approved'
                 investor.status = 'active'
@@ -1586,16 +1604,7 @@ class InvestorActionView(APIView):
                 # An investor added directly has no lead; one is found by phone
                 # or made here, so every approved investment sits in the funnel
                 # it actually came through.
-                lead = _lead_for_investor(investor, request.user)
-                if lead is not None:
-                    old_lead_status = lead.status
-                    Lead.objects.filter(pk=lead.pk).update(status='converted', next_follow_up_date=None)
-                    if old_lead_status != 'converted':
-                        LeadStatusHistory.objects.create(
-                            lead_id=lead.pk, changed_by=request.user,
-                            field_changed='status', old_value=old_lead_status, new_value='converted',
-                            remarks='Converted via Investor approval',
-                        )
+                _ensure_converted_lead(investor, request.user)
                 generate_payout_schedule(investor, custom_entries=investor.pending_payout_schedule)
                 investor.pending_payout_schedule = None
                 investor.save(update_fields=['pending_payout_schedule'])
