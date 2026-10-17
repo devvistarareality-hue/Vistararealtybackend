@@ -462,7 +462,8 @@ class WarmTransferOnCreateTests(APITestCase):
 class LOIAccessTests(APITestCase):
     """LOI signed-URL endpoint: only the booking's STM or an admin/manager may open it."""
 
-    def test_only_owner_stm_or_admin_can_fetch_url(self):
+    @mock.patch('sales.views._loi_stored', return_value=True)   # the file is in storage
+    def test_only_owner_stm_or_admin_can_fetch_url(self, _stored):
         from sales.models import Booking
         coA = Company.objects.create(code='AAA', name='A', loi_enabled=True)
         coB = Company.objects.create(code='BBB', name='B', loi_enabled=True)

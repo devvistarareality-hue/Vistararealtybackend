@@ -173,7 +173,6 @@ USE_TZ = True
 # ── Static files (whitenoise serves in production) ────────────────────
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Uploaded files (signed LOIs, etc.)
 MEDIA_URL = '/media/'
@@ -186,12 +185,16 @@ MEDIA_ROOT = BASE_DIR / 'media'
 SUPABASE_S3_ENDPOINT = os.getenv('SUPABASE_S3_ENDPOINT', '')   # https://<ref>.supabase.co/storage/v1/s3
 # Tests never touch the real bucket (they used to leave loi.pdf / LOI_504.pdf in it).
 _TESTING = len(sys.argv) > 1 and sys.argv[1] == 'test'
+# STORAGES, not DEFAULT_FILE_STORAGE / STATICFILES_STORAGE: Django 5.1+ (what the
+# live server runs) ignores those two, and every upload then went to the
+# container's own disk — wiped on each deploy — instead of Supabase.
+_default_storage = 'django.core.files.storage.FileSystemStorage'
 if _TESTING:
     pass
 elif os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
-    DEFAULT_FILE_STORAGE = 'sales.supabase_storage.SupabaseStorage'
+    _default_storage = 'sales.supabase_storage.SupabaseStorage'
 elif SUPABASE_S3_ENDPOINT:
-    DEFAULT_FILE_STORAGE   = 'storages.backends.s3boto3.S3Boto3Storage'
+    _default_storage = 'storages.backends.s3boto3.S3Boto3Storage'
     AWS_ACCESS_KEY_ID      = os.getenv('SUPABASE_S3_ACCESS_KEY', '')
     AWS_SECRET_ACCESS_KEY  = os.getenv('SUPABASE_S3_SECRET_KEY', '')
     AWS_STORAGE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET', 'loi')
@@ -204,6 +207,10 @@ elif SUPABASE_S3_ENDPOINT:
     # Public object URL base so loi_document.url resolves correctly.
     _ref_host = SUPABASE_S3_ENDPOINT.split('/storage/')[0].replace('https://', '').replace('http://', '')
     AWS_S3_CUSTOM_DOMAIN   = f'{_ref_host}/storage/v1/object/public/{AWS_STORAGE_BUCKET_NAME}'
+STORAGES = {
+    'default': {'BACKEND': _default_storage},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

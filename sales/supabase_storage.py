@@ -1,6 +1,6 @@
 """Django storage backend that stores files in Supabase Storage via its REST API.
 
-Activated by setting DEFAULT_FILE_STORAGE to 'sales.supabase_storage.SupabaseStorage'.
+Activated by STORAGES['default'] in settings (Django 5.1+ ignores DEFAULT_FILE_STORAGE).
 Needs env vars: SUPABASE_URL, SUPABASE_SERVICE_KEY, SUPABASE_BUCKET (default 'loi').
 Uses the service_role key (server-side only) — bypasses RLS, so no policies needed.
 """

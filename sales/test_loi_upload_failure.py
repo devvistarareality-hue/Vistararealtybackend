@@ -64,3 +64,45 @@ class LoiAllOrNothingTests(TestCase):
         r = self.api.post('/api/sales/bookings/', body, format='json')
         self.assertEqual(r.status_code, 201, r.content)
         self.assertEqual(self._count(), 1)
+
+    def test_upload_that_did_not_land_saves_nothing(self):
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        with mock.patch('sales.views._loi_stored', return_value=False):
+            r = self.api.post('/api/sales/bookings/', body, format='json')
+        self.assertEqual(r.status_code, 502, r.content)
+        self.assertEqual(self._count(), 0)
+
+
+class StorageSettingTests(TestCase):
+    """Django 5.1+ ignores DEFAULT_FILE_STORAGE — uploads went to the server's disk."""
+    def test_uses_STORAGES_not_the_removed_setting(self):
+        import vistararealtybackend.settings as conf
+        self.assertFalse(hasattr(conf, 'DEFAULT_FILE_STORAGE'))
+        self.assertFalse(hasattr(conf, 'STATICFILES_STORAGE'))
+        self.assertIn('default', conf.STORAGES)
+        self.assertIn('staticfiles', conf.STORAGES)
+
+
+class LoiReuploadTests(LoiAllOrNothingTests):
+    """A booking whose signed LOI is missing from storage can have it put back."""
+    def test_missing_then_uploaded_again(self):
+        from sales.models import Booking
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        bid = self.api.post('/api/sales/bookings/', body, format='json').json()['id']
+        b = Booking.objects.get(pk=bid)
+        b.loi_document.storage.delete(b.loi_document.name)          # lost, as on the server's disk
+        r = self.api.get(f'/api/sales/bookings/{bid}/loi-url/')
+        self.assertEqual((r.status_code, r.json().get('code')), (404, 'loi_missing'))
+        r = self.api.post(f'/api/sales/bookings/{bid}/loi-url/', {'loi_file': {'name': 'l.pdf', 'data': 'JVBERi0xLjQK'}}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(self.api.get(f'/api/sales/bookings/{bid}/loi-url/').status_code, 200)
+
+    def test_outsider_cannot_upload(self):
+        from rest_framework.test import APIClient
+        from accounts.models import User
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        bid = self.api.post('/api/sales/bookings/', body, format='json').json()['id']
+        other = User.objects.create_user('o@lan.com', company=self.co, user_code='LAN2', password='p', name='O', role='Employee', modules=['Sales'])
+        api = APIClient(); api.force_authenticate(other)
+        r = api.post(f'/api/sales/bookings/{bid}/loi-url/', {'loi_file': {'name': 'l.pdf', 'data': 'JVBERi0xLjQK'}}, format='json')
+        self.assertIn(r.status_code, (403, 404))

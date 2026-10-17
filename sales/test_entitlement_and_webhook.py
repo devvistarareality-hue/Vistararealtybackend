@@ -1,5 +1,6 @@
 """LOI/EOI entitlement, and Meta webhook signature verification."""
 import hashlib
+from unittest import mock
 import hmac
 import json
 
@@ -29,7 +30,8 @@ class LOIEntitlement(TestCase):
                                       client_name='C', area='A1',
                                       loi_document='proj/plot/loi.pdf')
 
-    def test_entitled_company_can_open_its_loi(self):
+    @mock.patch('sales.views._loi_stored', return_value=True)   # the file is in storage
+    def test_entitled_company_can_open_its_loi(self, _stored):
         b = self._booking(self.on, self.u_on)
         auth(self.client, self.u_on)
         self.assertEqual(self.client.get(f'/api/sales/bookings/{b.id}/loi-url/').status_code, 200)

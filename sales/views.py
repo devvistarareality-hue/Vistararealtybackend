@@ -6381,6 +6381,18 @@ class _LoiMissing(Exception):
     """A booking for a company that uses LOIs arrived with none."""
 
 
+def _loi_stored(field_file):
+    """Is this uploaded file really in the storage it was saved to? For Supabase that
+    means a link to it can be signed."""
+    from sales.supabase_storage import SupabaseStorage, object_exists
+    try:
+        if isinstance(field_file.storage, SupabaseStorage) or 'Supabase' in type(getattr(field_file.storage, '_wrapped', field_file.storage)).__name__:
+            return object_exists(field_file.name)
+        return field_file.storage.exists(field_file.name)
+    except Exception:
+        return False
+
+
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
     proj = _loi_safe(b.project.name if b.project_id else 'Project')
@@ -7015,6 +7027,10 @@ class BookingListCreateView(APIView):
                     raise _LoiNotStored()
         if _loi_enabled(company) and not booking.loi_document:
             raise _LoiMissing()
+        # The save reporting success is not enough: a storage misconfiguration once
+        # sent every LOI to the server's own disk for a day. Check it is really there.
+        if isinstance(lf, dict) and lf.get('data') and booking.loi_document and not _loi_stored(booking.loi_document):
+            raise _LoiNotStored()
 
         if not prior:
             # New booking: reserve ALL selected plots. The Closure is mirrored into
@@ -8832,20 +8848,20 @@ class AccountsBookingActionView(APIView):
 
 
 class BookingLOIUrlView(APIView):
-    """Returns a short-lived signed URL for a booking's confidential LOI PDF.
-    Authorised viewers only (admin/manager or the booking's STM). The bucket is
-    private, so this signed URL is the *only* way to open the document."""
+    """GET a short-lived signed URL for a booking's confidential LOI PDF; POST
+    {loi_file: {name, type, data(base64)}} puts the signed LOI back when it is
+    missing from storage (or replaces it). Authorised viewers only (admin/manager,
+    the booking's STM, Accounts, the project's approvers). The bucket is private,
+    so this signed URL is the *only* way to open the document."""
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, pk):
+    def _booking(self, request, pk):
         b = scope_to_company(Booking.objects.all(), request.user).filter(pk=pk).first()
-        if not b or not b.loi_document:
-            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if not b:
+            return None, Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not _loi_enabled(b.company):
-            return Response(
-                {'detail': 'LOI / EOI documents are not enabled for this company.'},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+            return None, Response({'detail': 'LOI / EOI documents are not enabled for this company.'},
+                                  status=status.HTTP_403_FORBIDDEN)
         # Who reviews a booking may read its LOI: admins/managers, its STM, the
         # Accounts & Finance desk that signs bookings off (the same people who see
         # every booking in Approvals), and whoever is named an approver on its project.
@@ -8856,13 +8872,22 @@ class BookingLOIUrlView(APIView):
                    or (b.project_id and (b.project_id in _approver_project_ids(u, b.company)
                                          or b.project_id in _cp_approver_project_ids(u, b.company))))
         if not allowed:
-            return Response({'detail': 'You do not have access to this LOI.'}, status=status.HTTP_403_FORBIDDEN)
+            return None, Response({'detail': 'You do not have access to this LOI.'}, status=status.HTTP_403_FORBIDDEN)
+        return b, None
+
+    def get(self, request, pk):
+        b, err = self._booking(request, pk)
+        if err:
+            return err
+        if not b.loi_document:
+            return Response({'detail': 'No signed LOI is attached to this booking — upload it.', 'code': 'loi_missing'},
+                            status=status.HTTP_404_NOT_FOUND)
         from sales.supabase_storage import create_signed_url
         url = create_signed_url(b.loi_document.name, expires_in=120)
-        if not url and str(getattr(settings, 'DEFAULT_FILE_STORAGE', '')).endswith('SupabaseStorage'):
+        if not url and not _loi_stored(b.loi_document):
             # The bucket is private: a plain public link can only fail ("Bucket not
             # found"). A link that cannot be signed means the file is not there.
-            return Response({'detail': 'This signed LOI is missing from storage — upload it again from the booking.'},
+            return Response({'detail': 'This signed LOI is missing from storage — upload it again.', 'code': 'loi_missing'},
                             status=status.HTTP_404_NOT_FOUND)
         if not url:
             # Local dev (FileSystem storage) fallback.
@@ -8873,6 +8898,32 @@ class BookingLOIUrlView(APIView):
         if not url:
             return Response({'detail': 'LOI unavailable.'}, status=status.HTTP_404_NOT_FOUND)
         return Response({'url': url})
+
+    def post(self, request, pk):
+        b, err = self._booking(request, pk)
+        if err:
+            return err
+        lf = request.data.get('loi_file')
+        if not (isinstance(lf, dict) and lf.get('data')):
+            return Response({'detail': 'Attach the signed LOI.'}, status=status.HTTP_400_BAD_REQUEST)
+        if len(lf['data']) > int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3):
+            return Response({'detail': f'The file is over {settings.MAX_UPLOAD_FILE_MB} MB.'}, status=status.HTTP_400_BAD_REQUEST)
+        import base64
+        from django.core.files.base import ContentFile
+        had = bool(b.loi_document) and _loi_stored(b.loi_document)
+        try:
+            b.loi_document.save(_loi_path(b), ContentFile(base64.b64decode(lf['data'])), save=False)
+        except Exception:
+            logging.getLogger(__name__).exception('LOI re-upload failed for booking %s', b.id)
+            return Response({'detail': 'The signed LOI could not be stored — please try again.'}, status=status.HTTP_502_BAD_GATEWAY)
+        if not _loi_stored(b.loi_document):
+            return Response({'detail': 'The signed LOI could not be stored — please try again.'}, status=status.HTTP_502_BAD_GATEWAY)
+        Booking.objects.filter(pk=b.pk).update(loi_document=b.loi_document.name)
+        from activity.recorder import note
+        note(request, f'{"Replaced" if had else "Uploaded again"} the signed LOI — {b.client_name} · '
+                      f'{b.project.name if b.project_id else ""} {b.plot_numbers or ""}'.strip(),
+             action='loi-upload', target_type='booking', target_id=str(b.pk), module='Sales')
+        return Response({'ok': True, 'loi_document': b.loi_document.name})
 
 
 # Largest media file accepted by MediaUploadView. Architects' floor-plan PDFs run
