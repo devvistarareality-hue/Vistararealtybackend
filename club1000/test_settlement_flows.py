@@ -116,3 +116,29 @@ class SettlementFlowTests(TestCase):
         first = ints[0]['period']
         self.assertEqual((first['from'], first['to'], first['days']), ('2026-10-18', '2026-12-31', 75))
         self.assertEqual(Decimal(ints[0]['amount_due']), Decimal(first['computed']))
+
+    def test_manager_deletes_an_investor_with_nothing_paid(self):
+        inv = self._inv(date.today() - relativedelta(months=1))
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('100000'))
+        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/')
+        self.assertEqual(r.status_code, 204, getattr(r, 'data', None))
+        self.assertFalse(Investor.objects.filter(pk=inv.pk).exists())
+        self.assertFalse(Payout.objects.filter(investor_id=inv.pk).exists())
+
+    def test_delete_refused_once_money_has_moved(self):
+        inv = self._inv(date.today() - relativedelta(months=4))
+        Payout.objects.create(investor=inv, payout_type='interest', due_date=date.today() - timedelta(days=5),
+                              amount_due=Decimal('3000'), status='paid', paid_amount=Decimal('3000'))
+        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/')
+        self.assertEqual(r.status_code, 409)
+        self.assertTrue(Investor.objects.filter(pk=inv.pk).exists())
+
+    def test_staff_cannot_delete_an_investor(self):
+        from accounts.models import User
+        staff = User.objects.create_user('st@stf.com', company=self.co, user_code='STF2', password='p',
+                                         name='Staff', role='Employee', modules=['Club 1000'])
+        inv = self._inv(date.today() - relativedelta(months=1))
+        Investor.objects.filter(pk=inv.pk).update(added_by=staff)
+        api = APIClient(); api.force_authenticate(staff)
+        self.assertEqual(api.delete(f'/api/club1000/investors/{inv.pk}/').status_code, 403)
+        self.assertTrue(Investor.objects.filter(pk=inv.pk).exists())

@@ -759,6 +759,42 @@ class InvestorDetailView(APIView):
         ser.save()
         return Response(ser.data)
 
+    def delete(self, request, pk):
+        """Delete an investment — managers and above only. Refused once money has
+        moved (a payout or referral reward marked paid): those are books of record,
+        so the payment is undone first, or the investment is closed by Redeem /
+        Payout instead. Its schedule, rewards and stored documents go with it."""
+        if not has_club1000_access(request.user):
+            return _no_access()
+        if not is_club1000_manager(request.user):
+            return Response({'detail': 'Only a Club 1000 manager can delete an investor.'}, status=status.HTTP_403_FORBIDDEN)
+        investor = self._get(request, pk)
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        paid = investor.payouts.filter(status='paid').count()
+        paid_rewards = investor.referral_rewards.filter(status='paid').count()
+        if paid or paid_rewards:
+            bits = []
+            if paid:
+                bits.append(f'{paid} payout{"s" if paid != 1 else ""}')
+            if paid_rewards:
+                bits.append(f'{paid_rewards} referral reward{"s" if paid_rewards != 1 else ""}')
+            return Response({'detail': f'{" and ".join(bits)} for this investor {"are" if paid + paid_rewards > 1 else "is"} already paid. '
+                                       'Undo those payments first, or close the investment with Redeem / Payout instead.'},
+                            status=status.HTTP_409_CONFLICT)
+        from activity.recorder import note
+        label = f'{investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · {investor.scheme.name} · ₹{investor.amount_invested:,.0f}'
+        files = [f for f in (investor.loi_document, investor.pending_loi_document, investor.document) if f]
+        with transaction.atomic():
+            investor.delete()
+        for f in files:
+            try:
+                f.storage.delete(f.name)
+            except Exception:
+                pass
+        note(request, f'Deleted investor — {label}', action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class InvestorLedgerView(APIView):
     """Full money-movement history for one investor, in one chronological
