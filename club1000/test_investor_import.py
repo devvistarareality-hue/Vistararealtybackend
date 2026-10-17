@@ -94,3 +94,51 @@ class InvestorImportTests(TestCase):
                                          name='Staff', role='Employee', modules=['Club 1000'])
         api = APIClient(); api.force_authenticate(staff)
         self.assertEqual(api.get('/api/club1000/investors/import-template/').status_code, 403)
+
+    def _book(self, inv_rows, past_rows):
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Investors'
+        ws.append(['Investor Name *', 'Mobile *', 'Scheme *', 'Amount Invested *', 'Investment Date *', 'Interest Payout', 'Return %'])
+        for r in inv_rows:
+            ws.append(r)
+        pt = wb.create_sheet('Past Terms')
+        pt.append(['Mobile *', 'Investor Name *', 'Principal *'])
+        for r in past_rows:
+            pt.append(r)
+        buf = io.BytesIO(); wb.save(buf)
+        return SimpleUploadedFile('inv.xlsx', buf.getvalue())
+
+    def test_past_terms_come_from_the_investors_row_and_make_their_payouts(self):
+        from club1000.models import Payout
+        from club1000.services import money_in
+        f = self._book([['Ramesh Patel', '9876500000', 'RISE', 5350000, date(2022, 4, 1), 'maturity', 15]],
+                       [['9876500000', 'Ramesh Patel', 10000000], ['9876500000', 'ramesh patel', 9000000]])
+        r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
+        self.assertEqual((r.data['created'], r.data['failed']), (1, 0), r.data)
+        inv = Investor.objects.get()
+        self.assertEqual((inv.renewal_count, inv.first_invested_on), (2, date(2020, 4, 1)))   # RISE here is 12 months
+        self.assertEqual([t['start'] for t in inv.past_terms], ['2020-04-01', '2021-04-01'])
+        self.assertEqual(money_in(inv), Decimal('10000000'))
+        a = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
+        self.assertEqual(a.status_code, 200, a.data)
+        past = sorted(((p.due_date, p.payout_type, p.amount_due) for p in Payout.objects.filter(investor=inv, due_date__lte=date(2022, 4, 1))))
+        self.assertEqual(past, [(date(2021, 4, 1), 'interest', Decimal('1500000.00')), (date(2021, 4, 1), 'maturity', Decimal('1000000.00')),
+                                (date(2022, 4, 1), 'interest', Decimal('1350000.00')), (date(2022, 4, 1), 'maturity', Decimal('3650000.00'))])
+        cur = Payout.objects.get(investor=inv, due_date=date(2023, 4, 1))
+        self.assertEqual(cur.amount_due, Decimal('6152500.00'))           # 53,50,000 + 15%
+        p = self.api.get(f'/api/club1000/investors/{inv.pk}/portfolio/').data
+        self.assertEqual((Decimal(p['principal_total']), Decimal(p['interest_total'])), (Decimal('10000000'), Decimal('3652500')))
+
+    def test_past_terms_row_without_a_match_is_reported(self):
+        f = self._book([['Ramesh Patel', '9876500000', 'RISE', 5350000, date(2022, 4, 1), 'maturity', 15]],
+                       [['9876500001', 'Someone Else', 10000000]])
+        r = self.api.post('/api/club1000/investors/import/', {'file': f}, format='multipart')
+        bad = [x for x in r.data['rows'] if x.get('sheet') == 'Past Terms']
+        self.assertEqual(len(bad), 1)
+        self.assertIn('No row on the Investors sheet', bad[0]['errors'][0])
+
+    def test_template_has_the_past_terms_sheet(self):
+        r = self.api.get('/api/club1000/investors/import-template/')
+        wb = openpyxl.load_workbook(io.BytesIO(r.content))
+        self.assertIn('Past Terms', wb.sheetnames)
+        self.assertEqual([c.value for c in wb['Past Terms'][1]][:4], ['Mobile *', 'Investor Name *', 'Principal *', 'Scheme'])
+        self.assertTrue(str(wb['Past Terms']['G2'].value).startswith('=IF('))

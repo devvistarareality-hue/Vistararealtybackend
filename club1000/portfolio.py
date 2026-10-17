@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 
 from .models import Payout, ReferralReward
 from .permissions import has_club1000_access
-from .services import normalize_phone
+from .services import money_in, normalize_phone, past_terms
 
 COUNTED = ('approved', 'pending')      # drafts and rejections are not holdings
 
@@ -57,7 +57,7 @@ def _split(inv, pays):
     """One investment's money in principal and interest, the ledger's way: interest is
     everything scheduled beyond the principal; a payout of the 'interest' type is all
     interest, and a maturity / redemption row repays principal first, the rest interest."""
-    principal = _money(inv.amount_invested)
+    principal = money_in(inv)
     total = sum((_money(p.amount_due) for p in pays), Decimal('0'))
     amt = lambda p: _money(p.paid_amount if p.paid_amount is not None else p.amount_due)
     paid = sum((amt(p) for p in pays if p.status == 'paid'), Decimal('0'))
@@ -82,7 +82,7 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
     for i in approved:
         sc = schemes[i.scheme.name if i.scheme_id else '—']
         sc['count'] += 1
-        sc['total'] += _money(i.amount_invested)
+        sc['total'] += money_in(i)
         if i.status == 'active':
             sc['active'] += _money(i.amount_invested)
     paid = pending = overdue = Decimal('0')
@@ -114,7 +114,7 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
         'schemes': [{'scheme': k, 'count': v['count'], 'active': str(v['active']), 'total': str(v['total'])}
                     for k, v in sorted(schemes.items(), key=lambda kv: -kv[1]['active'])],
         'active_amount': str(sum((_money(i.amount_invested) for i in approved if i.status == 'active'), Decimal('0'))),
-        'total_invested': str(sum((_money(i.amount_invested) for i in approved), Decimal('0'))),
+        'total_invested': str(sum((money_in(i) for i in approved), Decimal('0'))),
         'paid_out': str(paid),
         'principal_total': str(money['principal']), 'interest_total': str(money['interest']),
         'principal_paid': str(money['principal_paid']), 'interest_paid': str(money['interest_paid']),
@@ -186,6 +186,9 @@ class PortfolioDetailView(APIView):
                 **{k: str(v) for k, v in sp.items()},
                 'id': i.pk, 'name': i.name, 'scheme': i.scheme.name if i.scheme_id else '—', 'loi_no': i.loi_no or '',
                 'first_invested_on': _began(i),
+                'past_terms': [{'start': t['start'], 'maturity': t['maturity'], 'principal': str(t['principal']),
+                                'renewed_with': str(t['next']), 'taken_out': str(t['returned'] + t['interest'] - t['rolled'])}
+                               for t in past_terms(i)],
                 'amount': str(i.amount_invested), 'investment_date': i.investment_date, 'maturity_date': i.maturity_date,
                 'interest_payout': i.interest_payout, 'return_pct': str(i.total_return_pct or ''),
                 'status': i.status, 'approval_status': i.approval_status, 'renewal_count': i.renewal_count or 0,

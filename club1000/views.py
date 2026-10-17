@@ -25,7 +25,7 @@ from .serializers import (
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
-from .services import generate_payout_schedule, normalize_phone, interest_periods
+from .services import generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods
 
 
 def _company_filtered(qs, request, field='company'):
@@ -911,7 +911,7 @@ class InvestorLedgerView(APIView):
         # The cards: what was invested, the interest on it, the two together, how much
         # of that has fallen due by today, what has gone out, and what is still to pay.
         today = date.today()
-        principal = investor.amount_invested or Decimal('0')
+        principal = money_in(investor)    # the first term's money for an old renewed investment
         due_till_today = sum((p.amount_due or Decimal('0') for p in all_payouts if p.due_date <= today), Decimal('0'))
         summary = {
             'principal': str(principal),
@@ -955,8 +955,10 @@ def _settlement(investor, on=None):
     rate = scheme.premature_redemption_rate_pct_per_month or Decimal('0')
     paid = [p for p in investor.payouts.all() if p.status == 'paid']
     pending = sorted((p for p in investor.payouts.all() if p.status == 'pending'), key=lambda p: (p.due_date, p.payout_type == 'maturity', p.id))
+    # Only this term's interest — a renewed investment's earlier terms were settled then.
     interest_paid = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0')
-                         for p in paid if p.payout_type == 'interest'), Decimal('0'))
+                         for p in paid if p.payout_type == 'interest'
+                         and (not investor.investment_date or p.due_date > investor.investment_date)), Decimal('0'))
     redemption_interest = (principal * Decimal(months) * rate / Decimal('100')).quantize(Decimal('0.01'))
     payable = max(principal + redemption_interest - interest_paid, Decimal('0')).quantize(Decimal('0.01'))
     if investor.status != 'active':
@@ -2187,6 +2189,8 @@ class InvestorActionView(APIView):
                 # it actually came through.
                 _ensure_converted_lead(investor, request.user)
                 generate_payout_schedule(investor, custom_entries=investor.pending_payout_schedule)
+                if investor.past_terms:
+                    generate_past_term_payouts(investor)
                 investor.pending_payout_schedule = None
                 investor.save(update_fields=['pending_payout_schedule'])
 

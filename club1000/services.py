@@ -145,6 +145,27 @@ def interest_periods(investor, payouts):
         return {}
     per_day = principal * pct / Decimal('100') / Decimal(tenure_days)
     out = {}
+    # An old investment's earlier terms: each instalment against its own term.
+    for n, t in enumerate(past_terms(investor), start=1):
+        rows = [p for p in payouts if p.payout_type == 'interest' and not p.balance_of_id
+                and t['start'] < p.due_date <= t['maturity'] + timedelta(days=31)
+                and (p.notes or '').startswith(f'Term {n} of')]
+        t_days = (t['maturity'] - t['start']).days or 1
+        t_per_day = t['principal'] * t['pct'] / Decimal('100') / Decimal(t_days)
+        prev = t['start']
+        for p in sorted(rows, key=lambda p: (p.due_date, p.id)):
+            end = t['maturity'] if t['at_maturity'] else accrual_end(p.due_date, t['maturity'])
+            days = (end - prev).days
+            if days <= 0:
+                continue
+            start = prev + timedelta(days=1)
+            out[p.id] = {
+                'from': start, 'to': end, 'days': days, 'per_day': t_per_day.quantize(Decimal('0.01')),
+                'rate_pct': t['pct'], 'tenure_days': t_days, 'principal': t['principal'],
+                'computed': (t_per_day * days).quantize(Decimal('0.01')),
+                'label': f'Term {n} · ' + period_label(start, end, t['payout']),
+            }
+            prev = end
     prev = investor.investment_date
     for p in sorted((p for p in payouts if p.payout_type == 'interest' and not p.balance_of_id), key=lambda p: (p.due_date, p.id)):
         end = accrual_end(p.due_date, investor.maturity_date)
@@ -183,6 +204,95 @@ def maturity_value(principal, total_return_pct, investment_date, maturity_date):
     generate_payout_schedule, which spreads this same fixed total interest
     pro-rata across the tenure's actual days)."""
     return principal + principal * (total_return_pct / Decimal('100'))
+
+
+def term_interest_rows(start, maturity, principal, total_return_pct, payout, tenure_months):
+    """The interest instalments of one term — [(due_date, amount)] — exactly as
+    generate_payout_schedule sizes them (see its docstring)."""
+    dates = (default_quarterly_dates(start, tenure_months) if payout == 'quarterly'
+             else default_monthly_dates(start, tenure_months))
+    tenure_days = (maturity - start).days
+    if tenure_days <= 0:
+        return []
+    daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal(tenure_days)
+    rows, prev_date = [], start
+    for due_date in dates:
+        # Accrue to the end of the period this instalment pays for, not to
+        # the day it is handed over — see accrual_end.
+        period_end = accrual_end(due_date, maturity)
+        days_elapsed = (period_end - prev_date).days
+        if days_elapsed <= 0:
+            # Invested on or after the period's own end (e.g. 30 Sep, with
+            # the 10 Oct instalment covering up to 30 Sep). There is nothing
+            # to pay yet, and a zero row is noise; prev_date deliberately
+            # stays put so the next instalment runs from the investment
+            # date and no day goes uncounted.
+            continue
+        rows.append((due_date, (daily_rate * Decimal(days_elapsed)).quantize(Decimal('0.01'))))
+        prev_date = period_end
+    return rows
+
+
+def past_terms(investor):
+    """The finished terms before the running one (an import of an old investment),
+    oldest first, each with what followed it: [{start, maturity, principal, next,
+    interest, rolled, returned}]. `next` is the principal the term renewed into;
+    at maturity the interest earned pays out, except what was rolled into a larger
+    next principal, and a smaller next principal pays the difference back."""
+    terms = []
+    raw = investor.past_terms or []
+    for n, t in enumerate(raw):
+        start, maturity = date.fromisoformat(t['start']), date.fromisoformat(t['maturity'])
+        principal = Decimal(str(t['principal']))
+        nxt = Decimal(str(raw[n + 1]['principal'])) if n + 1 < len(raw) else (investor.amount_invested or Decimal('0'))
+        pct = Decimal(str(t.get('return_pct', investor.total_return_pct) or 0))
+        at_maturity = (t.get('interest_payout') or investor.interest_payout) not in ('quarterly', 'monthly')
+        interest = (maturity_value(principal, pct, start, maturity) - principal) if at_maturity else (principal * pct / Decimal('100'))
+        rolled = max(Decimal('0'), min(interest, nxt - principal)) if at_maturity else Decimal('0')
+        terms.append({'start': start, 'maturity': maturity, 'principal': principal, 'next': nxt, 'pct': pct,
+                      'interest': interest.quantize(Decimal('0.01')), 'rolled': rolled.quantize(Decimal('0.01')),
+                      'returned': max(Decimal('0'), principal - nxt).quantize(Decimal('0.01')),
+                      'at_maturity': at_maturity, 'payout': t.get('interest_payout') or investor.interest_payout})
+    return terms
+
+
+def money_in(investor):
+    """Everything the investor actually put in: the first term's principal plus any
+    top-up a renewal added beyond what the matured term handed back. Without past
+    terms it is simply the amount invested."""
+    terms = past_terms(investor)
+    if not terms:
+        return investor.amount_invested or Decimal('0')
+    total = terms[0]['principal']
+    for t in terms:
+        handed_back = t['principal'] + (t['interest'] if t['at_maturity'] else Decimal('0'))
+        total += max(Decimal('0'), t['next'] - handed_back)
+    return total
+
+
+def generate_past_term_payouts(investor):
+    """Payouts for the finished terms of an imported old investment — what an
+    in-app renewal leaves behind: every interest instalment of each term, and
+    on its maturity the principal paid back when the next term was smaller.
+    They are created due (pending); the payments made are entered in Payouts."""
+    rows = []
+    terms = past_terms(investor)
+    for n, t in enumerate(terms, start=1):
+        label = f'Term {n} of {len(terms) + 1} · {t["start"]:%d-%m-%Y} → {t["maturity"]:%d-%m-%Y}'
+        if t['at_maturity']:
+            paid_out = (t['interest'] - t['rolled']).quantize(Decimal('0.01'))
+            if paid_out > 0:
+                rows.append(Payout(investor=investor, payout_type='interest', due_date=t['maturity'], amount_due=paid_out,
+                                   notes=label + (f' · ₹{t["rolled"]:,.0f} of the interest renewed' if t['rolled'] else '')))
+        else:
+            for due, amt in term_interest_rows(t['start'], t['maturity'], t['principal'], t['pct'], t['payout'],
+                                               investor.scheme.tenure_months):
+                rows.append(Payout(investor=investor, payout_type='interest', due_date=due, amount_due=amt, notes=label))
+        if t['returned'] > 0:
+            rows.append(Payout(investor=investor, payout_type='maturity', due_date=t['maturity'], amount_due=t['returned'],
+                               notes=label + ' · principal returned on renewal'))
+    Payout.objects.bulk_create(rows)
+    return rows
 
 
 def generate_payout_schedule(investor, custom_entries=None):
@@ -240,34 +350,14 @@ def generate_payout_schedule(investor, custom_entries=None):
     total_return_pct = investor.total_return_pct
 
     if investor.interest_payout in ('quarterly', 'monthly'):
-        dates = (
-            default_quarterly_dates(investor.investment_date, scheme.tenure_months)
-            if investor.interest_payout == 'quarterly'
-            else default_monthly_dates(investor.investment_date, scheme.tenure_months)
-        )
-        tenure_days = (investor.maturity_date - investor.investment_date).days
-        daily_rate = principal * (total_return_pct / Decimal('100')) / Decimal(tenure_days)
-        prev_date = investor.investment_date
-        for due_date in dates:
-            # Accrue to the end of the period this instalment pays for, not to
-            # the day it is handed over — see accrual_end.
-            period_end = accrual_end(due_date, investor.maturity_date)
-            days_elapsed = (period_end - prev_date).days
-            if days_elapsed <= 0:
-                # Invested on or after the period's own end (e.g. 30 Sep, with
-                # the 10 Oct instalment covering up to 30 Sep). There is nothing
-                # to pay yet, and a zero row is noise; prev_date deliberately
-                # stays put so the next instalment runs from the investment
-                # date and no day goes uncounted.
-                continue
-            amount_due = (daily_rate * Decimal(days_elapsed)).quantize(Decimal('0.01'))
+        for due_date, amount_due in term_interest_rows(investor.investment_date, investor.maturity_date, principal,
+                                                       total_return_pct, investor.interest_payout, scheme.tenure_months):
             Payout.objects.create(
                 investor=investor,
                 payout_type='interest',
                 due_date=due_date,
                 amount_due=amount_due,
             )
-            prev_date = period_end
         Payout.objects.create(
             investor=investor,
             payout_type='maturity',

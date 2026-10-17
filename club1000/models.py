@@ -259,6 +259,10 @@ class Investor(models.Model):
     # When this money first came in, before any renewal restarted the term (an
     # import of an old investment, or set on its first renewal). Blank = investment_date.
     first_invested_on = models.DateField(null=True, blank=True)
+    # The finished terms before the running one, oldest first, for an old investment
+    # brought in by import: [{start, maturity, principal, return_pct, interest_payout}].
+    # Their payouts are made on approval (services.generate_past_term_payouts).
+    past_terms = models.JSONField(null=True, blank=True)
     # Who signed the investment off, and when — the latest approval, a revision's
     # included. Shown on the Approved tab.
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')
