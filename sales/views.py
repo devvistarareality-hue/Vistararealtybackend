@@ -7028,9 +7028,12 @@ class BookingListCreateView(APIView):
         if _loi_enabled(company) and not booking.loi_document:
             raise _LoiMissing()
         # The save reporting success is not enough: a storage misconfiguration once
-        # sent every LOI to the server's own disk for a day. Check it is really there.
-        if isinstance(lf, dict) and lf.get('data') and booking.loi_document and not _loi_stored(booking.loi_document):
-            raise _LoiNotStored()
+        # sent every LOI to the server's own disk for a day. Check it is really there —
+        # a freshly attached one, and one carried over from a resumed draft alike.
+        if booking.loi_document and not _loi_stored(booking.loi_document):
+            if isinstance(lf, dict) and lf.get('data'):
+                raise _LoiNotStored()
+            raise _LoiMissing()
 
         if not prior:
             # New booking: reserve ALL selected plots. The Closure is mirrored into
@@ -7058,12 +7061,15 @@ class BookingListCreateView(APIView):
             Lead.objects.filter(id=booking.lead_id).update(
                 stm=booking.stm or request.user, stm_status='closed', status='closed')
 
-        # Notify the admin-selected approvers (managers) via push.
-        asked = _notify_booking_approvers(company, booking, request.user)
-        # The rep gets a receipt, and Accounts & Finance follow the money from the
-        # moment it is submitted — a revised LOI changes the figure they track.
-        _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
-                              request=request, skip_ids=asked)
+        # Notify the admin-selected approvers (managers) via push — only once the
+        # booking is really saved, never for a submission that is then undone.
+        def _announce():
+            asked = _notify_booking_approvers(company, booking, request.user)
+            # The rep gets a receipt, and Accounts & Finance follow the money from the
+            # moment it is submitted — a revised LOI changes the figure they track.
+            _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
+                                  request=request, skip_ids=asked)
+        transaction.on_commit(_announce)
 
         return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -7267,6 +7273,7 @@ class BookingDraftView(APIView):
         # Signed LOI, if one happens to already be attached — same handling as the
         # real submit path, kept for forward compatibility even though drafts don't
         # require it.
+        loi_not_saved = False
         lf = data.get('loi_file')
         if isinstance(lf, dict) and lf.get('data') and _loi_enabled(booking.company):
             max_b64_len = int(settings.MAX_UPLOAD_FILE_MB * 1024 * 1024 * 4 / 3)
@@ -7278,9 +7285,17 @@ class BookingDraftView(APIView):
                                               ContentFile(base64.b64decode(lf['data'])), save=True)
                 except Exception:
                     logging.getLogger(__name__).exception('LOI document save failed for draft %s', booking.id)
+                # A draft never keeps a signed LOI that is not really in storage — the
+                # submit would otherwise carry a dead file forward.
+                if booking.loi_document and not _loi_stored(booking.loi_document):
+                    Booking.objects.filter(pk=booking.pk).update(loi_document='')
+                    booking.loi_document = None
+                    loi_not_saved = True
 
         resp = BookingSerializer(booking).data
         resp['plot_conflicts'] = plot_conflicts
+        if loi_not_saved:
+            resp['loi_not_saved'] = True     # the form asks for the signed LOI again
         return Response(resp, status=status.HTTP_200_OK)
 
 

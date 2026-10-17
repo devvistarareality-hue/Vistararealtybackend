@@ -106,3 +106,48 @@ class LoiReuploadTests(LoiAllOrNothingTests):
         api = APIClient(); api.force_authenticate(other)
         r = api.post(f'/api/sales/bookings/{bid}/loi-url/', {'loi_file': {'name': 'l.pdf', 'data': 'JVBERi0xLjQK'}}, format='json')
         self.assertIn(r.status_code, (403, 404))
+
+
+class NothingLeavesOnAFailedSubmitTests(LoiAllOrNothingTests):
+    def test_failed_loi_sends_no_notification_and_saves_nothing(self):
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        with mock.patch('sales.views._loi_stored', return_value=False), \
+             mock.patch('sales.views._notify_booking_approvers') as approvers, \
+             mock.patch('sales.views._notify_booking_event') as event, \
+             self.captureOnCommitCallbacks(execute=True):
+            r = self.api.post('/api/sales/bookings/', body, format='json')
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(self._count(), 0)
+        approvers.assert_not_called(); event.assert_not_called()
+        from sales.models import Lead
+        self.assertFalse(Lead.objects.filter(company=self.co).exists())
+
+    def test_good_submit_notifies_after_saving(self):
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        with mock.patch('sales.views._notify_booking_approvers', return_value=[]) as approvers, \
+             mock.patch('sales.views._notify_booking_event'), \
+             self.captureOnCommitCallbacks(execute=True):
+            r = self.api.post('/api/sales/bookings/', body, format='json')
+        self.assertEqual(r.status_code, 201, r.content)
+        approvers.assert_called_once()
+
+    def test_draft_carrying_a_lost_loi_cannot_submit(self):
+        from sales.models import Booking
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        d = self.api.post('/api/sales/bookings/draft/', body, format='json')
+        self.assertIn(d.status_code, (200, 201), d.content)
+        draft = Booking.objects.get(pk=d.json()['id'])
+        self.assertTrue(draft.loi_document)
+        draft.loi_document.storage.delete(draft.loi_document.name)          # lost
+        sub = {k: v for k, v in self.body.items()}
+        sub['draft_id'] = draft.id
+        r = self.api.post('/api/sales/bookings/', sub, format='json')
+        self.assertEqual(r.status_code, 400, r.content)
+        self.assertEqual(Booking.objects.get(pk=draft.id).status, 'draft')   # still a draft, nothing submitted
+
+    def test_draft_does_not_keep_an_loi_that_did_not_store(self):
+        body = dict(self.body, loi_file={'name': 'l.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'})
+        with mock.patch('sales.views._loi_stored', return_value=False):
+            d = self.api.post('/api/sales/bookings/draft/', body, format='json')
+        self.assertTrue(d.json().get('loi_not_saved'))
+        self.assertFalse(d.json().get('loi_document'))
