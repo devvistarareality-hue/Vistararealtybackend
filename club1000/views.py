@@ -844,15 +844,34 @@ class InvestorLedgerView(APIView):
                 'paid_date': str(p.paid_date) if p.paid_date else None,
                 'notes': p.notes,
                 'period': {k: (str(v) if not isinstance(v, int) else v) for k, v in periods[p.id].items()} if p.id in periods else None,
+                'is_balance': bool(p.balance_of_id),
+                'due_date': str(p.due_date),
+                '_id': p.id,
             })
             total_due += p.amount_due
             if p.status == 'paid':
                 total_paid += actual_paid
-        # Same day: the investment first, interest before the principal it is paid with.
-        entries.sort(key=lambda e: (e['date'], {'investment': 0, 'interest': 1}.get(e['type'], 2)))
+        # Same day: the investment first, interest before the principal it is paid
+        # with, and an instalment before the balance it left.
+        entries.sort(key=lambda e: (e['date'], {'investment': 0, 'interest': 1}.get(e['type'], 2),
+                                    e.get('is_balance', False), e.get('_id') or 0))
+        for e in entries:
+            e.pop('_id', None)
 
+        # The cards: what was invested, the interest on it, the two together, how much
+        # of that has fallen due by today, what has gone out, and what is still to pay.
+        today = date.today()
+        principal = investor.amount_invested or Decimal('0')
+        due_till_today = sum((p.amount_due or Decimal('0') for p in all_payouts if p.due_date <= today), Decimal('0'))
         summary = {
-            'total_invested': str(investor.amount_invested),
+            'principal': str(principal),
+            'interest': str(max(total_due - principal, Decimal('0'))),
+            'total': str(total_due),
+            'due_till_today': str(due_till_today),
+            'paid_out': str(total_paid),
+            'pending': str(total_due - total_paid),
+            # kept for older app builds
+            'total_invested': str(principal),
             'total_payout_due': str(total_due),
             'total_paid': str(total_paid),
             'total_pending': str(total_due - total_paid),
