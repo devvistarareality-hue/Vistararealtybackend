@@ -136,6 +136,11 @@ class InvestorImportTemplateView(APIView):
         hlp.append([])
         hlp.append(['Rows 2–3 are examples — replace or delete them.'])
         hlp.append(['Each imported investor waits in Club 1000 → Approvals, like one added by hand.'])
+        hlp.append(['One row per investment. Someone who invested 5 times (or reinvested) gets 5 rows, '
+                    'same name and mobile, each with its own date, scheme and amount; Investor Portfolios '
+                    'puts them together as one person.'])
+        hlp.append(['Old investments: payouts whose date has passed show as due until you mark them paid '
+                    'in Payouts with the date they were actually paid.'])
         hlp.append(['Schemes: ' + ', '.join(f'{s.name} ({s.tenure_months} mo, min ₹{int(s.min_ticket_size):,}, payouts: {", ".join(s.interest_payout_options or ["maturity"])})' for s in schemes)])
         hlp.column_dimensions['A'].width = 20
         hlp.column_dimensions['C'].width = 90
