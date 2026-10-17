@@ -33,7 +33,7 @@ MODULES = {
 VERBS = {
     'approve': 'Approved', 'reject': 'Rejected', 'cancel': 'Cancelled', 'withdraw': 'Withdrew',
     'created': 'Created', 'updated': 'Updated', 'deleted': 'Deleted', 'discard': 'Discarded',
-    'mark-paid': 'Marked paid', 'redeem': 'Redeemed', 'renew': 'Renewed', 'revise': 'Revised',
+    'mark-paid': 'Marked paid', 'mark-unpaid': 'Undid paid on', 'redeem': 'Redeemed', 'renew': 'Renewed', 'revise': 'Revised',
     'done': 'Completed', 'cancelled': 'Cancelled',
 }
 # Request fields worth keeping the value of (short, not personal). Everything else

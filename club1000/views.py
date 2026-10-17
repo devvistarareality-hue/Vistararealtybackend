@@ -993,6 +993,35 @@ class PayoutMarkPaidView(APIView):
         return Response(PayoutSerializer(payout).data)
 
 
+def _undo_paid(obj):
+    """Back to pending — a payment marked by mistake. What was paid, when, by whom
+    and the remarks are cleared (the activity log keeps the before/after)."""
+    obj.status = 'pending'
+    obj.paid_date = None
+    obj.paid_amount = None
+    obj.paid_by = None
+    obj.notes = ''
+    obj.save(update_fields=['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'updated_at'])
+
+
+class PayoutMarkUnpaidView(APIView):
+    """Undo a payout marked paid by mistake — managers who may mark paid."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not (club_can(request.user, 'club.payout.mark_paid') and is_club1000_manager(request.user)):
+            return _no_permission()
+        payout = _company_filtered(
+            Payout.objects.select_related('investor'), request, field='investor__company'
+        ).filter(pk=pk).first()
+        if not payout:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if payout.status != 'paid':
+            return Response({'detail': 'This payout is not marked paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        _undo_paid(payout)
+        return Response(PayoutSerializer(payout).data)
+
+
 class ReferralRewardListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1109,6 +1138,24 @@ class ReferralRewardMarkPaidView(APIView):
         reward.paid_date = paid_on
         reward.paid_by = request.user
         reward.save(update_fields=['status', 'paid_date', 'paid_amount', 'notes', 'paid_by', 'updated_at'])
+        return Response(ReferralRewardSerializer(reward).data)
+
+
+class ReferralRewardMarkUnpaidView(APIView):
+    """Undo a referral reward marked paid by mistake — managers who may mark paid."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not (club_can(request.user, 'club.payout.mark_paid') and is_club1000_manager(request.user)):
+            return _no_permission()
+        reward = _company_filtered(
+            ReferralReward.objects.select_related('investor'), request, field='investor__company'
+        ).filter(pk=pk).first()
+        if not reward:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if reward.status != 'paid':
+            return Response({'detail': 'This reward is not marked paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        _undo_paid(reward)
         return Response(ReferralRewardSerializer(reward).data)
 
 

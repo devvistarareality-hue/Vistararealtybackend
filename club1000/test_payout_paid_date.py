@@ -70,3 +70,24 @@ class ReferralRewardPaidTests(PayoutPaidDateTests):
     def test_reward_future_date_refused(self):
         res = self._payr(paid_date=(date.today() + timedelta(days=1)).isoformat())
         self.assertEqual(res.status_code, 400)
+
+
+class UndoPaidTests(ReferralRewardPaidTests):
+    """A payment marked paid by mistake goes back to pending."""
+    def test_undo_payout(self):
+        self._pay(amount='4800', notes='UTR 1')
+        res = self.api.post(f'/api/club1000/payouts/{self.p.pk}/mark-unpaid/', {}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.p.refresh_from_db()
+        self.assertEqual((self.p.status, self.p.paid_date, self.p.paid_amount, self.p.notes), ('pending', None, None, ''))
+
+    def test_undo_reward(self):
+        self._payr(amount='2000')
+        res = self.api.post(f'/api/club1000/referral-rewards/{self.r.pk}/mark-unpaid/', {}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.r.refresh_from_db()
+        self.assertEqual((self.r.status, self.r.paid_date, self.r.paid_amount), ('pending', None, None))
+
+    def test_undo_on_pending_refused(self):
+        res = self.api.post(f'/api/club1000/payouts/{self.p.pk}/mark-unpaid/', {}, format='json')
+        self.assertEqual(res.status_code, 400)
