@@ -12,6 +12,7 @@ urlpatterns = [
     path('investors/draft/',          views.InvestorDraftView.as_view()),
     path('investors/import/',         importer.InvestorImportView.as_view()),
     path('investors/import-template/', importer.InvestorImportTemplateView.as_view()),
+    path('investors/bulk-delete/',    views.InvestorBulkDeleteView.as_view()),
     path('investors/',                views.InvestorListCreateView.as_view()),
     path('investors/<int:pk>/',       views.InvestorDetailView.as_view()),
     path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),

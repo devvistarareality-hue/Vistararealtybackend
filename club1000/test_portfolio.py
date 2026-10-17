@@ -30,7 +30,7 @@ class PortfolioTests(TestCase):
     def test_one_person_across_investments_and_referrals(self):
         a1 = self._inv('Ramesh Patel', '+91 98000 11111', self.rise, '100000', date(2021, 4, 1), status='matured', renewal_count=2)
         a2 = self._inv('RAMESH PATEL', '9800011111', self.grow, '50000', date(2024, 1, 1))
-        self._inv('Suresh Patel', '9800011111', self.rise, '70000', date(2024, 1, 1))        # same number, someone else
+        self._inv('Suresh Patel', '9800011111', self.rise, '70000', date(2024, 1, 1), reference_phone='9800011111')  # same number = same portfolio; not a referral
         self._inv('Draft Guy', '9800011111', self.rise, '1', date(2024, 1, 1), approval_status='draft')
         f = self._inv('Friend One', '9811111111', self.rise, '200000', date(2024, 2, 1), reference_phone='98000 11111')
         ReferralReward.objects.create(investor=f, reference_phone='9800011111', amount=Decimal('2000'), status='paid', paid_amount=Decimal('2000'))
@@ -40,12 +40,14 @@ class PortfolioTests(TestCase):
         Payout.objects.create(investor=a2, payout_type='maturity', due_date=date.today() + timedelta(days=300), amount_due=Decimal('50000'))
 
         rows = self.api.get('/api/club1000/portfolios/').data
-        self.assertEqual(len(rows), 3)                       # Ramesh, Suresh, Friend — the draft is not a holding
-        r = next(x for x in rows if x['name'].lower() == 'ramesh patel')
-        self.assertEqual((r['investments'], r['renewals'], r['times_invested']), (2, 2, 4))
+        self.assertEqual(len(rows), 2)                       # 98000 11111 and Friend — the draft is not a holding
+        r = next(x for x in rows if '9800011111' in x['phone'].replace(' ', '').replace('+91', ''))
+        self.assertEqual(r['name'], 'Ramesh Patel')          # the biggest holding names the card
+        self.assertEqual(r['names'], ['Ramesh Patel', 'Suresh Patel'])
+        self.assertEqual((r['investments'], r['renewals'], r['times_invested']), (3, 2, 5))
         self.assertEqual({s['scheme'] for s in r['schemes']}, {'RISE', 'GROW'})
-        self.assertEqual(Decimal(r['active_amount']), Decimal('50000'))
-        self.assertEqual(Decimal(r['total_invested']), Decimal('150000'))
+        self.assertEqual(Decimal(r['active_amount']), Decimal('120000'))
+        self.assertEqual(Decimal(r['total_invested']), Decimal('220000'))
         self.assertEqual(Decimal(r['paid_out']), Decimal('7500'))
         self.assertEqual(Decimal(r['pending_payouts']), Decimal('53000'))
         self.assertEqual(Decimal(r['due_now']), Decimal('3000'))
@@ -54,10 +56,16 @@ class PortfolioTests(TestCase):
         self.assertEqual(str(r['since']), '2021-04-01')
 
         d = self.api.get(f'/api/club1000/investors/{a1.pk}/portfolio/').data
-        self.assertEqual([h['id'] for h in d['history']], [a2.pk, a1.pk])
+        self.assertEqual([h['id'] for h in d['history']][-1], a1.pk)
+        self.assertEqual(len(d['history']), 3)
         self.assertEqual(d['referred'][0]['name'], 'Friend One')
         self.assertEqual(d['referred'][0]['reward_status'], 'paid')
         self.assertEqual(self.api.get(f'/api/club1000/investors/{a2.pk}/portfolio/').data['id'], a1.pk)
+
+    def test_since_is_when_the_money_first_came_in(self):
+        self._inv('Old Timer', '9811100000', self.rise, '100000', date(2025, 4, 1), renewal_count=3, first_invested_on=date(2019, 4, 1))
+        r = self.api.get('/api/club1000/portfolios/').data[0]
+        self.assertEqual((str(r['since']), r['times_invested']), ('2019-04-01', 4))
 
     def test_search_and_visibility(self):
         self._inv('Ramesh Patel', '9800011111', self.rise, '100000', date(2024, 1, 1))

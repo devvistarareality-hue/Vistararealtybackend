@@ -1,7 +1,7 @@
 """Investor portfolios — one person, everything they hold with the club.
 
-A person is every investment under one mobile number AND one name (a shared number
-under another name is someone else — see views._same_person). Their portfolio gives
+A portfolio is every investment under one mobile number, whatever names they were
+entered under (the names are listed with it). It gives
 how many times they have invested (each investment plus its renewals), the schemes
 it is spread over, what is active now and ever invested, what has been paid out and
 is still due, and the people they brought into the club: investors whose reference
@@ -27,22 +27,26 @@ COUNTED = ('approved', 'pending')      # drafts and rejections are not holdings
 
 
 def _people(investors):
-    """[[investor, …], …] — one list per person."""
-    from .views import _same_person
+    """[[investor, …], …] — one list per mobile number, oldest investment first."""
     by_phone = defaultdict(list)
     for inv in investors:
         by_phone[normalize_phone(inv.phone) or f'#{inv.pk}'].append(inv)
-    people = []
-    for rows in by_phone.values():
-        clusters = []
-        for inv in sorted(rows, key=lambda i: (i.investment_date or i.created_at.date(), i.pk)):
-            home = next((c for c in clusters if _same_person(c[0].name, inv.name)), None)
-            if home is None:
-                clusters.append([inv])
-            else:
-                home.append(inv)
-        people.extend(clusters)
-    return people
+    return [sorted(rows, key=lambda i: (_began(i), i.pk)) for rows in by_phone.values()]
+
+
+def _began(inv):
+    """When this money first came in — before any renewal restarted the term."""
+    return inv.first_invested_on or inv.investment_date or inv.created_at.date()
+
+
+def _names(person):
+    """The distinct names a number was entered under, most-invested first."""
+    from .views import _same_person
+    names = []
+    for inv in sorted(person, key=lambda i: -_money(i.amount_invested)):
+        if not any(_same_person(n, inv.name) for n in names):
+            names.append(inv.name)
+    return names
 
 
 def _money(v):
@@ -52,7 +56,7 @@ def _money(v):
 def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
     approved = [i for i in person if i.approval_status == 'approved']
     first = person[0]
-    latest = max(person, key=lambda i: (i.investment_date or first.investment_date, i.pk))
+    names = _names(person)
     phone = normalize_phone(first.phone)
     schemes = defaultdict(lambda: {'count': 0, 'active': Decimal('0'), 'total': Decimal('0')})
     for i in approved:
@@ -79,8 +83,9 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
     renewals = sum((i.renewal_count or 0) for i in approved)
     return {
         'id': first.pk,
-        'name': latest.name, 'phone': latest.phone, 'email': latest.email or '',
-        'since': first.investment_date,
+        'name': names[0] if names else first.name, 'names': names,
+        'phone': first.phone, 'email': next((i.email for i in person if i.email), ''),
+        'since': min(_began(i) for i in person),
         'investments': len(approved),
         'awaiting_approval': sum(1 for i in person if i.approval_status == 'pending'),
         'renewals': renewals,
@@ -111,12 +116,12 @@ def _load(request):
     referred_by_phone = defaultdict(list)
     for i in investors:
         ref = normalize_phone(i.reference_phone)
-        if ref and i.approval_status == 'approved':
+        if ref and i.approval_status == 'approved' and ref != normalize_phone(i.phone):   # not themselves
             referred_by_phone[ref].append(i)
     rewards_by_phone = defaultdict(list)
     for w in ReferralReward.objects.filter(investor_id__in=ids).select_related('investor', 'investor__scheme'):
         ref = normalize_phone(w.reference_phone)
-        if ref:
+        if ref and ref != normalize_phone(w.investor.phone):
             rewards_by_phone[ref].append(w)
     return investors, payouts_by_inv, referred_by_phone, rewards_by_phone
 
@@ -133,7 +138,7 @@ class PortfolioListView(APIView):
         q = (request.query_params.get('search') or '').strip().lower()
         if q:
             digits = ''.join(c for c in q if c.isdigit())
-            rows = [r for r in rows if q in (r['name'] or '').lower() or (digits and digits in ''.join(c for c in (r['phone'] or '') if c.isdigit()))]
+            rows = [r for r in rows if any(q in (n or '').lower() for n in r['names']) or (digits and digits in ''.join(c for c in (r['phone'] or '') if c.isdigit()))]
         rows.sort(key=lambda r: (-Decimal(r['active_amount']), -r['times_invested'], (r['name'] or '').lower()))
         return Response(rows)
 
@@ -151,10 +156,11 @@ class PortfolioDetailView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         out = _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone)
         out['history'] = []
-        for i in sorted(person, key=lambda i: (i.investment_date or person[0].investment_date, i.pk), reverse=True):
+        for i in sorted(person, key=lambda i: (i.investment_date, i.pk), reverse=True):
             pays = payouts_by_inv.get(i.pk, [])
             out['history'].append({
-                'id': i.pk, 'scheme': i.scheme.name if i.scheme_id else '—', 'loi_no': i.loi_no or '',
+                'id': i.pk, 'name': i.name, 'scheme': i.scheme.name if i.scheme_id else '—', 'loi_no': i.loi_no or '',
+                'first_invested_on': _began(i),
                 'amount': str(i.amount_invested), 'investment_date': i.investment_date, 'maturity_date': i.maturity_date,
                 'interest_payout': i.interest_payout, 'return_pct': str(i.total_return_pct or ''),
                 'status': i.status, 'approval_status': i.approval_status, 'renewal_count': i.renewal_count or 0,

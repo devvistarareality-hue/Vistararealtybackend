@@ -32,7 +32,9 @@ COLUMNS = [
     ('pan', 'PAN', False, ''),
     ('scheme', 'Scheme', True, 'Pick from the list — must match a scheme exactly.'),
     ('amount_invested', 'Amount Invested', True, 'In rupees, no commas needed. At least the scheme\'s minimum ticket.'),
-    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date). Maturity is worked out from the scheme\'s tenure.'),
+    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) the CURRENT term started — for money reinvested, the date of the latest reinvestment. Maturity is worked out from the scheme\'s tenure.'),
+    ('renewal_count', 'Times Reinvested', False, 'How many times this money has already been reinvested (renewed) before the current term. 0 or blank = first time. One row per person per investment — never a row per reinvestment.'),
+    ('first_invested_on', 'First Invested On', False, 'DD-MM-YYYY the money first came in (before any reinvestment). Blank = Investment Date.'),
     ('interest_payout', 'Interest Payout', False, 'monthly / quarterly / maturity — must be one the scheme offers. Blank = the scheme\'s first option.'),
     ('total_return_pct', 'Return %', False, 'Total return by maturity. Blank = the scheme\'s rate for that payout.'),
     ('source', 'Source', False, 'referral / walk_in / website / other. Blank = referral.'),
@@ -47,7 +49,8 @@ for _k, _h, _r, _d in COLUMNS:
     for alias in (_k, _h, _h.replace(' ', '_'), _h.replace(' %', '_pct')):
         HEADER_TO_KEY[alias.strip().lower().replace(' ', '_')] = _k
 HEADER_TO_KEY.update({'mobile_number': 'phone', 'amount': 'amount_invested', 'date': 'investment_date',
-                      'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout'})
+                      'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout',
+                      'reinvested': 'renewal_count', 'renewals': 'renewal_count', 'times_renewed': 'renewal_count'})
 SOURCES = [k for k, _ in LEAD_SOURCE_CHOICES]
 PAYOUTS = ['monthly', 'quarterly', 'maturity']
 
@@ -84,14 +87,17 @@ class InvestorImportTemplateView(APIView):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Investors'
-        ws.append([h for _, h, _, _ in COLUMNS])
-        req_fill, opt_fill = PatternFill('solid', fgColor='2E4A78'), PatternFill('solid', fgColor='5C7CAC')
+        # Must-fill columns stand out: red header with a *, and their empty cells turn
+        # red on a row that has been started. A row missing one is not imported.
+        ws.append([f'{h} *' if required else h for _, h, required, _ in COLUMNS])
+        req_fill, opt_fill = PatternFill('solid', fgColor='C0392B'), PatternFill('solid', fgColor='5C7CAC')
         for i, (_, _, required, _) in enumerate(COLUMNS, start=1):
             c = ws.cell(row=1, column=i)
             c.font = Font(bold=True, color='FFFFFF')
             c.fill = req_fill if required else opt_fill
             c.alignment = Alignment(vertical='center')
             ws.column_dimensions[get_column_letter(i)].width = 20
+        ws.row_dimensions[1].height = 22
         sc = schemes[0] if schemes else None
         sc2 = schemes[1] if len(schemes) > 1 else sc
         def pay_of(s):
@@ -99,7 +105,8 @@ class InvestorImportTemplateView(APIView):
         examples = [
             {'name': 'Rahul Sharma', 'phone': '9876543210', 'email': 'rahul@example.com', 'scheme': sc.name if sc else 'RISE',
              'amount_invested': 1000000, 'investment_date': '01-04-2025', 'interest_payout': pay_of(sc),
-             'source': 'referral', 'reference_name': 'Amit Patel', 'reference_phone': '9898989898'},
+             'source': 'referral', 'reference_name': 'Amit Patel', 'reference_phone': '9898989898',
+             'renewal_count': 3, 'first_invested_on': '01-04-2019'},
             {'name': 'Priya Mehta', 'phone': '9988776655', 'scheme': sc2.name if sc2 else 'RISE',
              'amount_invested': 500000, 'investment_date': '15-08-2025', 'interest_payout': pay_of(sc2), 'source': 'walk_in'},
         ]
@@ -109,6 +116,13 @@ class InvestorImportTemplateView(APIView):
             for i in range(1, len(COLUMNS) + 1):
                 ws.cell(row=r, column=i).font = Font(italic=True, color='7A869A')
         ws.freeze_panes = 'A2'
+        from openpyxl.formatting.rule import FormulaRule
+        last = get_column_letter(len(COLUMNS))
+        for i, (_, _, required, _) in enumerate(COLUMNS, start=1):
+            if required:
+                col = get_column_letter(i)
+                ws.conditional_formatting.add(f'{col}2:{col}2000', FormulaRule(
+                    formula=[f'AND(ISBLANK({col}2),COUNTA($A2:${last}2)>0)'], fill=PatternFill('solid', fgColor='F8D7DA')))
 
         # Dropdowns: schemes (from a hidden list), payout, source.
         lists = wb.create_sheet('Lists')
@@ -136,9 +150,11 @@ class InvestorImportTemplateView(APIView):
         hlp.append([])
         hlp.append(['Rows 2–3 are examples — replace or delete them.'])
         hlp.append(['Each imported investor waits in Club 1000 → Approvals, like one added by hand.'])
-        hlp.append(['One row per investment. Someone who invested 5 times (or reinvested) gets 5 rows, '
-                    'same name and mobile, each with its own date, scheme and amount; Investor Portfolios '
-                    'puts them together as one person.'])
+        hlp.append(['Columns marked * (red) must be filled. A row with any of them empty is NOT imported — '
+                    'it is listed with the reason so you can fix it and upload again.'])
+        hlp.append(['Reinvested money is ONE row: today\'s amount, the date the current term started as Investment Date, '
+                    'and how many times it was reinvested in Times Reinvested (e.g. invested 2019, reinvested 3 times → 3).'])
+        hlp.append(['Investor Portfolios puts every row with the same mobile number together.'])
         hlp.append(['Old investments: payouts whose date has passed show as due until you mark them paid '
                     'in Payouts with the date they were actually paid.'])
         hlp.append(['Schemes: ' + ', '.join(f'{s.name} ({s.tenure_months} mo, min ₹{int(s.min_ticket_size):,}, payouts: {", ".join(s.interest_payout_options or ["maturity"])})' for s in schemes)])
@@ -166,7 +182,7 @@ def _read_rows(raw, name):
         table = [list(r) for r in ws.iter_rows(values_only=True)]
     if not table:
         return []
-    keys = [HEADER_TO_KEY.get(str(h or '').strip().lower().replace(' ', '_')) for h in table[0]]
+    keys = [HEADER_TO_KEY.get(str(h or '').replace('*', '').strip().lower().replace(' ', '_')) for h in table[0]]
     out = []
     for n, row in enumerate(table[1:], start=2):
         rec = {k: row[i] for i, k in enumerate(keys) if k and i < len(row)}
@@ -246,6 +262,18 @@ def _check(rows, request):
             errs.append(f'Interest Payout "{_text(r.get("interest_payout"))}" — use monthly / quarterly / maturity')
         elif scheme and payout not in options:
             errs.append(f'{scheme.name} only allows {", ".join(options)}')
+        renewals = _num(r.get('renewal_count'))
+        if renewals is False or (renewals is not None and (renewals < 0 or renewals != int(renewals))):
+            errs.append('Times Reinvested must be a whole number (0, 1, 2 …)')
+            renewals = None
+        renewals = int(renewals or 0)
+        first_on = None
+        if _text(r.get('first_invested_on')):
+            first_on = _date(r.get('first_invested_on'))
+            if not first_on:
+                errs.append('First Invested On is not DD-MM-YYYY')
+            elif inv_date and first_on > inv_date:
+                errs.append('First Invested On is after the Investment Date')
         pct = _num(r.get('total_return_pct'))
         if pct is False:
             errs.append('Return % is not a number')
@@ -274,13 +302,14 @@ def _check(rows, request):
             'preview': {'name': name, 'phone': digits[-10:] if digits else phone, 'scheme': scheme.name if scheme else _text(r.get('scheme')),
                         'amount': str(amount) if amount not in (None, False) else '', 'investment_date': str(inv_date or ''),
                         'maturity_date': str(maturity or ''), 'interest_payout': payout, 'return_pct': str(pct or ''),
-                        'reference': ref_name},
+                        'reference': ref_name, 'renewal_count': renewals, 'first_invested_on': str(first_on or '')},
             'data': None if errs else {
                 'scheme': scheme, 'name': name, 'phone': digits[-10:], 'email': _text(r.get('email')),
                 'pan': _text(r.get('pan')).upper(), 'amount_invested': amount, 'investment_date': inv_date,
                 'maturity_date': maturity, 'interest_payout': payout, 'total_return_pct': pct, 'source': source,
                 'reference_name': ref_name, 'reference_phone': ref_phone, 'loi_no': _text(r.get('loi_no')),
                 'security': _text(r.get('security')), 'notes': _text(r.get('notes')),
+                'renewal_count': renewals, 'first_invested_on': first_on if first_on and first_on != inv_date else None,
             },
         })
     return out

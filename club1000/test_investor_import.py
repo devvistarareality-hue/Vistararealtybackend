@@ -36,7 +36,26 @@ class InvestorImportTests(TestCase):
         self.assertEqual(r.status_code, 200)
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
         self.assertIn('Investors', wb.sheetnames)
-        self.assertEqual(wb['Investors'].cell(row=1, column=1).value, 'Investor Name')
+        self.assertEqual(wb['Investors'].cell(row=1, column=1).value, 'Investor Name *')   # must-fill marked
+        self.assertIn('Times Reinvested', [c.value for c in wb['Investors'][1]])
+
+    def test_reinvested_money_is_one_row_with_its_count(self):
+        f = self._file([['Old One *', '9800000009', 'RISE', 700000, '01-04-2025', 'maturity', 3, '01-04-2019'],
+                        ['No Count', '9800000008', 'RISE', 700000, '01-04-2025', 'maturity', 'two', '']],
+                       headers=['Investor Name *', 'Mobile *', 'Scheme *', 'Amount Invested *', 'Investment Date *',
+                                'Interest Payout', 'Times Reinvested', 'First Invested On'])
+        r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
+        self.assertEqual((r.data['created'], r.data['failed']), (1, 1), r.data)
+        self.assertTrue(any('Times Reinvested' in e for e in r.data['rows'][1]['errors']))
+        inv = Investor.objects.get()
+        self.assertEqual((inv.renewal_count, inv.first_invested_on, inv.investment_date), (3, date(2019, 4, 1), date(2025, 4, 1)))
+
+    def test_row_missing_a_must_fill_column_is_not_imported(self):
+        f = self._file([['Has All', '9800000007', 'RISE', 500000, '01-04-2025', '', '', ''],
+                        ['No Amount', '9800000006', 'RISE', '', '01-04-2025', '', '', '']])
+        r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
+        self.assertEqual((r.data['created'], r.data['failed']), (1, 1))
+        self.assertEqual([i.name for i in Investor.objects.all()], ['Has All'])
 
     def test_check_reports_errors_and_saves_nothing(self):
         f = self._file([['A One', '9800000001', 'RISE', 500000, '01-04-2025', 'quarterly', 'Ref', '9811111111'],

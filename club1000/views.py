@@ -760,10 +760,7 @@ class InvestorDetailView(APIView):
         return Response(ser.data)
 
     def delete(self, request, pk):
-        """Delete an investment — managers and above only. Refused once money has
-        moved (a payout or referral reward marked paid): those are books of record,
-        so the payment is undone first, or the investment is closed by Redeem /
-        Payout instead. Its schedule, rewards and stored documents go with it."""
+        """Delete an investment — managers and above only. See _delete_investor."""
         if not has_club1000_access(request.user):
             return _no_access()
         if not is_club1000_manager(request.user):
@@ -771,29 +768,82 @@ class InvestorDetailView(APIView):
         investor = self._get(request, pk)
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        paid = investor.payouts.filter(status='paid').count()
-        paid_rewards = investor.referral_rewards.filter(status='paid').count()
-        if paid or paid_rewards:
-            bits = []
-            if paid:
-                bits.append(f'{paid} payout{"s" if paid != 1 else ""}')
-            if paid_rewards:
-                bits.append(f'{paid_rewards} referral reward{"s" if paid_rewards != 1 else ""}')
-            return Response({'detail': f'{" and ".join(bits)} for this investor {"are" if paid + paid_rewards > 1 else "is"} already paid. '
-                                       'Undo those payments first, or close the investment with Redeem / Payout instead.'},
-                            status=status.HTTP_409_CONFLICT)
-        from activity.recorder import note
-        label = f'{investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · {investor.scheme.name} · ₹{investor.amount_invested:,.0f}'
-        files = [f for f in (investor.loi_document, investor.pending_loi_document, investor.document) if f]
-        with transaction.atomic():
-            investor.delete()
-        for f in files:
-            try:
-                f.storage.delete(f.name)
-            except Exception:
-                pass
-        note(request, f'Deleted investor — {label}', action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
+        refused = _delete_investor(request, investor)
+        if refused:
+            return Response({'detail': refused}, status=status.HTTP_409_CONFLICT)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _delete_investor(request, investor):
+    """Delete one investment; returns why not, or None once it is gone.
+
+    Refused once money has moved (a payout or referral reward marked paid): those
+    are books of record, so the payment is undone first, or the investment is closed
+    by Redeem / Payout instead. Its schedule, rewards and stored documents go with
+    it, and its lead stops reading Converted — it reads Investor Deleted."""
+    paid = investor.payouts.filter(status='paid').count()
+    paid_rewards = investor.referral_rewards.filter(status='paid').count()
+    if paid or paid_rewards:
+        bits = []
+        if paid:
+            bits.append(f'{paid} payout{"s" if paid != 1 else ""}')
+        if paid_rewards:
+            bits.append(f'{paid_rewards} referral reward{"s" if paid_rewards != 1 else ""}')
+        return (f'{" and ".join(bits)} for this investor {"are" if paid + paid_rewards > 1 else "is"} already paid. '
+                'Undo those payments first, or close the investment with Redeem / Payout instead.')
+    from activity.recorder import note
+    pk = investor.pk
+    label = f'{investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · {investor.scheme.name} · ₹{investor.amount_invested:,.0f}'
+    files = [f for f in (investor.loi_document, investor.pending_loi_document, investor.document) if f]
+    lead = investor.lead
+    with transaction.atomic():
+        investor.delete()
+        if lead and lead.status == 'converted' and not lead.investor_conversions.exists():
+            Lead.objects.filter(pk=lead.pk).update(status='investor_deleted')
+            LeadStatusHistory.objects.create(lead=lead, changed_by=request.user, field_changed='status',
+                                             old_value='converted', new_value='investor_deleted',
+                                             remarks=f'Investor deleted — {label}')
+    for f in files:
+        try:
+            f.storage.delete(f.name)
+        except Exception:
+            pass
+    note(request, f'Deleted investor — {label}', action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
+    return None
+
+
+class InvestorBulkDeleteView(APIView):
+    """POST {ids: [...]} — delete several investments at once, managers only. Each
+    one follows the single-delete rule; those with money already paid are left
+    alone and listed with the reason."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        if not is_club1000_manager(request.user):
+            return Response({'detail': 'Only a Club 1000 manager can delete investors.'}, status=status.HTTP_403_FORBIDDEN)
+        ids = request.data.get('ids') or []
+        try:
+            ids = sorted({int(i) for i in ids})
+        except (TypeError, ValueError):
+            return Response({'detail': 'ids must be a list of investor ids.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not ids:
+            return Response({'detail': 'Pick at least one investor.'}, status=status.HTTP_400_BAD_REQUEST)
+        found = {i.pk: i for i in _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)}
+        deleted, refused = [], []
+        for pk in ids:
+            inv = found.get(pk)
+            if not inv:
+                refused.append({'id': pk, 'name': '', 'reason': 'Not found.'})
+                continue
+            name = inv.name
+            why = _delete_investor(request, inv)
+            if why:
+                refused.append({'id': pk, 'name': name, 'reason': why})
+            else:
+                deleted.append(pk)
+        return Response({'deleted': deleted, 'refused': refused})
 
 
 class InvestorLedgerView(APIView):
@@ -2090,11 +2140,13 @@ class InvestorActionView(APIView):
                         renewal_date = date.fromisoformat(str(pr['investment_date'])) if 'investment_date' in pr else date.today()
                     except (ValueError, TypeError):
                         renewal_date = date.today()
+                    if not investor.first_invested_on:
+                        investor.first_invested_on = investor.investment_date
                     investor.investment_date = renewal_date
                     investor.maturity_date = renewal_date + relativedelta(months=investor.scheme.tenure_months)
                     investor.status = 'active'
                     investor.renewal_count = (investor.renewal_count or 0) + 1
-                    update_fields += ['investment_date', 'maturity_date', 'status', 'renewal_count']
+                    update_fields += ['investment_date', 'maturity_date', 'status', 'renewal_count', 'first_invested_on']
                 if investor.loi_document:
                     investor.loi_document.delete(save=False)
                 if investor.pending_loi_document:

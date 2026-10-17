@@ -28,6 +28,8 @@ LEAD_STATUS = [
     ('not_interested', 'Not Interested'),
     ('converted', 'Converted'),
     ('lost', 'Lost'),
+    # Was converted, but the investment it became has since been deleted.
+    ('investor_deleted', 'Investor Deleted'),
 ]
 
 PRINCIPAL_PAYOUT_CHOICES = [
@@ -254,6 +256,9 @@ class Investor(models.Model):
     # How many times this investment has been renewed at maturity (each approved
     # renewal starts a new term on the same record).
     renewal_count = models.PositiveIntegerField(default=0)
+    # When this money first came in, before any renewal restarted the term (an
+    # import of an old investment, or set on its first renewal). Blank = investment_date.
+    first_invested_on = models.DateField(null=True, blank=True)
     # Who signed the investment off, and when — the latest approval, a revision's
     # included. Shown on the Approved tab.
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')

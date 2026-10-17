@@ -260,7 +260,7 @@ def _entities():
         # ── Club 1000 ──
         'investors': {'module': ('Club 1000',), 'view': InvestorListCreateView, 'date': 'invested',
                       'company': 'company_id', 'note': 'drafts and rejected left out; one row per investment — a person who invested '
-                      'several times has several rows (same name/phone); referred_by = who brought them into the club', 'fields': {
+                      'several times has several rows (same phone); renewals = times the money was reinvested; referred_by = who brought them into the club', 'fields': {
             'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'scheme': ('scheme__name', 'text'),
             'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
             'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),
@@ -269,7 +269,7 @@ def _entities():
             'added_by': ('added_by__name', 'text'),
             'approved_by': ('approved_by__name', 'text'), 'approved_on': ('approved_at', 'date'),
             'referred_by': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
-            'renewals': ('renewal_count', 'number'),
+            'renewals': ('renewal_count', 'number'), 'first_invested': ('first_invested_on', 'date'),
         }},
         'payouts': {'module': ('Club 1000',), 'view': PayoutListView, 'date': 'due',
                     'company': 'investor__company_id', 'note': 'interest / principal payouts to investors',

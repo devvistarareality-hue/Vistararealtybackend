@@ -121,7 +121,7 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
             'maturity_date', 'is_matured', 'maturity_value', 'interest_payout', 'total_return_pct', 'document_url', 'status',
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
-            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'rejected_reason', 'revision_date', 'revision_draft',
+            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'first_invested_on', 'rejected_reason', 'revision_date', 'revision_draft',
             'pending_revision', 'pending_revision_type',
             'pending_loi_document_url', 'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
         ]
