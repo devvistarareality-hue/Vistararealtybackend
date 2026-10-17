@@ -1,5 +1,5 @@
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from dateutil.relativedelta import relativedelta
 from django.db import transaction
@@ -870,6 +870,122 @@ def _settlement(investor, on=None):
 
 def formatted_date(d):
     return d.strftime('%d/%m/%Y') if d else ''
+
+
+_HISTORY_SKIP = {'draft', 'loi-no', 'upload-loi', 'updated'}
+
+
+def _day_start(d):
+    """A paid date as a moment, so it sorts among the logged events."""
+    return timezone.make_aware(datetime.combine(d, datetime.min.time()))
+
+
+class InvestorHistoryView(APIView):
+    """GET one investment's life from the start — added, approved, every revision
+    and renewal (submitted / approved / rejected), payouts paid and undone,
+    referral rewards, redemption and closing — newest first.
+
+    Built from the activity log (who did what, when) plus the payout and reward
+    rows themselves, so payments made inside a Payout / Redeem dialog, and
+    records older than the log, still appear."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        from activity.models import ActivityLog
+        investor = _investor_visibility_qs(request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        events = []
+
+        def add(at, kind, title, detail='', by='', amount=None):
+            events.append({'at': at, 'kind': kind, 'title': title, 'detail': detail, 'by': by,
+                           'amount': str(amount) if amount is not None else None})
+
+        def detail_of(summary):
+            # "Approved investor — NAME · LOI X · Field: a → b; …" → the part after the label.
+            parts = (summary or '').split(' · ')
+            return ' · '.join(parts[2:]) if len(parts) > 2 else ''
+
+        logs = list(ActivityLog.objects.filter(target_type='investor', target_id=str(investor.pk))
+                    .order_by('created_at', 'id'))
+        submitted = 'new'       # what the next approve / reject answers
+        revisions = renewals = 0
+        seen = set()
+        for r in logs:
+            a = r.action
+            if a in _HISTORY_SKIP:
+                continue
+            by = r.actor_name or ''
+            if a == 'created':
+                add(r.created_at, 'added', 'Investment added', detail_of(r.summary), by, investor.amount_invested)
+                seen.add('added')
+            elif a == 'revise':
+                revisions += 1; submitted = 'revise'
+                add(r.created_at, 'revise', f'Revision R{revisions} submitted for approval', '', by)
+            elif a == 'renew':
+                renewals += 1; submitted = 'renew'
+                add(r.created_at, 'renew', f'Renewal #{renewals} submitted for approval', '', by)
+            elif a in ('approve', 'reject'):
+                verb = 'approved' if a == 'approve' else 'rejected'
+                title = {'new': f'Investment {verb}', 'revise': f'Revision R{revisions} {verb}',
+                         'renew': f'Renewal #{renewals} {verb}'}[submitted]
+                add(r.created_at, a if submitted == 'new' else f'{submitted}-{a}', title, detail_of(r.summary), by)
+                if submitted == 'new' and a == 'approve':
+                    seen.add('approved')
+            elif a == 'redeem':
+                add(r.created_at, 'redeem', 'Redeemed before maturity', detail_of(r.summary), by)
+            elif a == 'mature-payout':
+                add(r.created_at, 'closed', 'Paid out at maturity — investment closed', detail_of(r.summary), by)
+            else:
+                add(r.created_at, a, (r.summary or a).split(' — ')[0], detail_of(r.summary), by)
+
+        # Records older than the activity log still get their start.
+        if 'added' not in seen:
+            add(investor.created_at, 'added', 'Investment added', '',
+                investor.added_by.name if investor.added_by else '', investor.amount_invested)
+        if 'approved' not in seen and investor.approved_at:
+            add(investor.approved_at, 'approve', 'Investment approved', '',
+                investor.approved_by.name if investor.approved_by else '')
+
+        # Payouts: every paid one (whichever screen paid it), and every undo.
+        payouts = list(investor.payouts.select_related('paid_by').all())
+        labels = {'interest': 'Interest', 'maturity': 'Principal', 'premature_redemption': 'Redemption'}
+        for p in payouts:
+            if p.status == 'paid' and p.paid_date:
+                paid = p.paid_amount if p.paid_amount is not None else p.amount_due
+                bits = [f'due {formatted_date(p.due_date)}']
+                if paid != p.amount_due:
+                    bits.append(f'target ₹{p.amount_due:,.0f}')
+                if p.notes:
+                    bits.append(p.notes)
+                add(_day_start(p.paid_date), 'paid', f'{labels.get(p.payout_type, p.payout_type)} paid', ' · '.join(bits),
+                    p.paid_by.name if p.paid_by else '', paid)
+        undo_logs = ActivityLog.objects.filter(target_type='payout', action='mark-unpaid',
+                                               target_id__in=[str(p.pk) for p in payouts])
+        for r in undo_logs:
+            add(r.created_at, 'undo', 'Payment undone — back to pending', detail_of(r.summary), r.actor_name or '')
+
+        for rw in investor.referral_rewards.select_related('paid_by').all():
+            who = f'{rw.reference_name or "Referrer"}{f" ({rw.reference_phone})" if rw.reference_phone else ""}'
+            add(rw.created_at, 'reward', f'Referral reward earned — {who}', f'{rw.pct}% of the investment', '', rw.amount)
+            if rw.status == 'paid' and rw.paid_date:
+                add(_day_start(rw.paid_date), 'reward-paid', f'Referral reward paid — {who}', rw.notes or '',
+                    rw.paid_by.name if rw.paid_by else '', rw.paid_amount if rw.paid_amount is not None else rw.amount)
+
+        events.sort(key=lambda e: e['at'], reverse=True)
+        paid_total = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0')
+                          for p in payouts if p.status == 'paid'), Decimal('0'))
+        return Response({
+            'investor': investor.pk,
+            'renewal_count': investor.renewal_count,
+            'revision_count': max(revisions, (investor.revision_no or 0) - (investor.renewal_count or 0)),
+            'status': investor.status,
+            'term': {'from': investor.investment_date, 'to': investor.maturity_date},
+            'paid_total': paid_total,
+            'events': events,
+        })
 
 
 class InvestorSettlementView(APIView):
@@ -1767,7 +1883,8 @@ class InvestorActionView(APIView):
                     investor.investment_date = renewal_date
                     investor.maturity_date = renewal_date + relativedelta(months=investor.scheme.tenure_months)
                     investor.status = 'active'
-                    update_fields += ['investment_date', 'maturity_date', 'status']
+                    investor.renewal_count = (investor.renewal_count or 0) + 1
+                    update_fields += ['investment_date', 'maturity_date', 'status', 'renewal_count']
                 if investor.loi_document:
                     investor.loi_document.delete(save=False)
                 if investor.pending_loi_document:

@@ -84,3 +84,22 @@ class SettlementFlowTests(TestCase):
         self.assertTrue(Payout.objects.filter(pk=old_int.pk, status='pending').exists(), 'old unpaid interest was wiped')
         returned = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=date.today(), status='pending')
         self.assertEqual([p.amount_due for p in returned], [Decimal('20000.00')])
+
+    def test_history_counts_renewals_and_lists_payments(self):
+        inv = self._inv(date.today() - relativedelta(months=25))
+        p = Payout.objects.create(investor=inv, payout_type='interest', due_date=date.today() - timedelta(days=40), amount_due=Decimal('7500'))
+        self.api.post(f'/api/club1000/payouts/{p.pk}/mark-paid/', {'amount': '7000', 'notes': 'UTR 7'}, format='json')
+        Investor.objects.filter(pk=inv.pk).update(
+            approval_status='pending', pending_revision_type='renew',
+            pending_revision={'amount_invested': '100000', 'investment_date': str(date.today()), 'interest_payout': 'maturity'})
+        self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
+        inv.refresh_from_db()
+        self.assertEqual(inv.renewal_count, 1)
+        d = self.api.get(f'/api/club1000/investors/{inv.pk}/history/').data
+        self.assertEqual(d['renewal_count'], 1)
+        kinds = [e['kind'] for e in d['events']]
+        self.assertIn('paid', kinds)
+        self.assertIn('added', kinds)
+        paid = next(e for e in d['events'] if e['kind'] == 'paid')
+        self.assertEqual(Decimal(paid['amount']), Decimal('7000'))
+        self.assertIn('UTR 7', paid['detail'])
