@@ -6373,6 +6373,14 @@ def _loi_safe(s):
     return re.sub(r'\s+', ' ', text).strip(' .') or 'NA'
 
 
+class _LoiNotStored(Exception):
+    """The signed LOI did not reach storage — undo the submission."""
+
+
+class _LoiMissing(Exception):
+    """A booking for a company that uses LOIs arrived with none."""
+
+
 def _loi_path(b):
     """GAS-style object path: <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf"""
     proj = _loi_safe(b.project.name if b.project_id else 'Project')
@@ -6677,6 +6685,23 @@ class BookingListCreateView(APIView):
             BookingSerializer(qs.distinct(), many=True, context={'request': request}).data)
 
     def post(self, request):
+        # All or nothing: the booking, its plots and its lead are saved together with
+        # the signed LOI. If the LOI cannot be stored, everything is undone and the
+        # STM is told to try again — a booking never exists without its LOI (two
+        # did, when the storage upload failed after the booking had been saved).
+        try:
+            with transaction.atomic():
+                return self._submit(request)
+        except _LoiNotStored:
+            return Response(
+                {'detail': 'The signed LOI could not be uploaded, so the booking was not submitted. '
+                           'Nothing was saved — please try again.'},
+                status=status.HTTP_502_BAD_GATEWAY)
+        except _LoiMissing:
+            return Response({'detail': 'Attach the signed LOI before submitting.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+    def _submit(self, request):
         company = _resolve_company(request)
         data = request.data
 
@@ -6959,7 +6984,6 @@ class BookingListCreateView(APIView):
 
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
-        loi_upload_failed = False
         lf = data.get('loi_file')
         if isinstance(lf, dict) and lf.get('data') and not _loi_enabled(company):
             return Response(
@@ -6975,9 +6999,8 @@ class BookingListCreateView(APIView):
             except Exception:
                 # The upload may still have landed (the storage POST succeeded but the
                 # model save failed, or the reply timed out) — then link it. If it is
-                # NOT in storage, linking the path anyway left a booking pointing at a
-                # file that does not exist (its LOI opened "Bucket not found"), so say
-                # so instead and let the STM upload it again.
+                # NOT in storage, the whole submission is undone (see post) rather than
+                # leaving a booking pointing at a file that does not exist.
                 import logging
                 logging.getLogger(__name__).exception('LOI document save failed for booking %s', booking.id)
                 from sales.supabase_storage import object_exists
@@ -6989,7 +7012,9 @@ class BookingListCreateView(APIView):
                     except Exception:
                         logging.getLogger(__name__).exception('LOI document path relink failed for booking %s', booking.id)
                 else:
-                    loi_upload_failed = True
+                    raise _LoiNotStored()
+        if _loi_enabled(company) and not booking.loi_document:
+            raise _LoiMissing()
 
         if not prior:
             # New booking: reserve ALL selected plots. The Closure is mirrored into
@@ -7024,11 +7049,7 @@ class BookingListCreateView(APIView):
         _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
                               request=request, skip_ids=asked)
 
-        resp = BookingSerializer(booking).data
-        if loi_upload_failed:
-            resp['warning'] = ('The booking is saved, but the signed LOI did not upload. '
-                               'Open the booking and upload the signed LOI again.')
-        return Response(resp, status=status.HTTP_201_CREATED)
+        return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
 
 
 def _can_view_booking(user, booking, company):

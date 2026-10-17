@@ -102,6 +102,8 @@ class FullErpRoleTests(TestCase):
             'client_name': 'Buyer', 'phone': '9000000505', 'booking_date': TODAY,
             'final_amount': 1000000, 'total_extra': 0,
             'installments': [{'no': 1, 'date': SOON, 'amt': 1000000}],
+            # The signed LOI is required for a company that uses LOIs.
+            'loi_file': {'name': 'loi.pdf', 'type': 'application/pdf', 'data': 'JVBERi0xLjQK'},
         }, format='json')
         self.assertEqual(r.status_code, 201, r.content)
         return r.json()['id']
