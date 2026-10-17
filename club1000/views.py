@@ -1765,7 +1765,7 @@ class LeadDetailView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         lead = ser.save()
         # A lead reaching a terminal status has nothing left to follow up on.
-        if lead.status in ('not_interested', 'lost', 'converted') and lead.next_follow_up_date:
+        if lead.status in ('not_interested', 'lost', 'converted', 'investor_deleted') and lead.next_follow_up_date:
             lead.next_follow_up_date = None
             lead.save(update_fields=['next_follow_up_date'])
         history_entries = []
