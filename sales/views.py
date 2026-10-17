@@ -6959,6 +6959,7 @@ class BookingListCreateView(APIView):
 
         # Signed LOI (sent as base64 {name,type,data}). Stored GAS-style:
         # <Project>/Plot <no> - <Client>/R<rev>_LOI_Plot<no>_<Client>.pdf
+        loi_upload_failed = False
         lf = data.get('loi_file')
         if isinstance(lf, dict) and lf.get('data') and not _loi_enabled(company):
             return Response(
@@ -6972,16 +6973,23 @@ class BookingListCreateView(APIView):
                 booking.loi_document.save(_loi_path(booking),
                                           ContentFile(base64.b64decode(lf['data'])), save=True)
             except Exception:
-                # The file may already be in storage (e.g. the storage POST succeeded but the
-                # model save failed, or the request timed out). Persist the deterministic path
-                # so the signed LOI isn't orphaned/invisible, and surface the error in logs.
+                # The upload may still have landed (the storage POST succeeded but the
+                # model save failed, or the reply timed out) — then link it. If it is
+                # NOT in storage, linking the path anyway left a booking pointing at a
+                # file that does not exist (its LOI opened "Bucket not found"), so say
+                # so instead and let the STM upload it again.
                 import logging
                 logging.getLogger(__name__).exception('LOI document save failed for booking %s', booking.id)
-                try:
-                    booking.loi_document.name = _loi_path(booking)
-                    booking.save(update_fields=['loi_document'])
-                except Exception:
-                    logging.getLogger(__name__).exception('LOI document path relink failed for booking %s', booking.id)
+                from sales.supabase_storage import object_exists
+                path = _loi_path(booking)
+                if object_exists(path):
+                    try:
+                        booking.loi_document.name = path
+                        booking.save(update_fields=['loi_document'])
+                    except Exception:
+                        logging.getLogger(__name__).exception('LOI document path relink failed for booking %s', booking.id)
+                else:
+                    loi_upload_failed = True
 
         if not prior:
             # New booking: reserve ALL selected plots. The Closure is mirrored into
@@ -7016,7 +7024,11 @@ class BookingListCreateView(APIView):
         _notify_booking_event(company, booking, 'submitted', request.user, 'awaiting Sales approval',
                               request=request, skip_ids=asked)
 
-        return Response(BookingSerializer(booking).data, status=status.HTTP_201_CREATED)
+        resp = BookingSerializer(booking).data
+        if loi_upload_failed:
+            resp['warning'] = ('The booking is saved, but the signed LOI did not upload. '
+                               'Open the booking and upload the signed LOI again.')
+        return Response(resp, status=status.HTTP_201_CREATED)
 
 
 def _can_view_booking(user, booking, company):
@@ -8821,6 +8833,11 @@ class BookingLOIUrlView(APIView):
             return Response({'detail': 'You do not have access to this LOI.'}, status=status.HTTP_403_FORBIDDEN)
         from sales.supabase_storage import create_signed_url
         url = create_signed_url(b.loi_document.name, expires_in=120)
+        if not url and str(getattr(settings, 'DEFAULT_FILE_STORAGE', '')).endswith('SupabaseStorage'):
+            # The bucket is private: a plain public link can only fail ("Bucket not
+            # found"). A link that cannot be signed means the file is not there.
+            return Response({'detail': 'This signed LOI is missing from storage — upload it again from the booking.'},
+                            status=status.HTTP_404_NOT_FOUND)
         if not url:
             # Local dev (FileSystem storage) fallback.
             try:

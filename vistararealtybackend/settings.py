@@ -1,6 +1,7 @@
 from pathlib import Path
 from datetime import timedelta
 import os
+import sys
 import dj_database_url
 from dotenv import load_dotenv
 
@@ -183,7 +184,11 @@ MEDIA_ROOT = BASE_DIR / 'media'
 #  - Preferred: REST backend with the service_role key (one secret).
 #  - Alternative: S3-compatible endpoint with S3 access keys.
 SUPABASE_S3_ENDPOINT = os.getenv('SUPABASE_S3_ENDPOINT', '')   # https://<ref>.supabase.co/storage/v1/s3
-if os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
+# Tests never touch the real bucket (they used to leave loi.pdf / LOI_504.pdf in it).
+_TESTING = len(sys.argv) > 1 and sys.argv[1] == 'test'
+if _TESTING:
+    pass
+elif os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
     DEFAULT_FILE_STORAGE = 'sales.supabase_storage.SupabaseStorage'
 elif SUPABASE_S3_ENDPOINT:
     DEFAULT_FILE_STORAGE   = 'storages.backends.s3boto3.S3Boto3Storage'

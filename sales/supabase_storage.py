@@ -121,3 +121,8 @@ def create_signed_url(name, expires_in=120):
     except Exception:
         pass
     return None
+
+
+def object_exists(name):
+    """Is this object in the private LOI bucket? (A link to it can be signed.)"""
+    return bool(create_signed_url(name, expires_in=30))
