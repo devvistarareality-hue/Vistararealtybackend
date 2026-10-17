@@ -848,7 +848,8 @@ class InvestorLedgerView(APIView):
             total_due += p.amount_due
             if p.status == 'paid':
                 total_paid += actual_paid
-        entries.sort(key=lambda e: e['date'])
+        # Same day: the investment first, interest before the principal it is paid with.
+        entries.sort(key=lambda e: (e['date'], {'investment': 0, 'interest': 1}.get(e['type'], 2)))
 
         summary = {
             'total_invested': str(investor.amount_invested),
@@ -881,7 +882,7 @@ def _settlement(investor, on=None):
     lock = scheme.premature_redemption_lock_months or 0
     rate = scheme.premature_redemption_rate_pct_per_month or Decimal('0')
     paid = [p for p in investor.payouts.all() if p.status == 'paid']
-    pending = sorted((p for p in investor.payouts.all() if p.status == 'pending'), key=lambda p: (p.due_date, p.id))
+    pending = sorted((p for p in investor.payouts.all() if p.status == 'pending'), key=lambda p: (p.due_date, p.payout_type == 'maturity', p.id))
     interest_paid = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0')
                          for p in paid if p.payout_type == 'interest'), Decimal('0'))
     redemption_interest = (principal * Decimal(months) * rate / Decimal('100')).quantize(Decimal('0.01'))
@@ -1307,6 +1308,65 @@ def _undo_paid(obj):
     obj.save(update_fields=['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'updated_at'])
 
 
+def _edit_payment(obj, data, user):
+    """Change what was paid, when, and the remarks on a payment already recorded."""
+    if obj.status != 'paid':
+        raise ValueError('This one is not marked paid.')
+    if 'amount' in data and data.get('amount') not in (None, ''):
+        obj.paid_amount = _money(data.get('amount'), 'amount')
+    if data.get('paid_date'):
+        obj.paid_date = _past_date(data.get('paid_date'), 'paid date')
+    if 'notes' in data:
+        obj.notes = (data.get('notes') or '').strip()
+    obj.save(update_fields=['paid_amount', 'paid_date', 'notes', 'updated_at'])
+
+
+class _PaymentView(APIView):
+    """A recorded payment, like an AR receipt: PATCH edits it (amount, date,
+    remarks), DELETE removes it — the payout / reward goes back to pending.
+    Managers who may mark paid."""
+    permission_classes = [IsAuthenticated]
+    model = None
+    serializer = None
+    noun = 'payment'
+
+    def _obj(self, request, pk):
+        if not (club_can(request.user, 'club.payout.mark_paid') and is_club1000_manager(request.user)):
+            return None, _no_permission()
+        obj = _company_filtered(self.model.objects.select_related('investor'), request, field='investor__company').filter(pk=pk).first()
+        if not obj:
+            return None, Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if obj.status != 'paid':
+            return None, Response({'detail': f'This {self.noun} is not marked paid.'}, status=status.HTTP_400_BAD_REQUEST)
+        return obj, None
+
+    def patch(self, request, pk):
+        obj, err = self._obj(request, pk)
+        if err:
+            return err
+        from activity.recorder import note
+        before = (obj.paid_amount, obj.paid_date, obj.notes)
+        try:
+            _edit_payment(obj, request.data, request.user)
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        note(request, f'Edited {self.noun} payment — {obj.investor.name} · ₹{before[0] or 0:,.0f} on {formatted_date(before[1])} → '
+                      f'₹{obj.paid_amount or 0:,.0f} on {formatted_date(obj.paid_date)}', action='edit-payment',
+             target_type=self.noun if self.noun != 'reward' else 'referral-reward', target_id=str(pk), module='Club 1000')
+        return Response(self.serializer(obj).data)
+
+    def delete(self, request, pk):
+        obj, err = self._obj(request, pk)
+        if err:
+            return err
+        from activity.recorder import note
+        was = f'₹{(obj.paid_amount if obj.paid_amount is not None else 0):,.0f} on {formatted_date(obj.paid_date)}'
+        _undo_paid(obj)
+        note(request, f'Deleted {self.noun} payment — {obj.investor.name} · {was} · back to pending', action='delete-payment',
+             target_type=self.noun if self.noun != 'reward' else 'referral-reward', target_id=str(pk), module='Club 1000')
+        return Response(self.serializer(obj).data)
+
+
 class PayoutMarkUnpaidView(APIView):
     """Undo a payout marked paid by mistake — managers who may mark paid."""
     permission_classes = [IsAuthenticated]
@@ -1460,6 +1520,18 @@ class ReferralRewardMarkUnpaidView(APIView):
             return Response({'detail': 'This reward is not marked paid.'}, status=status.HTTP_400_BAD_REQUEST)
         _undo_paid(reward)
         return Response(ReferralRewardSerializer(reward).data)
+
+
+class PayoutPaymentView(_PaymentView):
+    model = Payout
+    serializer = PayoutSerializer
+    noun = 'payout'
+
+
+class ReferralRewardPaymentView(_PaymentView):
+    model = ReferralReward
+    serializer = ReferralRewardSerializer
+    noun = 'reward'
 
 
 class LeadListCreateView(APIView):

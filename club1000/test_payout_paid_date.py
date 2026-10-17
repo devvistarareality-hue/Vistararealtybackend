@@ -91,3 +91,32 @@ class UndoPaidTests(ReferralRewardPaidTests):
     def test_undo_on_pending_refused(self):
         res = self.api.post(f'/api/club1000/payouts/{self.p.pk}/mark-unpaid/', {}, format='json')
         self.assertEqual(res.status_code, 400)
+
+
+class EditDeletePaymentTests(ReferralRewardPaidTests):
+    """A recorded payment is edited or deleted like an AR receipt."""
+    def test_edit_payout_payment(self):
+        self._pay(amount='5000', notes='UTR 1')
+        r = self.api.patch(f'/api/club1000/payouts/{self.p.pk}/payment/', {'amount': '4900', 'paid_date': '2026-10-02', 'notes': 'UTR 2'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.p.refresh_from_db()
+        self.assertEqual((self.p.status, self.p.paid_amount, self.p.paid_date, self.p.notes), ('paid', Decimal('4900'), date(2026, 10, 2), 'UTR 2'))
+
+    def test_delete_payout_payment(self):
+        self._pay()
+        r = self.api.delete(f'/api/club1000/payouts/{self.p.pk}/payment/')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.p.refresh_from_db()
+        self.assertEqual((self.p.status, self.p.paid_amount), ('pending', None))
+
+    def test_edit_future_date_refused(self):
+        self._pay()
+        r = self.api.patch(f'/api/club1000/payouts/{self.p.pk}/payment/', {'paid_date': str(date.today() + timedelta(days=3))}, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    def test_edit_reward_payment(self):
+        self._payr(amount='2500')
+        r = self.api.patch(f'/api/club1000/referral-rewards/{self.r.pk}/payment/', {'amount': '2400'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.r.refresh_from_db()
+        self.assertEqual(self.r.paid_amount, Decimal('2400'))
