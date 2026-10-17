@@ -187,7 +187,7 @@ class ReferralRewardSerializer(serializers.ModelSerializer):
         model = ReferralReward
         fields = [
             'id', 'investor', 'investor_name', 'reference_name', 'reference_phone',
-            'amount', 'pct', 'status', 'paid_date', 'paid_by', 'created_at', 'updated_at',
+            'amount', 'pct', 'status', 'paid_date', 'paid_amount', 'notes', 'paid_by', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'investor', 'reference_name', 'reference_phone', 'amount', 'pct',
-                             'paid_date', 'paid_by', 'created_at', 'updated_at']
+                             'paid_date', 'paid_amount', 'notes', 'paid_by', 'created_at', 'updated_at']

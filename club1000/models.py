@@ -355,6 +355,10 @@ class ReferralReward(models.Model):
     pct = models.DecimalField(max_digits=5, decimal_places=2, default=REFERRAL_REWARD_PCT)
     status = models.CharField(max_length=10, choices=PAYOUT_STATUS_CHOICES, default='pending')
     paid_date = models.DateField(null=True, blank=True)
+    # What actually went out (the reward unless changed) and the payer's remarks
+    # (UTR / cheque no.), both entered in the Mark Paid dialog.
+    paid_amount = EncryptedDecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    notes = EncryptedTextField(blank=True, default='')
     paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

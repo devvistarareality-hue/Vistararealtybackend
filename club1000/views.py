@@ -179,7 +179,7 @@ class StatsView(APIView):
 
         referrals = ReferralReward.objects.filter(investor__in=portfolio)
         referral_pending = referrals.filter(status='pending')
-        referral_paid_amount = sum((r.amount or Decimal('0') for r in referrals.filter(status='paid')), Decimal('0'))
+        referral_paid_amount = sum(((r.paid_amount if r.paid_amount is not None else r.amount) or Decimal('0') for r in referrals.filter(status='paid')), Decimal('0'))
         referral_pending_amount = sum((r.amount or Decimal('0') for r in referral_pending), Decimal('0'))
 
         data = {
@@ -1084,10 +1084,31 @@ class ReferralRewardMarkPaidView(APIView):
         ).filter(pk=pk).first()
         if not reward:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        # The Mark Paid dialog sends what went out (the reward unless changed), the
+        # day it went out (today unless changed; never later) and remarks.
+        amount = request.data.get('amount')
+        if amount not in (None, ''):
+            try:
+                reward.paid_amount = Decimal(str(amount))
+            except (InvalidOperation, ValueError, TypeError):
+                return Response({'detail': 'Invalid amount.'}, status=status.HTTP_400_BAD_REQUEST)
+            if reward.paid_amount < 0:
+                return Response({'detail': 'The amount cannot be negative.'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            reward.paid_amount = reward.amount
+        paid_on = date.today()
+        if request.data.get('paid_date'):
+            paid_on = _parse_date(request.data.get('paid_date'))
+            if not paid_on:
+                return Response({'detail': 'Invalid paid date.'}, status=status.HTTP_400_BAD_REQUEST)
+            if paid_on > date.today():
+                return Response({'detail': 'The paid date cannot be in the future.'}, status=status.HTTP_400_BAD_REQUEST)
+        if request.data.get('notes') is not None:
+            reward.notes = request.data.get('notes') or ''
         reward.status = 'paid'
-        reward.paid_date = date.today()
+        reward.paid_date = paid_on
         reward.paid_by = request.user
-        reward.save(update_fields=['status', 'paid_date', 'paid_by', 'updated_at'])
+        reward.save(update_fields=['status', 'paid_date', 'paid_amount', 'notes', 'paid_by', 'updated_at'])
         return Response(ReferralRewardSerializer(reward).data)
 
 

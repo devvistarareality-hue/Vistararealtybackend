@@ -42,3 +42,31 @@ class PayoutPaidDateTests(TestCase):
     def test_a_future_date_is_refused(self):
         r = self._pay(paid_date=str(date.today() + timedelta(days=2)))
         self.assertEqual(r.status_code, 400)
+
+
+class ReferralRewardPaidTests(PayoutPaidDateTests):
+    """The Mark Paid dialog for a referral reward: amount, date and remarks."""
+    def setUp(self):
+        super().setUp()
+        from club1000.models import ReferralReward
+        self.r = ReferralReward.objects.create(investor=self.p.investor, reference_name='SM',
+                                               reference_phone='8866339595', amount=Decimal('2500'))
+
+    def _payr(self, **body):
+        return self.api.post(f'/api/club1000/referral-rewards/{self.r.pk}/mark-paid/', body, format='json')
+
+    def test_reward_amount_date_and_remarks_are_kept(self):
+        res = self._payr(amount='2000', paid_date='2026-10-05', notes='UTR 9')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.r.refresh_from_db()
+        self.assertEqual((self.r.status, self.r.paid_amount, self.r.paid_date, self.r.notes),
+                         ('paid', Decimal('2000'), date(2026, 10, 5), 'UTR 9'))
+
+    def test_reward_defaults_to_full_amount_today(self):
+        self._payr()
+        self.r.refresh_from_db()
+        self.assertEqual((self.r.paid_amount, self.r.paid_date), (Decimal('2500'), date.today()))
+
+    def test_reward_future_date_refused(self):
+        res = self._payr(paid_date=(date.today() + timedelta(days=1)).isoformat())
+        self.assertEqual(res.status_code, 400)
