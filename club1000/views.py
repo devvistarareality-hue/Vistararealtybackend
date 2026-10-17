@@ -870,6 +870,9 @@ class InvestorLedgerView(APIView):
             'due_till_today': str(due_till_today),
             'paid_out': str(total_paid),
             'pending': str(total_due - total_paid),
+            # Interest still to come: unpaid and not yet due.
+            'upcoming_interest': str(sum((p.amount_due or Decimal('0') for p in all_payouts
+                                          if p.payout_type == 'interest' and p.status == 'pending' and p.due_date > today), Decimal('0'))),
             # kept for older app builds
             'total_invested': str(principal),
             'total_payout_due': str(total_due),
