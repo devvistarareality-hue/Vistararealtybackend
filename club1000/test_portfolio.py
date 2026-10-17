@@ -105,3 +105,19 @@ class PortfolioTests(TestCase):
                                'principal_pending': Decimal('100000'), 'interest_pending': Decimal('7500')})
         h = {x['id']: x for x in self.api.get(f'/api/club1000/investors/{a.pk}/portfolio/').data['history']}
         self.assertEqual((Decimal(h[a.pk]['interest']), Decimal(h[a.pk]['interest_paid'])), (Decimal('15000'), Decimal('7500')))
+
+    def test_ask_nexora_matches_the_investors_and_portfolios_screens(self):
+        from sales import assistant
+        self._inv('Ramesh Patel', '9800011111', self.rise, '100000', date(2024, 1, 1))
+        self._inv('Ramesh P', '9800011111', self.grow, '50000', date(2024, 2, 1))
+        self._inv('Waiting One', '9800022222', self.rise, '70000', date(2024, 3, 1), approval_status='pending')
+        q = lambda a: assistant.run_query(self.admin, None, a)
+        screen = self.api.get('/api/club1000/investors/?approval_status=approved&status=active').data
+        screen_n = len(screen) if isinstance(screen, list) else screen.get('count')
+        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'status', 'op': 'eq', 'value': 'active'}]})['total'], screen_n)
+        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'approval', 'op': 'eq', 'value': 'pending'}]})['total'], 1)
+        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'approval', 'op': 'eq', 'value': 'all'}]})['total'], 3)
+        portfolios = self.api.get('/api/club1000/portfolios/').data
+        self.assertEqual(q({'entity': 'portfolios', 'mode': 'count'})['total'], len(portfolios))
+        self.assertEqual(q({'entity': 'portfolios', 'mode': 'sum', 'sum_field': 'active_amount'})['grand_total'],
+                         float(sum(Decimal(r['active_amount']) for r in portfolios)))

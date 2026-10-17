@@ -158,6 +158,10 @@ class PortfolioListView(APIView):
             return Response({'detail': 'No Club 1000 access.'}, status=status.HTTP_403_FORBIDDEN)
         investors, payouts_by_inv, referred_by_phone, rewards_by_phone = _load(request)
         rows = [_summary(p, payouts_by_inv, referred_by_phone, rewards_by_phone) for p in _people(investors)]
+        from sales.ai_capture import ai_capture
+        if ai_capture(request, rows=[{**r, 'names': ', '.join(r['names']),
+                                      'schemes': ', '.join(x['scheme'] for x in r['schemes'])} for r in rows]):
+            return Response({})
         q = (request.query_params.get('search') or '').strip().lower()
         if q:
             digits = ''.join(c for c in q if c.isdigit())

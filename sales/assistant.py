@@ -120,7 +120,9 @@ def _own_leaves(user):
 def _entities():
     from . import views as v
     from attendance.views import TeamLeaveRequestsView
-    from club1000.views import InvestorListCreateView, PayoutListView
+    from club1000.views import (InvestorListCreateView, PayoutListView, ReferralRewardListView,
+                                LeadListCreateView as C1LeadListView, FollowUpListCreateView as C1FollowUpListView)
+    from club1000.portfolio import PortfolioListView
     from receivables.collections import ARFollowUpListView
     from receivables.views import ARRegisterView
     from tasks.views import TasksView
@@ -259,8 +261,12 @@ def _entities():
                         'fields': {**leave_fields, 'employee': ('user__name', 'text')}},
         # ── Club 1000 ──
         'investors': {'module': ('Club 1000',), 'view': InvestorListCreateView, 'date': 'invested',
-                      'company': 'company_id', 'note': 'drafts and rejected left out; one row per investment — a person who invested '
-                      'several times has several rows (same phone); renewals = times the investment was renewed; referred_by = who brought them into the club', 'fields': {
+                      'company': 'company_id',
+                      'default_filters': [{'field': 'approval', 'op': 'eq', 'value': 'approved'}],
+                      'note': 'one row per INVESTMENT, not per person. Counts APPROVED investments only, exactly as the '
+                      'Investors screen does — filter approval eq pending for ones awaiting approval, approval eq all for '
+                      'both. For how many investors / people / portfolios use the portfolios entity instead. renewals = '
+                      'times the investment was renewed; referred_by = who brought them into the club', 'fields': {
             'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'scheme': ('scheme__name', 'text'),
             'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
             'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),
@@ -270,6 +276,52 @@ def _entities():
             'approved_by': ('approved_by__name', 'text'), 'approved_on': ('approved_at', 'date'),
             'referred_by': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
             'renewals': ('renewal_count', 'number'), 'first_invested': ('first_invested_on', 'date'),
+        }},
+        'portfolios': {'module': ('Club 1000',), 'view': PortfolioListView, 'rows': True, 'date': 'since',
+                       'note': 'one row per PERSON (mobile number) — exactly the Investor Portfolios screen: how many '
+                       'investors / portfolios the club has, how many times each invested (investments + renewals), '
+                       'their schemes, active and ever-invested amounts, principal / interest paid and to pay, due now, '
+                       'and how many people each referred. Includes investments awaiting approval in awaiting_approval only.',
+                       'fields': {
+            'name': ('name', 'text'), 'names': ('names', 'text'), 'phone': ('phone', 'text'), 'since': ('since', 'date'),
+            'investments': ('investments', 'number'), 'renewals': ('renewals', 'number'),
+            'times_invested': ('times_invested', 'number'), 'awaiting_approval': ('awaiting_approval', 'number'),
+            'schemes': ('schemes', 'text'), 'active_amount': ('active_amount', 'money'),
+            'total_invested': ('total_invested', 'money'), 'paid_out': ('paid_out', 'money'),
+            'pending_payouts': ('pending_payouts', 'money'), 'due_now': ('due_now', 'money'),
+            'principal_total': ('principal_total', 'money'), 'interest_total': ('interest_total', 'money'),
+            'principal_paid': ('principal_paid', 'money'), 'interest_paid': ('interest_paid', 'money'),
+            'principal_pending': ('principal_pending', 'money'), 'interest_pending': ('interest_pending', 'money'),
+            'referrals': ('referrals', 'number'), 'referred_amount': ('referred_amount', 'money'),
+            'rewards_earned': ('rewards_earned', 'money'), 'rewards_paid': ('rewards_paid', 'money'),
+        }},
+        'referral_rewards': {'module': ('Club 1000',), 'view': ReferralRewardListView, 'date': 'earned',
+                             'company': 'investor__company_id',
+                             'note': 'Club 1000 Referral Rewards screen: one reward per referred investment, owed to the '
+                             'referrer (pct 0.50 = new investment, 0.25 = renewal); status pending/paid',
+                             'fields': {
+            'referrer': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
+            'investor': ('investor__name', 'enc'), 'scheme': ('investor__scheme__name', 'text'),
+            'amount': ('amount', 'enc_money'), 'pct': ('pct', 'number'), 'status': ('status', 'choice'),
+            'paid_amount': ('paid_amount', 'enc_money'), 'paid_date': ('paid_date', 'date'), 'earned': ('created_at', 'date'),
+        }},
+        'club_leads': {'module': ('Club 1000',), 'view': C1LeadListView, 'date': 'created', 'company': 'company_id',
+                       'note': 'Club 1000 Leads screen (enquiries for investment, not Sales leads); status new / contacted / '
+                       'interested / not_interested / converted / lost / investor_deleted',
+                       'fields': {
+            'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'source': ('source', 'choice'),
+            'status': ('status', 'choice'), 'scheme': ('scheme_interest__name', 'text'),
+            'amount_interested': ('amount_interested', 'money'), 'assigned_to': ('assigned_to__name', 'text'),
+            'lead_date': ('lead_date', 'date'), 'created': ('created_at', 'date'),
+            'next_follow_up': ('next_follow_up_date', 'date'), 'referred_by': ('reference_name', 'enc'),
+        }},
+        'club_followups': {'module': ('Club 1000',), 'view': C1FollowUpListView, 'date': 'scheduled',
+                           'company': 'lead__company_id',
+                           'note': 'Club 1000 Follow-Ups screen: calls/meetings with Club 1000 leads (status as the screen shows it)',
+                           'fields': {
+            'lead': ('lead__name', 'enc'), 'scheme': ('lead__scheme_interest__name', 'text'),
+            'assigned_to': ('assigned_to__name', 'text'), 'status': ('status', 'choice'),
+            'scheduled': ('scheduled_at', 'datetime'), 'completed': ('completed_at', 'datetime'),
         }},
         'payouts': {'module': ('Club 1000',), 'view': PayoutListView, 'date': 'due',
                     'company': 'investor__company_id', 'note': 'interest / principal payouts to investors',
@@ -758,6 +810,15 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     spec = ents[entity]
     fields = spec['fields']
     mode = args.get('mode') or 'count'
+    # A list screen's own standing filter (Investors shows approved ones only) unless
+    # the question names that field; 'all' lifts it.
+    if spec.get('default_filters'):
+        given = list(args.get('filters') or [])
+        named = {f.get('field') for f in given}
+        given = [f for f in given if not (str(f.get('value')).lower() == 'all'
+                                          and f.get('field') in {d['field'] for d in spec['default_filters']})]
+        given += [d for d in spec['default_filters'] if d['field'] not in named]
+        args = {**args, 'filters': given}
     screen, rest = _screen_params(entity, args.get('filters'))
     if screen:
         args = {**args, 'filters': rest}

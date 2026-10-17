@@ -1546,6 +1546,8 @@ class ReferralRewardListView(APIView):
             qs = qs.filter(
                 Q(investor__lead__assigned_to=request.user) | (no_lead_owner & Q(investor__added_by=request.user))
             )
+        if ai_capture(request, qs=qs):          # Ask Nexora: the rewards this person's screen lists
+            return Response({})
         p = request.query_params
         if p.get('status'):
             qs = qs.filter(status=p['status'])
@@ -1689,6 +1691,8 @@ class LeadListCreateView(APIView):
             _company_filtered(Lead.objects.select_related('assigned_to', 'scheme_interest', 'created_by'), request),
             request.user,
         )
+        if ai_capture(request, qs=qs):          # Ask Nexora: the leads this person's screen lists
+            return Response({})
         if request.query_params.get('facets') == '1':
             return Response({
                 'statuses': _distinct(qs, 'status'), 'sources': _distinct(qs, 'source'),
@@ -1835,6 +1839,8 @@ class FollowUpListCreateView(APIView):
         )
         if not is_club1000_manager(request.user):
             qs = qs.filter(assigned_to=request.user)
+        if ai_capture(request, qs=qs):          # Ask Nexora: the follow-ups this person's screen lists
+            return Response({})
         if request.query_params.get('status'):
             qs = qs.filter(status=request.query_params['status'])
         return Response(FollowUpSerializer(qs, many=True).data)
