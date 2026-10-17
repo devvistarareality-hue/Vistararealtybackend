@@ -1188,6 +1188,21 @@ def _pay_payout(payout, amount, paid_on, notes, user):
     payout.paid_by = user
     payout.save(update_fields=['status', 'paid_amount', 'paid_date', 'notes', 'paid_by', 'updated_at'])
     _rebalance(payout)
+    _close_if_paid_out(payout.investor)
+
+
+def _close_if_paid_out(investor):
+    """A matured investment whose principal has been paid in full from Payouts is
+    closed — what the Payout button on Investors used to do — and opens again if
+    that payment is undone or leaves a balance due."""
+    if investor.status not in ('active', 'matured', 'redeemed') or not investor.maturity_date:
+        return
+    final = [p for p in investor.payouts.all() if p.payout_type == 'maturity' and p.due_date >= investor.maturity_date]
+    settled = bool(final) and investor.maturity_date <= date.today() and all(p.status == 'paid' for p in final)
+    want = 'redeemed' if settled else ('active' if investor.status == 'redeemed' else investor.status)
+    if want != investor.status:
+        investor.status = want
+        investor.save(update_fields=['status'])
 
 
 def _money(value, label):
@@ -1410,6 +1425,7 @@ class PayoutMarkPaidView(APIView):
         with transaction.atomic():
             payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
             _rebalance(payout)   # paid short → the rest stays due
+            _close_if_paid_out(payout.investor)
         return Response(PayoutSerializer(payout).data)
 
 
@@ -1430,6 +1446,8 @@ def _undo_paid(obj):
     obj.notes = ''
     obj.save(update_fields=['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'amount_due', 'updated_at']
              if isinstance(obj, Payout) else ['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'updated_at'])
+    if isinstance(obj, Payout):
+        _close_if_paid_out(obj.investor)
 
 
 def _edit_payment(obj, data, user):
@@ -1475,6 +1493,8 @@ class _PaymentView(APIView):
             _edit_payment(obj, request.data, request.user)
         except ValueError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if isinstance(obj, Payout):
+            _close_if_paid_out(obj.investor)
         note(request, f'Edited {self.noun} payment — {obj.investor.name} · ₹{before[0] or 0:,.0f} on {formatted_date(before[1])} → '
                       f'₹{obj.paid_amount or 0:,.0f} on {formatted_date(obj.paid_date)}', action='edit-payment',
              target_type=self.noun if self.noun != 'reward' else 'referral-reward', target_id=str(pk), module='Club 1000')

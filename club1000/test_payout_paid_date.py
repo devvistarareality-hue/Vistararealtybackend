@@ -163,3 +163,35 @@ class ShortPaymentKeepsBalanceTests(PayoutPaidDateTests):
     def test_full_or_more_leaves_no_balance(self):
         self._pay(amount='5200')
         self.assertEqual(self._pending(), [])
+
+
+class PayoutClosesMaturedInvestmentTests(TestCase):
+    """Paying a matured investment's principal from Payouts closes it; undoing reopens."""
+    def setUp(self):
+        from datetime import date, timedelta
+        from decimal import Decimal
+        from accounts.models import User
+        from club1000.models import Investor, Payout, Scheme
+        from companies.models import Company
+        self.co = Company.objects.create(code='PCM', name='P', is_active=True)
+        self.u = User.objects.create_user('a@pcm.com', company=self.co, user_code='PCM1', password='p', name='A', role='Admin', modules=['Club 1000'])
+        sc = Scheme.objects.create(company=self.co, name='RISE', tenure_months=12, min_ticket_size=1)
+        self.inv = Investor.objects.create(company=self.co, scheme=sc, added_by=self.u, name='M', phone='9800000009',
+                                           amount_invested=Decimal('100000'), investment_date=date.today() - timedelta(days=400),
+                                           maturity_date=date.today() - timedelta(days=35), total_return_pct=Decimal('15'),
+                                           status='active', approval_status='approved')
+        self.m = Payout.objects.create(investor=self.inv, payout_type='maturity', due_date=self.inv.maturity_date, amount_due=Decimal('115000'))
+        self.api = APIClient(); self.api.force_authenticate(self.u)
+
+    def test_pay_then_undo(self):
+        from datetime import date
+        r = self.api.post(f'/api/club1000/payouts/{self.m.pk}/mark-paid/', {'amount': '115000', 'paid_date': str(date.today())}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.inv.refresh_from_db(); self.assertEqual(self.inv.status, 'redeemed')
+        self.api.post(f'/api/club1000/payouts/{self.m.pk}/mark-unpaid/', {}, format='json')
+        self.inv.refresh_from_db(); self.assertEqual(self.inv.status, 'active')
+
+    def test_short_payment_keeps_it_open(self):
+        from datetime import date
+        self.api.post(f'/api/club1000/payouts/{self.m.pk}/mark-paid/', {'amount': '100000', 'paid_date': str(date.today())}, format='json')
+        self.inv.refresh_from_db(); self.assertEqual(self.inv.status, 'active')
