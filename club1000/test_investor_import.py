@@ -37,16 +37,16 @@ class InvestorImportTests(TestCase):
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
         self.assertIn('Investors', wb.sheetnames)
         self.assertEqual(wb['Investors'].cell(row=1, column=1).value, 'Investor Name *')   # must-fill marked
-        self.assertIn('Times Reinvested', [c.value for c in wb['Investors'][1]])
+        self.assertIn('Times Renewed', [c.value for c in wb['Investors'][1]])
 
-    def test_reinvested_money_is_one_row_with_its_count(self):
+    def test_renewed_investment_is_one_row_with_its_count(self):
         f = self._file([['Old One *', '9800000009', 'RISE', 700000, '01-04-2025', 'maturity', 3, '01-04-2019'],
                         ['No Count', '9800000008', 'RISE', 700000, '01-04-2025', 'maturity', 'two', '']],
                        headers=['Investor Name *', 'Mobile *', 'Scheme *', 'Amount Invested *', 'Investment Date *',
-                                'Interest Payout', 'Times Reinvested', 'First Invested On'])
+                                'Interest Payout', 'Times Renewed', 'First Invested On'])
         r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
         self.assertEqual((r.data['created'], r.data['failed']), (1, 1), r.data)
-        self.assertTrue(any('Times Reinvested' in e for e in r.data['rows'][1]['errors']))
+        self.assertTrue(any('Times Renewed' in e for e in r.data['rows'][1]['errors']))
         inv = Investor.objects.get()
         self.assertEqual((inv.renewal_count, inv.first_invested_on, inv.investment_date), (3, date(2019, 4, 1), date(2025, 4, 1)))
 

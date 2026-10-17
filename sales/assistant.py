@@ -260,7 +260,7 @@ def _entities():
         # ── Club 1000 ──
         'investors': {'module': ('Club 1000',), 'view': InvestorListCreateView, 'date': 'invested',
                       'company': 'company_id', 'note': 'drafts and rejected left out; one row per investment — a person who invested '
-                      'several times has several rows (same phone); renewals = times the money was reinvested; referred_by = who brought them into the club', 'fields': {
+                      'several times has several rows (same phone); renewals = times the investment was renewed; referred_by = who brought them into the club', 'fields': {
             'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'scheme': ('scheme__name', 'text'),
             'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
             'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),

@@ -32,9 +32,9 @@ COLUMNS = [
     ('pan', 'PAN', False, ''),
     ('scheme', 'Scheme', True, 'Pick from the list — must match a scheme exactly.'),
     ('amount_invested', 'Amount Invested', True, 'In rupees, no commas needed. At least the scheme\'s minimum ticket.'),
-    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) the CURRENT term started — for money reinvested, the date of the latest reinvestment. Maturity is worked out from the scheme\'s tenure.'),
-    ('renewal_count', 'Times Reinvested', False, 'How many times this money has already been reinvested (renewed) before the current term. 0 or blank = first time. One row per person per investment — never a row per reinvestment.'),
-    ('first_invested_on', 'First Invested On', False, 'DD-MM-YYYY the money first came in (before any reinvestment). Blank = Investment Date.'),
+    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) the CURRENT term started — for a renewed investment, the date of the latest renewal. Maturity is worked out from the scheme\'s tenure.'),
+    ('renewal_count', 'Times Renewed', False, 'How many times this investment has already been renewed before the current term. 0 or blank = first time. One row per investment — never a row per renewal.'),
+    ('first_invested_on', 'First Invested On', False, 'DD-MM-YYYY the money first came in (before any renewal). Blank = Investment Date.'),
     ('interest_payout', 'Interest Payout', False, 'monthly / quarterly / maturity — must be one the scheme offers. Blank = the scheme\'s first option.'),
     ('total_return_pct', 'Return %', False, 'Total return by maturity. Blank = the scheme\'s rate for that payout.'),
     ('source', 'Source', False, 'referral / walk_in / website / other. Blank = referral.'),
@@ -50,7 +50,7 @@ for _k, _h, _r, _d in COLUMNS:
         HEADER_TO_KEY[alias.strip().lower().replace(' ', '_')] = _k
 HEADER_TO_KEY.update({'mobile_number': 'phone', 'amount': 'amount_invested', 'date': 'investment_date',
                       'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout',
-                      'reinvested': 'renewal_count', 'renewals': 'renewal_count', 'times_renewed': 'renewal_count'})
+                      'reinvested': 'renewal_count', 'times_reinvested': 'renewal_count', 'renewals': 'renewal_count', 'renewed': 'renewal_count'})
 SOURCES = [k for k, _ in LEAD_SOURCE_CHOICES]
 PAYOUTS = ['monthly', 'quarterly', 'maturity']
 
@@ -152,8 +152,8 @@ class InvestorImportTemplateView(APIView):
         hlp.append(['Each imported investor waits in Club 1000 → Approvals, like one added by hand.'])
         hlp.append(['Columns marked * (red) must be filled. A row with any of them empty is NOT imported — '
                     'it is listed with the reason so you can fix it and upload again.'])
-        hlp.append(['Reinvested money is ONE row: today\'s amount, the date the current term started as Investment Date, '
-                    'and how many times it was reinvested in Times Reinvested (e.g. invested 2019, reinvested 3 times → 3).'])
+        hlp.append(['A renewed investment is ONE row: today\'s amount, the date the current term started as Investment Date, '
+                    'and how many times it was renewed in Times Renewed (e.g. invested 2019, renewed 3 times → 3).'])
         hlp.append(['Investor Portfolios puts every row with the same mobile number together.'])
         hlp.append(['Old investments: payouts whose date has passed show as due until you mark them paid '
                     'in Payouts with the date they were actually paid.'])
@@ -264,7 +264,7 @@ def _check(rows, request):
             errs.append(f'{scheme.name} only allows {", ".join(options)}')
         renewals = _num(r.get('renewal_count'))
         if renewals is False or (renewals is not None and (renewals < 0 or renewals != int(renewals))):
-            errs.append('Times Reinvested must be a whole number (0, 1, 2 …)')
+            errs.append('Times Renewed must be a whole number (0, 1, 2 …)')
             renewals = None
         renewals = int(renewals or 0)
         first_on = None
