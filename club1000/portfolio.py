@@ -53,6 +53,26 @@ def _money(v):
     return v if isinstance(v, Decimal) else Decimal(str(v or 0))
 
 
+def _split(inv, pays):
+    """One investment's money in principal and interest, the ledger's way: interest is
+    everything scheduled beyond the principal; a payout of the 'interest' type is all
+    interest, and a maturity / redemption row repays principal first, the rest interest."""
+    principal = _money(inv.amount_invested)
+    total = sum((_money(p.amount_due) for p in pays), Decimal('0'))
+    amt = lambda p: _money(p.paid_amount if p.paid_amount is not None else p.amount_due)
+    paid = sum((amt(p) for p in pays if p.status == 'paid'), Decimal('0'))
+    paid_back = sum((amt(p) for p in pays if p.status == 'paid' and p.payout_type != 'interest'), Decimal('0'))
+    principal_paid = min(paid_back, principal)
+    pending = sum((_money(p.amount_due) for p in pays if p.status != 'paid'), Decimal('0'))
+    pending_back = sum((_money(p.amount_due) for p in pays if p.status != 'paid' and p.payout_type != 'interest'), Decimal('0'))
+    principal_pending = min(pending_back, max(principal - principal_paid, Decimal('0')))
+    return {
+        'principal': principal, 'interest': max(total - principal, Decimal('0')) if pays else Decimal('0'),
+        'principal_paid': principal_paid, 'interest_paid': paid - principal_paid,
+        'principal_pending': principal_pending, 'interest_pending': pending - principal_pending,
+    }
+
+
 def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
     approved = [i for i in person if i.approval_status == 'approved']
     first = person[0]
@@ -65,15 +85,16 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
         sc['total'] += _money(i.amount_invested)
         if i.status == 'active':
             sc['active'] += _money(i.amount_invested)
-    paid = interest_paid = pending = overdue = Decimal('0')
+    paid = pending = overdue = Decimal('0')
+    money = defaultdict(lambda: Decimal('0'))
     today = date.today()
     for i in approved:
-        for p in payouts_by_inv.get(i.pk, []):
+        pays = payouts_by_inv.get(i.pk, [])
+        for k, v in _split(i, pays).items():
+            money[k] += v
+        for p in pays:
             if p.status == 'paid':
-                amt = _money(p.paid_amount if p.paid_amount is not None else p.amount_due)
-                paid += amt
-                if p.payout_type == 'interest':
-                    interest_paid += amt
+                paid += _money(p.paid_amount if p.paid_amount is not None else p.amount_due)
             else:
                 pending += _money(p.amount_due)
                 if p.due_date and p.due_date <= today:
@@ -95,7 +116,9 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
         'active_amount': str(sum((_money(i.amount_invested) for i in approved if i.status == 'active'), Decimal('0'))),
         'total_invested': str(sum((_money(i.amount_invested) for i in approved), Decimal('0'))),
         'paid_out': str(paid),
-        'interest_paid': str(interest_paid),
+        'principal_total': str(money['principal']), 'interest_total': str(money['interest']),
+        'principal_paid': str(money['principal_paid']), 'interest_paid': str(money['interest_paid']),
+        'principal_pending': str(money['principal_pending']), 'interest_pending': str(money['interest_pending']),
         'pending_payouts': str(pending),
         'due_now': str(overdue),
         'referrals': len({r.pk for r in referred}),
@@ -158,7 +181,9 @@ class PortfolioDetailView(APIView):
         out['history'] = []
         for i in sorted(person, key=lambda i: (i.investment_date, i.pk), reverse=True):
             pays = payouts_by_inv.get(i.pk, [])
+            sp = _split(i, pays)
             out['history'].append({
+                **{k: str(v) for k, v in sp.items()},
                 'id': i.pk, 'name': i.name, 'scheme': i.scheme.name if i.scheme_id else '—', 'loi_no': i.loi_no or '',
                 'first_invested_on': _began(i),
                 'amount': str(i.amount_invested), 'investment_date': i.investment_date, 'maturity_date': i.maturity_date,

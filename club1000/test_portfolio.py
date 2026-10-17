@@ -90,3 +90,18 @@ class PortfolioTests(TestCase):
         out = assistant.run_query(self.admin, None, {'entity': 'investors', 'mode': 'count',
                                                      'filters': [{'field': 'renewals', 'op': 'gte', 'value': 2}]})
         self.assertEqual((out['total'], portfolio['renewals']), (1, 2))
+
+    def test_principal_and_interest_split(self):
+        a = self._inv('Split One', '9822200000', self.rise, '100000', date(2024, 1, 1))
+        Payout.objects.create(investor=a, payout_type='interest', due_date=date(2024, 4, 1), amount_due=Decimal('7500'), status='paid', paid_amount=Decimal('7500'))
+        Payout.objects.create(investor=a, payout_type='interest', due_date=date(2024, 7, 1), amount_due=Decimal('7500'))
+        Payout.objects.create(investor=a, payout_type='maturity', due_date=date(2026, 1, 1), amount_due=Decimal('100000'))
+        b = self._inv('Split One', '9822200000', self.grow, '50000', date(2023, 1, 1), status='matured')
+        Payout.objects.create(investor=b, payout_type='maturity', due_date=date(2025, 1, 1), amount_due=Decimal('62000'), status='paid', paid_amount=Decimal('62000'))
+        r = self.api.get('/api/club1000/portfolios/').data[0]
+        got = {k: Decimal(r[k]) for k in ('principal_total', 'interest_total', 'principal_paid', 'interest_paid', 'principal_pending', 'interest_pending')}
+        self.assertEqual(got, {'principal_total': Decimal('150000'), 'interest_total': Decimal('27000'),
+                               'principal_paid': Decimal('50000'), 'interest_paid': Decimal('19500'),
+                               'principal_pending': Decimal('100000'), 'interest_pending': Decimal('7500')})
+        h = {x['id']: x for x in self.api.get(f'/api/club1000/investors/{a.pk}/portfolio/').data['history']}
+        self.assertEqual((Decimal(h[a.pk]['interest']), Decimal(h[a.pk]['interest_paid'])), (Decimal('15000'), Decimal('7500')))
