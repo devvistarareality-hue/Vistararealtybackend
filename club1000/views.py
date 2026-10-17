@@ -1026,10 +1026,15 @@ class InvestorHistoryView(APIView):
                     bits.append(p.notes)
                 add(_day_start(p.paid_date), 'paid', f'{labels.get(p.payout_type, p.payout_type)} paid', ' · '.join(bits),
                     p.paid_by.name if p.paid_by else '', paid)
-        undo_logs = ActivityLog.objects.filter(target_type='payout', action='mark-unpaid',
-                                               target_id__in=[str(p.pk) for p in payouts])
-        for r in undo_logs:
-            add(r.created_at, 'undo', 'Payment undone — back to pending', detail_of(r.summary), r.actor_name or '')
+        pay_logs = ActivityLog.objects.filter(target_type='payout', action__in=['mark-unpaid', 'delete-payment', 'edit-payment'],
+                                              target_id__in=[str(p.pk) for p in payouts])
+        for r in pay_logs:
+            # "Edited payout payment — NAME · ₹a on d → ₹b on e": the part after the name.
+            what = (r.summary or '').split(' — ', 1)[-1].split(' · ', 1)[-1] if ' — ' in (r.summary or '') else ''
+            if r.action == 'edit-payment':
+                add(r.created_at, 'edit', 'Payment edited', what, r.actor_name or '')
+            else:
+                add(r.created_at, 'undo', 'Payment deleted — back to pending', what if r.action == 'delete-payment' else detail_of(r.summary), r.actor_name or '')
 
         for rw in investor.referral_rewards.select_related('paid_by').all():
             who = f'{rw.reference_name or "Referrer"}{f" ({rw.reference_phone})" if rw.reference_phone else ""}'
