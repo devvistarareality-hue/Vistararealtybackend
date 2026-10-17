@@ -321,6 +321,9 @@ class Payout(models.Model):
     paid_date = models.DateField(null=True, blank=True)
     paid_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     notes = EncryptedTextField(blank=True)
+    # A short payment keeps the rest due: the instalment is settled for what was
+    # paid and the remainder becomes its own pending payout pointing back here.
+    balance_of = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='balances')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

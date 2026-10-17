@@ -146,7 +146,7 @@ def interest_periods(investor, payouts):
     per_day = principal * pct / Decimal('100') / Decimal(tenure_days)
     out = {}
     prev = investor.investment_date
-    for p in sorted((p for p in payouts if p.payout_type == 'interest'), key=lambda p: (p.due_date, p.id)):
+    for p in sorted((p for p in payouts if p.payout_type == 'interest' and not p.balance_of_id), key=lambda p: (p.due_date, p.id)):
         end = accrual_end(p.due_date, investor.maturity_date)
         days = (end - prev).days
         if days <= 0:
@@ -160,6 +160,15 @@ def interest_periods(investor, payouts):
             'label': period_label(start, end, investor.interest_payout),
         }
         prev = end
+    # A balance kept due from a short payment pays for the same period.
+    parent = {p.id: p.balance_of_id for p in payouts}
+    for p in payouts:
+        if p.balance_of_id:
+            root = p.balance_of_id
+            while parent.get(root):
+                root = parent[root]
+            if root in out:
+                out[p.id] = dict(out[root], label=out[root]['label'] + ' · balance')
     return out
 
 

@@ -835,7 +835,7 @@ class InvestorLedgerView(APIView):
                 'type': p.payout_type,
                 'payout_id': p.id,
                 'date': str(p.due_date),
-                'label': payout_labels.get(p.payout_type, p.payout_type),
+                'label': payout_labels.get(p.payout_type, p.payout_type) + (' — balance' if p.balance_of_id else ''),
                 'amount': str(p.amount_due),
                 # Only set once actually paid — may differ from `amount` (the
                 # originally scheduled figure) if it was overridden on mark-paid.
@@ -1024,7 +1024,7 @@ class InvestorHistoryView(APIView):
                     bits.append(f'target ₹{p.amount_due:,.0f}')
                 if p.notes:
                     bits.append(p.notes)
-                add(_day_start(p.paid_date), 'paid', f'{labels.get(p.payout_type, p.payout_type)} paid', ' · '.join(bits),
+                add(_day_start(p.paid_date), 'paid', f'{labels.get(p.payout_type, p.payout_type)}{" balance" if p.balance_of_id else ""} paid', ' · '.join(bits),
                     p.paid_by.name if p.paid_by else '', paid)
         pay_logs = ActivityLog.objects.filter(target_type='payout', action__in=['mark-unpaid', 'delete-payment', 'edit-payment'],
                                               target_id__in=[str(p.pk) for p in payouts])
@@ -1072,6 +1072,40 @@ class InvestorSettlementView(APIView):
         return Response(_settlement(investor, on))
 
 
+def _rebalance(payout):
+    """Keep what is still owed on an instalment right after it is paid or its
+    payment edited. The instalment's whole target is its own amount_due plus any
+    balance still pending from it; when less than that was paid, the instalment
+    is settled for what was paid and the rest stays due as a pending balance
+    payout (same type and due date) — never silently dropped. Paying the target
+    or more clears the pending balance."""
+    if not isinstance(payout, Payout) or payout.status != 'paid':
+        return
+    pending_kids = list(payout.balances.filter(status='pending'))
+    target = (payout.amount_due or Decimal('0')) + sum((k.amount_due or Decimal('0') for k in pending_kids), Decimal('0'))
+    paid = payout.paid_amount if payout.paid_amount is not None else payout.amount_due
+    if paid is not None and target - paid >= Decimal('1'):
+        rest = (target - paid).quantize(Decimal('0.01'))
+        payout.amount_due = paid
+        payout.save(update_fields=['amount_due', 'updated_at'])
+        note = f'Balance of the {formatted_date(payout.due_date)} instalment — ₹{paid:,.2f} of ₹{target:,.2f} paid on {formatted_date(payout.paid_date)}'
+        if pending_kids:
+            keep, extra = pending_kids[0], pending_kids[1:]
+            keep.amount_due, keep.notes = rest, note
+            keep.save(update_fields=['amount_due', 'notes', 'updated_at'])
+            for k in extra:
+                k.delete()
+        else:
+            Payout.objects.create(investor=payout.investor, payout_type=payout.payout_type, due_date=payout.due_date,
+                                  amount_due=rest, balance_of=payout, notes=note)
+    else:
+        if pending_kids:
+            payout.amount_due = target
+            payout.save(update_fields=['amount_due', 'updated_at'])
+            for k in pending_kids:
+                k.delete()
+
+
 def _pay_payout(payout, amount, paid_on, notes, user):
     payout.status = 'paid'
     payout.paid_amount = amount if amount is not None else payout.amount_due
@@ -1079,6 +1113,7 @@ def _pay_payout(payout, amount, paid_on, notes, user):
     payout.notes = notes or payout.notes or ''
     payout.paid_by = user
     payout.save(update_fields=['status', 'paid_amount', 'paid_date', 'notes', 'paid_by', 'updated_at'])
+    _rebalance(payout)
 
 
 def _money(value, label):
@@ -1298,19 +1333,29 @@ class PayoutMarkPaidView(APIView):
         payout.status = 'paid'
         payout.paid_date = paid_on
         payout.paid_by = request.user
-        payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
+        with transaction.atomic():
+            payout.save(update_fields=['status', 'paid_amount', 'notes', 'paid_date', 'paid_by', 'updated_at'])
+            _rebalance(payout)   # paid short → the rest stays due
         return Response(PayoutSerializer(payout).data)
 
 
 def _undo_paid(obj):
     """Back to pending — a payment marked by mistake. What was paid, when, by whom
     and the remarks are cleared (the activity log keeps the before/after)."""
+    if isinstance(obj, Payout):
+        # The balance it left pending folds back in: the instalment is whole again.
+        kids = list(obj.balances.filter(status='pending'))
+        if kids:
+            obj.amount_due = (obj.amount_due or Decimal('0')) + sum((k.amount_due or Decimal('0') for k in kids), Decimal('0'))
+            for k in kids:
+                k.delete()
     obj.status = 'pending'
     obj.paid_date = None
     obj.paid_amount = None
     obj.paid_by = None
     obj.notes = ''
-    obj.save(update_fields=['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'updated_at'])
+    obj.save(update_fields=['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'amount_due', 'updated_at']
+             if isinstance(obj, Payout) else ['status', 'paid_date', 'paid_amount', 'paid_by', 'notes', 'updated_at'])
 
 
 def _edit_payment(obj, data, user):
@@ -1324,6 +1369,7 @@ def _edit_payment(obj, data, user):
     if 'notes' in data:
         obj.notes = (data.get('notes') or '').strip()
     obj.save(update_fields=['paid_amount', 'paid_date', 'notes', 'updated_at'])
+    _rebalance(obj)   # a payment edited down keeps the rest due; edited up clears it
 
 
 class _PaymentView(APIView):

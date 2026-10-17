@@ -174,9 +174,9 @@ class PayoutSerializer(serializers.ModelSerializer):
         model = Payout
         fields = [
             'id', 'investor', 'investor_name', 'investor_phone', 'investor_loi_no', 'scheme_name', 'payout_type', 'due_date',
-            'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'created_at', 'updated_at',
+            'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'balance_of', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due',
+        read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due', 'balance_of',
                              'paid_amount', 'paid_date', 'paid_by', 'created_at', 'updated_at']
 
 

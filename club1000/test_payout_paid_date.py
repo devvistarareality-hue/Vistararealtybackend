@@ -120,3 +120,46 @@ class EditDeletePaymentTests(ReferralRewardPaidTests):
         self.assertEqual(r.status_code, 200, r.data)
         self.r.refresh_from_db()
         self.assertEqual(self.r.paid_amount, Decimal('2400'))
+
+
+class ShortPaymentKeepsBalanceTests(PayoutPaidDateTests):
+    """Paying less than the instalment keeps the rest due — never dropped."""
+    def _pending(self):
+        return list(Payout.objects.filter(investor=self.p.investor, status='pending').order_by('id'))
+
+    def test_short_payment_leaves_a_balance_due(self):
+        r = self._pay(amount='1500', paid_date='2026-10-01')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.p.refresh_from_db()
+        self.assertEqual((self.p.status, self.p.amount_due, self.p.paid_amount), ('paid', Decimal('1500'), Decimal('1500')))
+        bal = self._pending()
+        self.assertEqual(len(bal), 1)
+        self.assertEqual((bal[0].amount_due, bal[0].due_date, bal[0].balance_of_id, bal[0].payout_type),
+                         (Decimal('3500.00'), self.p.due_date, self.p.id, 'interest'))
+
+    def test_paying_the_balance_closes_the_instalment(self):
+        self._pay(amount='1500')
+        bal = self._pending()[0]
+        self.api.post(f'/api/club1000/payouts/{bal.pk}/mark-paid/', {}, format='json')
+        self.assertEqual(self._pending(), [])
+        total = sum(p.paid_amount for p in Payout.objects.filter(investor=self.p.investor, status='paid'))
+        self.assertEqual(total, Decimal('5000'))
+
+    def test_editing_the_payment_moves_the_balance(self):
+        self._pay(amount='1500')
+        self.api.patch(f'/api/club1000/payouts/{self.p.pk}/payment/', {'amount': '4000'}, format='json')
+        self.assertEqual([b.amount_due for b in self._pending()], [Decimal('1000.00')])
+        self.api.patch(f'/api/club1000/payouts/{self.p.pk}/payment/', {'amount': '5000'}, format='json')
+        self.assertEqual(self._pending(), [])
+        self.p.refresh_from_db()
+        self.assertEqual(self.p.amount_due, Decimal('5000'))
+
+    def test_deleting_the_payment_makes_the_instalment_whole(self):
+        self._pay(amount='1500')
+        self.api.delete(f'/api/club1000/payouts/{self.p.pk}/payment/')
+        pend = self._pending()
+        self.assertEqual([(p.id, p.amount_due) for p in pend], [(self.p.id, Decimal('5000.00'))])
+
+    def test_full_or_more_leaves_no_balance(self):
+        self._pay(amount='5200')
+        self.assertEqual(self._pending(), [])
