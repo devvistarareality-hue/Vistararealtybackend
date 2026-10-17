@@ -8725,23 +8725,28 @@ class BookingActionView(APIView):
                 # "New Closure" to the manager chain waits for Accounts: until they sign
                 # off the unit is still on Hold, not sold (AccountsBookingActionView).
             elif action == 'reject':
+                # A rejection always says why — the STM has to know what to fix.
+                reason = (request.data.get('reason') or '').strip()[:1000]
+                if not reason:
+                    return Response({'detail': 'Give a reason for rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
                 b.status = 'rejected'
                 b.approval_status = ('REVISION R%d REJECTED' % b.revision_no) if is_rev else 'REJECTED'
                 b.rejected_by = request.user
                 b.rejected_at = timezone.now()
+                b.rejected_reason = reason
                 # Remove the rejected signed LOI PDF from Supabase storage.
                 if b.loi_document:
                     try: b.loi_document.delete(save=False)
                     except Exception: pass
                 b.save(update_fields=['status', 'approval_status', 'loi_document',
-                                      'rejected_by', 'rejected_at'])
+                                      'rejected_by', 'rejected_at', 'rejected_reason'])
                 if not is_rev:
                     _pids = b.plot_ids or ([b.plot_id] if b.plot_id else [])
                     _release_plots(_pids, booking=b)
                     if b.closure_id:
                         Closure.objects.filter(id=b.closure_id).delete()
                 _notify_booking_event(company, b, 'sales_rejected', request.user,
-                                      'rejected by %s' % (request.user.name or 'Sales'), request=request)
+                                      'rejected by %s: %s' % (request.user.name or 'Sales', reason), request=request)
             else:
                 return Response({'detail': 'action must be approve or reject.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(BookingSerializer(b).data)
@@ -8947,7 +8952,7 @@ def can_cancel_closure(user, closure, company):
         user, closure.project_id, closure.project, closure.lead_id, company, booking_source)
 
 
-def cancel_closure(request, closure, company):
+def cancel_closure(request, closure, company, reason=''):
     """Cancel a sale: frees the plot(s) for Sales straight away, marks the related
     booking(s) and the closure cancelled, and tells everyone concerned. Used by
     Sales' own Cancel and by AR's approved cancellations."""
@@ -8975,7 +8980,8 @@ def cancel_closure(request, closure, company):
         b.approval_status = 'CANCELLED'
         b.cancelled_by = request.user
         b.cancelled_at = timezone.now()
-        b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at'])
+        b.cancelled_reason = (reason or '').strip()[:1000]
+        b.save(update_fields=['status', 'approval_status', 'cancelled_by', 'cancelled_at', 'cancelled_reason'])
     if closure.lead_id:
         Lead.objects.filter(id=closure.lead_id).update(stm_status='')
     # Marked, not deleted — CLOSURE_STATUS has carried 'cancelled' all along.
@@ -8991,7 +8997,8 @@ def cancel_closure(request, closure, company):
                      .order_by('-revision_no', '-id').first())
     if notif_booking:
         _notify_booking_event(company, notif_booking, 'cancelled', request.user,
-                              'cancelled by %s' % (getattr(request.user, 'name', '') or 'an approver'), request=request)
+                              'cancelled by %s%s' % (getattr(request.user, 'name', '') or 'an approver',
+                                                     f': {reason.strip()}' if (reason or '').strip() else ''), request=request)
     else:
         _notify_closure_cancellation(
             notif_stm, notif_project, company,
@@ -9022,7 +9029,11 @@ class ClosureCancelView(APIView):
                 return Response({'detail': 'Only an approver can cancel a booking.'}, status=status.HTTP_403_FORBIDDEN)
             return Response({'detail': 'You are not a booking approver for this project.'},
                             status=status.HTTP_403_FORBIDDEN)
-        cancel_closure(request, closure, company)
+        # A cancellation always says why — it takes a sale off the books.
+        reason = (request.data.get('reason') or '').strip()
+        if not reason:
+            return Response({'detail': 'Give a reason for cancelling.'}, status=status.HTTP_400_BAD_REQUEST)
+        cancel_closure(request, closure, company, reason=reason)
         return Response({'detail': 'Closure cancelled.'})
 
 

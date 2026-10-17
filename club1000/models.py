@@ -249,6 +249,8 @@ class Investor(models.Model):
     # live fields on approval (see InvestorActionView) — a rejected revision
     # leaves the original terms and loi_document completely untouched.
     revision_no = models.IntegerField(default=0)
+    # Why it was rejected (a new investment, a revision or a renewal) — required.
+    rejected_reason = EncryptedTextField(blank=True, default='')
     # How many times this investment has been renewed at maturity (each approved
     # renewal starts a new term on the same record).
     renewal_count = models.PositiveIntegerField(default=0)

@@ -2177,6 +2177,12 @@ class InvestorActionView(APIView):
             except Exception:
                 pass
         else:
+            # A rejection always says why — whoever submitted it has to know what to fix.
+            reason = (request.data.get('reason') or '').strip()[:1000]
+            if not reason:
+                return Response({'detail': 'Give a reason for rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
+            investor.rejected_reason = reason
+            investor.save(update_fields=['rejected_reason'])
             if is_revision:
                 # Reject the PROPOSED revision/renewal only — the original
                 # approved terms and signed LOI are completely untouched.
@@ -2201,7 +2207,7 @@ class InvestorActionView(APIView):
             try:
                 rejected_label = 'Investor renewal rejected' if is_renewal else ('Investor revision rejected' if is_revision else 'Investor rejected')
                 notify(investor.added_by, 'investor_rejected', rejected_label,
-                       f'{investor.name} · {investor.scheme.name if investor.scheme_id else ""} was rejected.',
+                       f'{investor.name} · {investor.scheme.name if investor.scheme_id else ""} was rejected: {reason}',
                        {'investor_id': investor.id})
             except Exception:
                 pass

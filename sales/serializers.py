@@ -471,7 +471,7 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'company', 'stm', 'created_at', 'updated_at',
                             'project_name', 'plot_number', 'stm_name', 'is_cp_sourced',
                             'approved_by_name', 'rejected_by_name', 'cancelled_by_name',
-                            'resale_of_client', 'resale_of_stm']
+                            'resale_of_client', 'resale_of_stm', 'rejected_reason', 'cancelled_reason']
 
 
 class LeadUserSerializer(serializers.Serializer):

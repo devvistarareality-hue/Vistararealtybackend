@@ -143,7 +143,7 @@ class BookingNotificationTests(APITestCase):
         self.booking.save(update_fields=['closure', 'lead', 'status'])
         auth(self.client, self.admin)
         sent = self._sent(lambda: self.assertEqual(self.client.post(
-            f'/api/sales/closures/{closure.id}/cancel/', {}, format='json').status_code, 200))
+            f'/api/sales/closures/{closure.id}/cancel/', {'reason': 'Client backed out'}, format='json').status_code, 200))
         by_user = {s[0]: s[1] for s in sent}
         self.assertEqual(by_user.get(self.acc.id), 'accounts_booking_cancelled')
         self.assertEqual(by_user.get(self.sales_mgr.id), 'booking_cancelled')

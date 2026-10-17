@@ -818,6 +818,10 @@ class Booking(models.Model):
     rejected_at  = models.DateTimeField(null=True, blank=True)
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_bookings')
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Why — required when a booking is rejected at the Sales / CP stage or cancelled
+    # (Accounts' own rejection keeps accounts_rejected_reason).
+    rejected_reason = EncryptedTextField(blank=True, default='')
+    cancelled_reason = EncryptedTextField(blank=True, default='')
     revision_no     = models.IntegerField(default=0)
     # The booking this one revises. The client has always posted `revision_of` but it
     # was never stored, leaving revision chains to be inferred from closure/unit —

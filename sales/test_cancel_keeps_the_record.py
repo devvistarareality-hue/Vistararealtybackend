@@ -44,7 +44,7 @@ class CancelKeepsTheRecordTests(APITestCase):
         self.booking.loi_document.save('LOI_504.pdf', ContentFile(b'%PDF-1.4 signed'), save=True)
 
     def _cancel(self):
-        return self.client.post(f'/api/sales/closures/{self.closure.id}/cancel/', {}, format='json')
+        return self.client.post(f'/api/sales/closures/{self.closure.id}/cancel/', {'reason': 'Client backed out'}, format='json')
 
     def test_the_signed_loi_survives_the_cancellation(self):
         name = self.booking.loi_document.name
@@ -173,7 +173,7 @@ class WhoDecidedTests(APITestCase):
     def test_rejecting_records_who(self):
         b = self._booking()
         self.assertEqual(self.client.post(f'/api/sales/bookings/{b.id}/action/',
-                                          {'action': 'reject'}, format='json').status_code, 200)
+                                          {'action': 'reject', 'reason': 'Wrong unit'}, format='json').status_code, 200)
         row = self._row(b.id)
         self.assertEqual(row['rejected_by_name'], 'Rachit Puranik')
         self.assertIsNone(row['approved_by_name'])
@@ -185,7 +185,7 @@ class WhoDecidedTests(APITestCase):
                                          closure_date='2026-09-01', unit_no='101')
         b = self._booking(status='sold', approval_status='APPROVED', closure=closure, lead=lead)
         self.assertEqual(self.client.post(f'/api/sales/closures/{closure.id}/cancel/',
-                                          {}, format='json').status_code, 200)
+                                          {'reason': 'Client backed out'}, format='json').status_code, 200)
         row = self._row(b.id)
         self.assertEqual(row['cancelled_by_name'], 'Rachit Puranik')
         self.assertIsNotNone(row['cancelled_at'])

@@ -82,7 +82,7 @@ class ARCancellationTests(TestCase):
 
     def test_rejection_changes_nothing(self):
         cid = self.raise_it().json()['id']
-        self.as_admin.post(f'/api/ar/cancellations/{cid}/decide/', {'action': 'reject'}, format='json')
+        self.as_admin.post(f'/api/ar/cancellations/{cid}/decide/', {'action': 'reject', 'note': 'Client changed mind'}, format='json')
         self.plot.refresh_from_db()
         self.assertEqual(self.plot.status, 'sold')
         self.assertEqual(ARCancellation.objects.get(pk=cid).status, 'rejected')

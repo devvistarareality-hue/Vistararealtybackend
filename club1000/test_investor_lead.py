@@ -61,8 +61,10 @@ class InvestorLeadTests(TestCase):
         return Lead.objects.create(**fields)
 
     def _act(self, investor, action='approve'):
-        return self.api.post(f'/api/club1000/investors/{investor.pk}/action/',
-                             {'action': action}, format='json')
+        body = {'action': action}
+        if action == 'reject':
+            body['reason'] = 'Documents incomplete'
+        return self.api.post(f'/api/club1000/investors/{investor.pk}/action/', body, format='json')
 
     # ------------------------------------------------- a direct investor entry
 
@@ -209,6 +211,14 @@ class InvestorLeadTests(TestCase):
         self.assertEqual(Lead.objects.filter(company=self.co).count(), 0)
         inv.refresh_from_db()
         self.assertIsNone(inv.lead_id)
+
+    def test_reject_needs_a_reason_and_keeps_it(self):
+        inv = self._investor()
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'reject'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self._act(inv, 'reject')
+        inv.refresh_from_db()
+        self.assertEqual((inv.approval_status, inv.rejected_reason), ('rejected', 'Documents incomplete'))
 
     def test_approving_twice_creates_nothing_further(self):
         inv = self._investor()

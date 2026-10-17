@@ -189,6 +189,8 @@ class ARCancellationDecideView(APIView):
             return _deny('Only this project\'s booking or Accounts approver can decide a cancellation.')
         action = request.data.get('action')
         note = (request.data.get('note') or '').strip()[:1000]
+        if action == 'reject' and not note:
+            return Response({'detail': 'Give a reason for rejecting this cancellation.'}, status=status.HTTP_400_BAD_REQUEST)
         if action == 'reject':
             c.status, c.decided_by, c.decided_at, c.decision_note = 'rejected', request.user, timezone.now(), note
             c.save(update_fields=['status', 'decided_by', 'decided_at', 'decision_note'])
@@ -202,7 +204,7 @@ class ARCancellationDecideView(APIView):
             with transaction.atomic():
                 acct = c.account
                 st = settlement(acct)
-                cancel_closure(request, closure, c.company)
+                cancel_closure(request, closure, c.company, reason=note or c.reason)
                 acct.status, acct.frozen_at = 'frozen', timezone.now()
                 acct.save(update_fields=['status', 'frozen_at', 'updated_at'])
                 c.deal_net, c.forfeit, c.received, c.refund_due = st['deal_net'], st['forfeit'], st['received'], st['refund_due']

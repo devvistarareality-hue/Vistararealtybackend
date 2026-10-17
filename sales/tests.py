@@ -520,11 +520,26 @@ class BookingApprovalTests(APITestCase):
         b = Booking.objects.create(company=co, project=p, plot=pl, stm=stm, status='pending', client_name='C')
 
         auth(self.client, admin)
-        res = self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'reject'}, format='json')
+        res = self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'reject', 'reason': 'Wrong unit'}, format='json')
         self.assertEqual(res.status_code, 200)
         b.refresh_from_db(); pl.refresh_from_db()
         self.assertEqual(b.status, 'rejected')
         self.assertEqual(pl.status, 'available')
+        self.assertEqual(b.rejected_reason, 'Wrong unit')
+
+    def test_reject_without_a_reason_is_refused(self):
+        from sales.models import Booking
+        co = Company.objects.create(code='BBC', name='B')
+        p  = Project.objects.create(company=co, name='P')
+        pl = Plot.objects.create(project=p, number='9', status='hold')
+        stm   = User.objects.create(email='s@bc.com',  company=co, role='Sales', user_code='S1', designation='STM')
+        admin = User.objects.create(email='ad@bc.com', company=co, role='Admin', user_code='AD')
+        b = Booking.objects.create(company=co, project=p, plot=pl, stm=stm, status='pending', client_name='C')
+        auth(self.client, admin)
+        res = self.client.post(f'/api/sales/bookings/{b.id}/action/', {'action': 'reject', 'reason': '  '}, format='json')
+        self.assertEqual(res.status_code, 400)
+        b.refresh_from_db()
+        self.assertEqual(b.status, 'pending')
 
 
 class ManagerVisibilityTests(APITestCase):
@@ -660,7 +675,7 @@ class ProjectApproverScopeTests(APITestCase):
                                    status='booked', unit_type='Plot', unit_no='7',
                                    client_name='C', closure_date=date.today())
         auth(self.client, self.sachin)
-        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/')
+        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/', {'reason': 'Client backed out'}, format='json')
         self.assertEqual(res.status_code, 403)
         self.assertTrue(Closure.objects.filter(id=c.id).exists(), 'closure must survive')
 
@@ -671,12 +686,24 @@ class ProjectApproverScopeTests(APITestCase):
                                    status='booked', unit_type='Flat', unit_no='101',
                                    client_name='C', closure_date=date.today())
         auth(self.client, self.sachin)
-        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/')
+        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/', {'reason': 'Client backed out'}, format='json')
         self.assertEqual(res.status_code, 200)
         # Cancelling marks the closure rather than deleting it — Accounts reconciles
         # against cancelled deals, so the row and its signed LOI both survive.
         c.refresh_from_db()
         self.assertEqual(c.status, 'cancelled')
+
+    def test_cancel_without_a_reason_is_refused(self):
+        from sales.models import Closure
+        from datetime import date
+        c = Closure.objects.create(company=self.co, project=self.pratishtha, stm=self.stm,
+                                   status='booked', unit_type='Flat', unit_no='102',
+                                   client_name='C', closure_date=date.today())
+        auth(self.client, self.sachin)
+        res = self.client.post(f'/api/sales/closures/{c.id}/cancel/', {}, format='json')
+        self.assertEqual(res.status_code, 400)
+        c.refresh_from_db()
+        self.assertEqual(c.status, 'booked')
 
     def test_approval_notification_only_reaches_actual_approvers(self):
         """An 'approval needed' push is a request to act, so it must not go to someone

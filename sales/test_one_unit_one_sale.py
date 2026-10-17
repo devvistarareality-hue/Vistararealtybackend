@@ -229,7 +229,7 @@ class ReleasingAUnitRespectsOtherSalesTests(APITestCase):
             company=self.co, project=self.project, plot=self.plot, plot_ids=[self.plot.id],
             lead=self.lead, closure=closure, status='sold', approval_status='APPROVED',
             client_name='Devendra sinh Rajput', phone='9000000142')
-        r = self.client.post(f'/api/sales/closures/{closure.id}/cancel/', {}, format='json')
+        r = self.client.post(f'/api/sales/closures/{closure.id}/cancel/', {'reason': 'Client backed out'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
         older.refresh_from_db()
         self.assertEqual(older.approval_status, 'CANCELLED')
