@@ -108,6 +108,61 @@ def accrual_end(due_date, maturity_date):
     return date(due_date.year, due_date.month, 1) - timedelta(days=1)
 
 
+FY_QUARTERS = {4: 1, 5: 1, 6: 1, 7: 2, 8: 2, 9: 2, 10: 3, 11: 3, 12: 3, 1: 4, 2: 4, 3: 4}
+MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+
+def period_label(start, end, cadence):
+    """What an interest instalment pays for, by the period it covers (not its
+    position in the schedule): quarterly ones by the financial-year quarter —
+    Q1 Apr–Jun, Q2 Jul–Sep, Q3 Oct–Dec, Q4 Jan–Mar — monthly ones by the month.
+    A period that does not cover the whole quarter / month is marked "part"."""
+    if cadence == 'monthly':
+        month_start = date(end.year, end.month, 1)
+        part = start > month_start or end.month == (end + timedelta(days=1)).month
+        return f'{MONTHS[end.month - 1]} {end.year}' + (' (part)' if part else '')
+    q = FY_QUARTERS[end.month]
+    fy = end.year if end.month >= 4 else end.year - 1
+    first_month = {1: 4, 2: 7, 3: 10, 4: 1}[q]
+    q_start = date(fy if q < 4 else fy + 1, first_month, 1)
+    q_end = (date(q_start.year + (1 if first_month == 10 else 0), (first_month + 2) % 12 + 1, 1) - timedelta(days=1))
+    part = start > q_start or end < q_end
+    return f'Q{q} FY{str(fy)[2:]}-{str(fy + 1)[2:]}' + (' (part)' if part else '')
+
+
+def interest_periods(investor, payouts):
+    """The working behind each interest instalment of one investor: the period it
+    pays for (from → to), its days, the interest per day and the rate used —
+    {payout_id: {...}}. Mirrors generate_payout_schedule: periods are contiguous
+    from the investment date, each ending where accrual_end puts it, and an
+    instalment is days × (principal × total return % ÷ the tenure's days)."""
+    if not investor.investment_date or not investor.maturity_date:
+        return {}
+    tenure_days = (investor.maturity_date - investor.investment_date).days
+    principal = investor.amount_invested or Decimal('0')
+    pct = investor.total_return_pct or Decimal('0')
+    if tenure_days <= 0:
+        return {}
+    per_day = principal * pct / Decimal('100') / Decimal(tenure_days)
+    out = {}
+    prev = investor.investment_date
+    for p in sorted((p for p in payouts if p.payout_type == 'interest'), key=lambda p: (p.due_date, p.id)):
+        end = accrual_end(p.due_date, investor.maturity_date)
+        days = (end - prev).days
+        if days <= 0:
+            continue
+        start = prev + timedelta(days=1)    # interest runs from the day after
+        out[p.id] = {
+            'from': start, 'to': end, 'days': days,
+            'per_day': per_day.quantize(Decimal('0.01')),
+            'rate_pct': pct, 'tenure_days': tenure_days, 'principal': principal,
+            'computed': (per_day * days).quantize(Decimal('0.01')),
+            'label': period_label(start, end, investor.interest_payout),
+        }
+        prev = end
+    return out
+
+
 def maturity_value(principal, total_return_pct, investment_date, maturity_date):
     """Principal + the scheme's total return, applied once over the whole
     tenure — total_return_pct is the total return BY maturity (e.g. a

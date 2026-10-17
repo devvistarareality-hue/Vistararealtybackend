@@ -25,7 +25,7 @@ from .serializers import (
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
-from .services import generate_payout_schedule, normalize_phone
+from .services import generate_payout_schedule, normalize_phone, interest_periods
 
 
 def _company_filtered(qs, request, field='company'):
@@ -791,7 +791,9 @@ class InvestorLedgerView(APIView):
         }]
         total_due = Decimal('0')
         total_paid = Decimal('0')
-        for p in investor.payouts.all():
+        all_payouts = list(investor.payouts.all())
+        periods = interest_periods(investor, all_payouts)
+        for p in all_payouts:
             actual_paid = p.paid_amount if p.paid_amount is not None else p.amount_due
             entries.append({
                 'type': p.payout_type,
@@ -805,6 +807,7 @@ class InvestorLedgerView(APIView):
                 'status': p.status,
                 'paid_date': str(p.paid_date) if p.paid_date else None,
                 'notes': p.notes,
+                'period': {k: (str(v) if not isinstance(v, int) else v) for k, v in periods[p.id].items()} if p.id in periods else None,
             })
             total_due += p.amount_due
             if p.status == 'paid':
@@ -863,13 +866,33 @@ def _settlement(investor, on=None):
         'rate_per_month': rate, 'redemption_interest': redemption_interest,
         'interest_paid': interest_paid, 'payable': payable,
         'can_redeem': not reason, 'redeem_blocked_reason': reason,
-        'pending': PayoutSerializer(pending, many=True).data,
+        'pending': _with_periods(PayoutSerializer(pending, many=True).data, [investor]),
         'pending_total': sum((p.amount_due or Decimal('0') for p in pending), Decimal('0')),
     }
 
 
 def formatted_date(d):
     return d.strftime('%d/%m/%Y') if d else ''
+
+
+def _with_periods(rows, investors):
+    """Add each interest payout's working (period, days, per-day interest, rate,
+    FY quarter) to serialized payout rows, as row['period']."""
+    ids = {r['investor'] for r in rows if r.get('payout_type') == 'interest'}
+    if not ids:
+        return rows
+    by_inv = {}
+    for p in Payout.objects.filter(investor_id__in=ids, payout_type='interest'):
+        by_inv.setdefault(p.investor_id, []).append(p)
+    periods = {}
+    for inv in investors:
+        if inv.pk in ids:
+            periods.update(interest_periods(inv, by_inv.get(inv.pk, [])))
+    for r in rows:
+        if r['id'] in periods:
+            per = periods[r['id']]
+            r['period'] = {k: (str(v) if not isinstance(v, int) else v) for k, v in per.items()}
+    return rows
 
 
 _HISTORY_SKIP = {'draft', 'loi-no', 'upload-loi', 'updated'}
@@ -951,11 +974,15 @@ class InvestorHistoryView(APIView):
 
         # Payouts: every paid one (whichever screen paid it), and every undo.
         payouts = list(investor.payouts.select_related('paid_by').all())
+        periods = interest_periods(investor, payouts)
         labels = {'interest': 'Interest', 'maturity': 'Principal', 'premature_redemption': 'Redemption'}
         for p in payouts:
             if p.status == 'paid' and p.paid_date:
                 paid = p.paid_amount if p.paid_amount is not None else p.amount_due
                 bits = [f'due {formatted_date(p.due_date)}']
+                per = periods.get(p.id)
+                if per:
+                    bits.insert(0, f"{per['label']} · {formatted_date(per['from'])}–{formatted_date(per['to'])} · {per['days']} days × ₹{per['per_day']:,}/day")
                 if paid != p.amount_due:
                     bits.append(f'target ₹{p.amount_due:,.0f}')
                 if p.notes:
@@ -1188,7 +1215,9 @@ class PayoutListView(APIView):
                 hits = [pk for pk, nm, ph in qs.values_list('id', 'investor__name', 'investor__phone')
                         if needle in (nm or '').lower() or needle in (ph or '').lower()]
                 qs = qs.filter(id__in=hits)
-        return Response(PayoutSerializer(qs, many=True).data)
+        rows = PayoutSerializer(qs, many=True).data
+        inv_ids = {r['investor'] for r in rows}
+        return Response(_with_periods(rows, Investor.objects.filter(pk__in=inv_ids)))
 
 
 class PayoutMarkPaidView(APIView):

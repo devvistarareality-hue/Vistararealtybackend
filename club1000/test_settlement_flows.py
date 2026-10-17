@@ -103,3 +103,16 @@ class SettlementFlowTests(TestCase):
         paid = next(e for e in d['events'] if e['kind'] == 'paid')
         self.assertEqual(Decimal(paid['amount']), Decimal('7000'))
         self.assertIn('UTR 7', paid['detail'])
+
+    def test_interest_periods_are_fy_quarters_with_days(self):
+        from club1000.services import generate_payout_schedule
+        inv = self._inv(date(2026, 10, 17), months_tenure=12)
+        inv.total_return_pct = Decimal('15'); inv.amount_invested = Decimal('2000000'); inv.save()
+        generate_payout_schedule(inv)
+        rows = self.api.get('/api/club1000/payouts/').data
+        ints = sorted((r for r in rows if r['payout_type'] == 'interest'), key=lambda r: r['due_date'])
+        labels = [r['period']['label'] for r in ints]
+        self.assertEqual(labels, ['Q3 FY26-27 (part)', 'Q4 FY26-27', 'Q1 FY27-28', 'Q2 FY27-28', 'Q3 FY27-28 (part)'])
+        first = ints[0]['period']
+        self.assertEqual((first['from'], first['to'], first['days']), ('2026-10-18', '2026-12-31', 75))
+        self.assertEqual(Decimal(ints[0]['amount_due']), Decimal(first['computed']))
