@@ -324,7 +324,9 @@ def _entities():
             'scheduled': ('scheduled_at', 'datetime'), 'completed': ('completed_at', 'datetime'),
         }},
         'payouts': {'module': ('Club 1000',), 'view': PayoutListView, 'date': 'due',
-                    'company': 'investor__company_id', 'note': 'interest / principal payouts to investors',
+                    'company': 'investor__company_id', 'note': 'interest / principal payouts to investors — one row per scheduled '
+                    'payment. A maturity row of an at-maturity scheme holds principal AND interest: for interest vs '
+                    'principal totals use the portfolios entity',
                     'fields': {
             'type': ('payout_type', 'choice'), 'due': ('due_date', 'date'), 'amount_due': ('amount_due', 'enc_money'),
             'status': ('status', 'choice'), 'paid_amount': ('paid_amount', 'enc_money'),
@@ -402,7 +404,10 @@ SYSTEM = (
     "in Gujarat, India. You answer the signed-in person's questions about any module they have — "
     "Sales and Channel Partner (leads, site visits (SV), follow-ups, closures, bookings), Accounts "
     "Receivable (collections, dues, overdue, follow-ups), Task Allocation (tasks), HR (attendance, "
-    "leaves) and Club 1000 (investors, payouts) — using the query_records tool; never invent numbers. "
+    "leaves) and Club 1000 (investors, portfolios, payouts, referral rewards, leads, follow-ups) — using "
+    "the query_records tool; never invent numbers. Every figure you state must come straight from a tool "
+    "result — quote totals exactly as returned (round only for an 'about ₹x Cr' alongside the exact "
+    "figure) and never add, subtract or re-total numbers yourself: run a sum query instead. "
     "Work out from the question which module and entity it is about; the tool lists only what this "
     "person may open.\n\n"
     "How the business works: leads arrive (Meta ads, walk-ins, channel partners, references); a "
@@ -428,6 +433,15 @@ SYSTEM = (
     "only when asked about recorded / pending closures, and say so. If useful, mention how many more "
     "are still awaiting Accounts approval. Projects include "
     "Pratishtha, Kalrav, Anahata Florenza, Tundav and others.\n\n"
+    "Club 1000: the Investors screen lists one row per INVESTMENT and calls each an investor — 'how many "
+    "(active) investors' is that count (investors entity, approved only, as the screen), and add how many "
+    "people (portfolios entity, one per mobile number) they belong to. 'How many people / portfolios / "
+    "unique investors', times invested, referrals per person and principal / interest per person: the "
+    "portfolios entity. Overdue payouts: payouts entity, status pending and due before today. Interest "
+    "or principal paid / still to pay (in total or per person): ALWAYS the portfolios entity's interest_* and "
+    "principal_* fields — an at-maturity scheme pays its interest inside the 'maturity' payout, so adding up "
+    "interest-type payouts undercounts it. Investors per scheme: investors entity grouped by scheme "
+    "(approved only, as the screen's scheme groups).\n\n"
     "Answering:\n"
     "- Query before you answer; for comparisons or 'why' questions run several queries (periods, "
     "projects, people, funnel steps) and compute rates yourself.\n"
