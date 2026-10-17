@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views
+from . import views, importer
 
 urlpatterns = [
     path('stats/',                    views.StatsView.as_view()),
@@ -10,6 +10,8 @@ urlpatterns = [
     path('investors/references/',     views.ReferenceSuggestionsView.as_view()),
     path('investors/next-loi-no/',    views.InvestorNextLoiNoView.as_view()),
     path('investors/draft/',          views.InvestorDraftView.as_view()),
+    path('investors/import/',         importer.InvestorImportView.as_view()),
+    path('investors/import-template/', importer.InvestorImportTemplateView.as_view()),
     path('investors/',                views.InvestorListCreateView.as_view()),
     path('investors/<int:pk>/',       views.InvestorDetailView.as_view()),
     path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),
