@@ -824,42 +824,144 @@ class InvestorLedgerView(APIView):
         })
 
 
+def _months_between(start, end):
+    """Whole months from start to end (a month counts once its day is reached)."""
+    m = (end.year - start.year) * 12 + (end.month - start.month)
+    if end.day < start.day:
+        m -= 1
+    return max(m, 0)
+
+
+def _settlement(investor, on=None):
+    """What closing this investment on `on` (today by default) works out to — the
+    figures the Redeem / Payout / Renew dialogs show before anything is saved."""
+    on = on or date.today()
+    scheme = investor.scheme
+    principal = investor.amount_invested or Decimal('0')
+    months = _months_between(investor.investment_date, on) if investor.investment_date else 0
+    lock = scheme.premature_redemption_lock_months or 0
+    rate = scheme.premature_redemption_rate_pct_per_month or Decimal('0')
+    paid = [p for p in investor.payouts.all() if p.status == 'paid']
+    pending = sorted((p for p in investor.payouts.all() if p.status == 'pending'), key=lambda p: (p.due_date, p.id))
+    interest_paid = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0')
+                         for p in paid if p.payout_type == 'interest'), Decimal('0'))
+    redemption_interest = (principal * Decimal(months) * rate / Decimal('100')).quantize(Decimal('0.01'))
+    payable = max(principal + redemption_interest - interest_paid, Decimal('0')).quantize(Decimal('0.01'))
+    if investor.status != 'active':
+        reason = f'This investment is already {investor.get_status_display().lower()}.'
+    elif not scheme.premature_redemption_allowed:
+        reason = f'{scheme.name} does not allow redemption before maturity.'
+    elif months < lock:
+        reason = f'{scheme.name} is locked in for {lock} months — {months} done, free from {formatted_date(investor.investment_date + relativedelta(months=lock))}.'
+    else:
+        reason = ''
+    return {
+        'as_of': on, 'principal': principal, 'investment_date': investor.investment_date,
+        'maturity_date': investor.maturity_date, 'is_matured': investor.is_matured(),
+        'months_elapsed': months, 'lock_months': lock,
+        'lock_until': investor.investment_date + relativedelta(months=lock) if investor.investment_date else None,
+        'rate_per_month': rate, 'redemption_interest': redemption_interest,
+        'interest_paid': interest_paid, 'payable': payable,
+        'can_redeem': not reason, 'redeem_blocked_reason': reason,
+        'pending': PayoutSerializer(pending, many=True).data,
+        'pending_total': sum((p.amount_due or Decimal('0') for p in pending), Decimal('0')),
+    }
+
+
+def formatted_date(d):
+    return d.strftime('%d/%m/%Y') if d else ''
+
+
+class InvestorSettlementView(APIView):
+    """GET the figures for closing an investment (Redeem / Payout / Renew dialogs).
+    `?on=YYYY-MM-DD` works a redemption out to another date."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        investor = _investor_visibility_qs(request).select_related('scheme').prefetch_related('payouts').filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        on = _parse_date(request.query_params.get('on')) or date.today()
+        return Response(_settlement(investor, on))
+
+
+def _pay_payout(payout, amount, paid_on, notes, user):
+    payout.status = 'paid'
+    payout.paid_amount = amount if amount is not None else payout.amount_due
+    payout.paid_date = paid_on
+    payout.notes = notes or payout.notes or ''
+    payout.paid_by = user
+    payout.save(update_fields=['status', 'paid_amount', 'paid_date', 'notes', 'paid_by', 'updated_at'])
+
+
+def _money(value, label):
+    try:
+        v = Decimal(str(value)).quantize(Decimal('0.01'))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValueError(f'Invalid {label}.')
+    if v < 0:
+        raise ValueError(f'{label.capitalize()} cannot be negative.')
+    return v
+
+
+def _past_date(value, label, default=None):
+    if not value:
+        return default or date.today()
+    d = _parse_date(value)
+    if not d:
+        raise ValueError(f'Invalid {label}.')
+    if d > date.today():
+        raise ValueError(f'The {label} cannot be in the future.')
+    return d
+
+
 class InvestorRedeemView(APIView):
+    """Redeem before maturity. The dialog shows the working (principal + redemption
+    interest − interest already paid) and sends:
+      redemption_date  the day it is redeemed (today by default; never later)
+      amount           what is payable (the working's figure unless changed)
+      notes            why / remarks
+      pay_now          {paid_date, amount, notes} — paid on the spot (optional)
+    Every still-pending payout is replaced by one Premature Redemption payout for
+    the payable amount, so nothing is owed twice."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
         if not club_can(request.user, 'club.investor.manage'):
             return _no_permission()
-        investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
+        investor = _company_filtered(Investor.objects.select_related('scheme'), request).prefetch_related('payouts').filter(pk=pk).first()
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        scheme = investor.scheme
-        if investor.status != 'active':
-            return Response({'detail': f'Investor is already {investor.get_status_display()}.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not scheme.premature_redemption_allowed:
-            return Response({'detail': f'{scheme.name} does not allow premature redemption.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        today = date.today()
-        months_elapsed = (today.year - investor.investment_date.year) * 12 + (today.month - investor.investment_date.month)
-        lock = scheme.premature_redemption_lock_months or 0
-        if months_elapsed < lock:
-            return Response(
-                {'detail': f'{scheme.name} is locked in for {lock} months ({months_elapsed} elapsed).'},
-                status=status.HTTP_400_BAD_REQUEST,
+        try:
+            on = _past_date(request.data.get('redemption_date'), 'redemption date')
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if investor.investment_date and on < investor.investment_date:
+            return Response({'detail': 'The redemption date is before the investment date.'}, status=status.HTTP_400_BAD_REQUEST)
+        st = _settlement(investor, on)
+        if not st['can_redeem']:
+            return Response({'detail': st['redeem_blocked_reason']}, status=status.HTTP_400_BAD_REQUEST)
+        pay_now = request.data.get('pay_now') if isinstance(request.data.get('pay_now'), dict) else None
+        try:
+            amount = st['payable'] if request.data.get('amount') in (None, '') else _money(request.data.get('amount'), 'amount')
+            if pay_now:
+                paid_on = _past_date(pay_now.get('paid_date'), 'paid date')
+                paid_amt = amount if pay_now.get('amount') in (None, '') else _money(pay_now.get('amount'), 'paid amount')
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        notes = (request.data.get('notes') or '').strip()
+        with transaction.atomic():
+            investor.payouts.filter(status='pending').delete()
+            payout = Payout.objects.create(
+                investor=investor, payout_type='premature_redemption', due_date=on, amount_due=amount,
+                notes=notes or f"Redeemed after {st['months_elapsed']} months",
             )
-
-        rate = scheme.premature_redemption_rate_pct_per_month
-        amount_payable = investor.amount_invested * (Decimal('1') + Decimal(months_elapsed) * rate / Decimal('100'))
-
-        investor.payouts.filter(payout_type='maturity', status='pending').delete()
-        payout = Payout.objects.create(
-            investor=investor,
-            payout_type='premature_redemption',
-            due_date=today,
-            amount_due=amount_payable.quantize(Decimal('0.01')),
-        )
-        investor.status = 'premature_redeemed'
-        investor.save(update_fields=['status'])
+            if pay_now:
+                _pay_payout(payout, paid_amt, paid_on, (pay_now.get('notes') or '').strip(), request.user)
+            investor.status = 'premature_redeemed'
+            investor.save(update_fields=['status'])
         return Response({
             'investor': InvestorListSerializer(investor).data,
             'payout': PayoutSerializer(payout).data,
@@ -882,8 +984,28 @@ class InvestorMaturityPayoutView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         if not investor.is_matured():
             return Response({'detail': 'Investor has not matured yet.'}, status=status.HTTP_400_BAD_REQUEST)
-        investor.status = 'redeemed'
-        investor.save(update_fields=['status'])
+        # The Payout dialog lists every pending payout (principal and any unpaid
+        # interest) and sends the ones paid now: [{id, amount, paid_date, notes}].
+        # Those not sent stay pending on Payouts.
+        payments = request.data.get('payments') or []
+        if not isinstance(payments, list):
+            return Response({'detail': 'payments must be a list.'}, status=status.HTTP_400_BAD_REQUEST)
+        pending = {p.id: p for p in investor.payouts.filter(status='pending')}
+        plan = []
+        try:
+            for item in payments:
+                p = pending.get(int(item.get('id') or 0)) if isinstance(item, dict) else None
+                if p is None:
+                    raise ValueError('A payout in the list is not pending for this investor.')
+                amt = p.amount_due if item.get('amount') in (None, '') else _money(item.get('amount'), 'amount')
+                plan.append((p, amt, _past_date(item.get('paid_date'), 'paid date'), (item.get('notes') or '').strip()))
+        except (ValueError, TypeError) as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            for p, amt, paid_on, notes in plan:
+                _pay_payout(p, amt, paid_on, notes, request.user)
+            investor.status = 'redeemed'
+            investor.save(update_fields=['status'])
         return Response(InvestorListSerializer(investor).data)
 
 
@@ -1594,6 +1716,7 @@ class InvestorActionView(APIView):
         if action == 'approve':
             if is_revision:
                 pr = investor.pending_revision or {}
+                old_principal = investor.amount_invested or Decimal('0')
                 if 'amount_invested' in pr:
                     investor.amount_invested = Decimal(str(pr['amount_invested']))
                 if 'total_return_pct' in pr:
@@ -1658,7 +1781,18 @@ class InvestorActionView(APIView):
                 investor.save(update_fields=update_fields + ['approved_by', 'approved_at'])
                 # Regenerate the payout schedule from the revised terms — only
                 # still-pending entries; anything already paid is left untouched.
-                Payout.objects.filter(investor=investor, status='pending').delete()
+                if is_renewal:
+                    # Renewal: the old term's unpaid interest is still owed, so it
+                    # stays on Payouts. Only the old principal rolls over; renewing
+                    # for less pays the difference out on the renewal date.
+                    Payout.objects.filter(investor=investor, status='pending', payout_type='maturity').delete()
+                    returned = (old_principal - investor.amount_invested).quantize(Decimal('0.01'))
+                    if returned > 0:
+                        Payout.objects.create(investor=investor, payout_type='maturity',
+                                              due_date=investor.investment_date, amount_due=returned,
+                                              notes='Principal returned on renewal')
+                else:
+                    Payout.objects.filter(investor=investor, status='pending').delete()
                 generate_payout_schedule(investor, custom_entries=payout_schedule)
                 # An investment approved before leads were made on approval may
                 # still have none — every approval makes sure it has one.
