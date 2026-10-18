@@ -268,6 +268,9 @@ class Investor(models.Model):
     # stays approved on its old terms; this keeps the rejection on record (and on the
     # Approvals screen's Rejected tab).
     rejections = models.JSONField(null=True, blank=True)
+    # A delete or an undo-renewal asked for and waiting on an approver:
+    # {type: 'delete'|'undo_renewal', by, by_name, at, reason, include_paid}.
+    pending_action = models.JSONField(null=True, blank=True)
     # Who signed the investment off, and when — the latest approval, a revision's
     # included. Shown on the Approved tab.
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')

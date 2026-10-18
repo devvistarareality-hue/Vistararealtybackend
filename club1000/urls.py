@@ -26,6 +26,7 @@ urlpatterns = [
     path('investors/<int:pk>/revise/draft/', views.InvestorReviseDraftView.as_view()),
     path('investors/<int:pk>/renew/', views.InvestorRenewView.as_view()),
     path('investors/<int:pk>/undo-renewal/', views.InvestorUndoRenewalView.as_view()),
+    path('investors/<int:pk>/pending-action/', views.InvestorPendingActionView.as_view()),
     path('investors/<int:pk>/mature-payout/', views.InvestorMaturityPayoutView.as_view()),
     path('investors/<int:pk>/loi-no/', views.InvestorLoiNoView.as_view()),
     path('investors/<int:pk>/upload-loi/', views.InvestorUploadLoiView.as_view()),

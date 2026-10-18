@@ -138,8 +138,9 @@ class SettlementFlowTests(TestCase):
     def test_manager_deletes_an_investor_with_nothing_paid(self):
         inv = self._inv(date.today() - relativedelta(months=1))
         Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('100000'))
-        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/')
-        self.assertEqual(r.status_code, 204, getattr(r, 'data', None))
+        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/?reason=test')
+        self.assertEqual(r.status_code, 202, getattr(r, 'data', None))
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json').status_code, 200)
         self.assertFalse(Investor.objects.filter(pk=inv.pk).exists())
         self.assertFalse(Payout.objects.filter(investor_id=inv.pk).exists())
 
@@ -147,7 +148,7 @@ class SettlementFlowTests(TestCase):
         inv = self._inv(date.today() - relativedelta(months=4))
         Payout.objects.create(investor=inv, payout_type='interest', due_date=date.today() - timedelta(days=5),
                               amount_due=Decimal('3000'), status='paid', paid_amount=Decimal('3000'))
-        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/')
+        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/?reason=test')
         self.assertEqual(r.status_code, 409)
         self.assertTrue(Investor.objects.filter(pk=inv.pk).exists())
 
@@ -237,7 +238,9 @@ class SettlementFlowTests(TestCase):
         ReferralReward.objects.create(investor=inv, reference_name='R', reference_phone='9800000009', amount=Decimal('268.75'), pct=Decimal('0.25'))
         d = self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data
         self.assertTrue(d['can_undo_renewal'])
-        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {}, format='json')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'reason': 'mistake'}, format='json')
+        self.assertEqual(r.status_code, 202, r.data)                                   # a request for the approvers
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
         inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
         self.assertEqual((inv.renewal_count, inv.amount_invested, inv.maturity_date, inv.past_terms), (0, Decimal('100000'), old_maturity, None))
@@ -250,9 +253,11 @@ class SettlementFlowTests(TestCase):
         inv, a, b, old_maturity = self._renew_quarterly(100000, 'pay')
         p = Payout.objects.filter(investor=inv, due_date__gt=old_maturity, payout_type='interest').order_by('due_date').first()
         self.api.post(f'/api/club1000/payouts/{p.pk}/mark-paid/', {'amount': str(p.amount_due), 'paid_date': str(date.today())}, format='json')
-        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {}, format='json')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'reason': 'x'}, format='json')
         self.assertEqual((r.status_code, r.data.get('code')), (409, 'has_paid'))
-        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'confirm_paid': True}, format='json')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'confirm_paid': True, 'reason': 'x'}, format='json')
+        self.assertEqual(r.status_code, 202, r.data)
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
 
     def test_part_interest_taken_and_fresh_money_added(self):

@@ -208,7 +208,7 @@ class StatsView(APIView):
         }
         if manager:
             data['active_scheme_count'] = _company_filtered(Scheme.objects.filter(is_active=True), request).count()
-            pending_q = _investor_visibility_qs(request).filter(approval_status='pending')
+            pending_q = _investor_visibility_qs(request).filter(Q(approval_status='pending') | Q(pending_action__isnull=False))
             if scheme_ids:
                 pending_q = pending_q.filter(scheme_id__in=scheme_ids)
             data['pending_approval_count'] = pending_q.count()
@@ -602,6 +602,9 @@ class InvestorListCreateView(APIView):
             # Rejected investments, and approved ones whose revision or renewal was
             # turned down (they stay on their old terms; the rejection is shown).
             qs = qs.filter(Q(approval_status='rejected') | Q(approval_status='approved', rejections__isnull=False))
+        elif approval_status == 'pending':
+            # Waiting on an approver: new / revised investments, and requested deletes / undos.
+            qs = qs.filter(Q(approval_status='pending') | Q(pending_action__isnull=False))
         elif approval_status:
             qs = qs.filter(approval_status=approval_status)
         else:
@@ -774,12 +777,21 @@ class InvestorDetailView(APIView):
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         include_paid = str(request.query_params.get('include_paid') or request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
-        why, (n_pay, amt_pay, n_rew, amt_rew) = _delete_investor(request, investor, include_paid)
-        if why:
+        n_pay, amt_pay, n_rew, amt_rew = _paid_on(investor)
+        if (n_pay or n_rew) and not include_paid:
             # The screen asks "delete these payments too?" and sends include_paid.
-            return Response({'detail': why, 'code': 'has_paid', 'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
+            bits = [f'{n_pay} payout{"s" if n_pay != 1 else ""} (₹{amt_pay:,.0f})' if n_pay else '',
+                    f'{n_rew} referral reward{"s" if n_rew != 1 else ""} (₹{amt_rew:,.0f})' if n_rew else '']
+            return Response({'detail': f'{" and ".join(b for b in bits if b)} for this investor already paid.', 'code': 'has_paid',
+                             'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
                              'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)}, status=status.HTTP_409_CONFLICT)
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        # Not done here: a delete goes to the scheme's approvers (Approvals → Pending).
+        reason = (request.query_params.get('reason') or request.data.get('reason') or '').strip()[:1000]
+        if not reason:
+            return Response({'detail': 'Give a reason for deleting.'}, status=status.HTTP_400_BAD_REQUEST)
+        _request_action(request, investor, 'delete', reason, include_paid)
+        return Response({'requested': True, 'detail': 'Sent to the approvers — it is deleted once approved.'},
+                        status=status.HTTP_202_ACCEPTED)
 
 
 def _paid_on(investor):
@@ -788,6 +800,30 @@ def _paid_on(investor):
     pays = [p for p in investor.payouts.all() if p.status == 'paid']
     rews = [r for r in investor.referral_rewards.all() if r.status == 'paid']
     return (len(pays), sum((amt(p) for p in pays), Decimal('0')), len(rews), sum((amt(r) for r in rews), Decimal('0')))
+
+
+def _request_action(request, investor, kind, reason, include_paid=False):
+    """File a delete / undo-renewal for the scheme's approvers instead of doing it."""
+    from activity.recorder import note
+    investor.pending_action = {'type': kind, 'by': request.user.id, 'by_name': request.user.name or '',
+                               'at': timezone.now().isoformat(), 'reason': reason, 'include_paid': bool(include_paid)}
+    investor.save(update_fields=['pending_action'])
+    what = 'Delete' if kind == 'delete' else 'Undo renewal'
+    note(request, f'{what} requested — {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""}: {reason}',
+         action='delete-request' if kind == 'delete' else 'undo-renewal-request', target_type='investor',
+         target_id=str(investor.pk), module='Club 1000')
+    try:
+        from notifications import notify, reporting_chain
+        ids = (investor.scheme.investor_approvers if investor.scheme_id else None) or []
+        to = list(User.objects.filter(id__in=ids, company=investor.company, is_active=True)) if ids else []
+        if not to:
+            to = list(User.objects.filter(company=investor.company, is_active=True).filter(Q(role='Admin') | Q(is_staff=True)))
+        for u in {u.id: u for u in to}.values():
+            notify(u, 'investor_approval', f'{what} needs approval',
+                   f'{investor.name} · {investor.scheme.name if investor.scheme_id else ""} — by {request.user.name}: {reason}',
+                   {'investor_id': investor.id})
+    except Exception:
+        pass
 
 
 def _delete_investor(request, investor, include_paid=False):
@@ -854,6 +890,9 @@ class InvestorBulkDeleteView(APIView):
         if not ids:
             return Response({'detail': 'Pick at least one investor.'}, status=status.HTTP_400_BAD_REQUEST)
         include_paid = str(request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
+        reason = (request.data.get('reason') or '').strip()[:1000]
+        if not reason:
+            return Response({'detail': 'Give a reason for deleting.'}, status=status.HTTP_400_BAD_REQUEST)
         found = {i.pk: i for i in _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)}
         deleted, refused = [], []
         for pk in ids:
@@ -862,24 +901,25 @@ class InvestorBulkDeleteView(APIView):
                 refused.append({'id': pk, 'name': '', 'reason': 'Not found.'})
                 continue
             name = inv.name
-            why, (n_pay, amt_pay, n_rew, amt_rew) = _delete_investor(request, inv, include_paid)
-            if why:
-                refused.append({'id': pk, 'name': name, 'reason': why, 'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
-                                'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)})
+            n_pay, amt_pay, n_rew, amt_rew = _paid_on(inv)
+            if (n_pay or n_rew) and not include_paid:
+                refused.append({'id': pk, 'name': name, 'reason': 'Payments already made.', 'paid_payouts': n_pay,
+                                'paid_amount': str(amt_pay), 'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)})
             else:
+                _request_action(request, inv, 'delete', reason, include_paid)
                 deleted.append({'id': pk, 'name': name})
         # One entry for the whole action — every investor deleted, and every one refused
         # with why (each delete above replaced the previous note, so this is the record).
         from activity.recorder import note
         parts = []
         if deleted:
-            parts.append(f'Deleted {len(deleted)} investor{"s" if len(deleted) != 1 else ""} — ' + ', '.join(d['name'] for d in deleted))
+            parts.append(f'Asked to delete {len(deleted)} investor{"s" if len(deleted) != 1 else ""} (sent for approval) — ' + ', '.join(d['name'] for d in deleted))
         if refused:
             parts.append(f'kept {len(refused)} (payments already made — not confirmed) — ' + ', '.join(r['name'] or f'#{r["id"]}' for r in refused))
         if parts:
-            note(request, ' · '.join(parts), action='deleted' if deleted else 'delete-refused', target_type='investor',
+            note(request, ' · '.join(parts) + f' · reason: {reason}', action='delete-request' if deleted else 'delete-refused', target_type='investor',
                  module='Club 1000', details={'deleted': [d['id'] for d in deleted], 'refused': [r['id'] for r in refused]})
-        return Response({'deleted': [d['id'] for d in deleted], 'refused': refused})
+        return Response({'requested': [d['id'] for d in deleted], 'deleted': [], 'refused': refused})
 
 
 class InvestorLedgerView(APIView):
@@ -2721,13 +2761,22 @@ class InvestorUndoRenewalView(APIView):
         reward = investor.referral_rewards.filter(pct=REINVESTMENT_REFERRAL_REWARD_PCT).order_by('-created_at').first()
         paid_rows = [p for p in current + made_at_renewal if p.status == 'paid' and p not in settled]
         reward_paid = bool(reward and reward.status == 'paid')
-        confirm = str(request.data.get('confirm_paid') or '').lower() in ('1', 'true', 'yes')
+        executing = getattr(request, '_c1_execute', False)        # an approver approved the request
+        confirm = executing or str(request.data.get('confirm_paid') or '').lower() in ('1', 'true', 'yes')
         if (paid_rows or reward_paid) and not confirm:
             amt = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0') for p in paid_rows), Decimal('0'))
             return Response({'detail': f'{len(paid_rows)} payment{"s" if len(paid_rows) != 1 else ""} (₹{amt:,.0f}) already made in the '
                                        f'renewed term{" and its referral reward is paid" if reward_paid else ""}.',
                              'code': 'has_paid', 'paid_payouts': len(paid_rows), 'paid_amount': str(amt),
                              'reward_paid': reward_paid}, status=status.HTTP_409_CONFLICT)
+        if not executing:
+            # Not done here: an undo goes to the scheme's approvers (Approvals → Pending).
+            reason = (request.data.get('reason') or '').strip()[:1000]
+            if not reason:
+                return Response({'detail': 'Give a reason for undoing the renewal.'}, status=status.HTTP_400_BAD_REQUEST)
+            _request_action(request, investor, 'undo_renewal', reason, bool(paid_rows or reward_paid))
+            return Response({'requested': True, 'detail': 'Sent to the approvers — the renewal is undone once approved.'},
+                            status=status.HTTP_202_ACCEPTED)
         renewed_label = f'{investor.investment_date:%d-%m-%Y} → {investor.maturity_date:%d-%m-%Y} · ₹{investor.amount_invested:,.0f}'
         with transaction.atomic():
             for p in settled:
@@ -2755,16 +2804,69 @@ class InvestorUndoRenewalView(APIView):
                           if at_maturity else investor.amount_invested)
                 Payout.objects.create(investor=investor, payout_type='maturity', due_date=ended_maturity,
                                       amount_due=amount.quantize(Decimal('0.01')))
-        if last.get('loi_document') and new_loi and new_loi != last['loi_document']:
-            try:
-                investor.loi_document.storage.delete(new_loi)
-            except Exception:
-                pass
+        # The undone renewal's signed LOI is kept in storage (never deleted) and noted.
+        if new_loi and new_loi != (investor.loi_document.name if investor.loi_document else ''):
+            investor.rejections = (investor.rejections or []) + [{'kind': 'undone-renewal', 'no': investor.renewal_count + 1,
+                                                                  'reason': 'renewal undone', 'loi_document': new_loi,
+                                                                  'at': timezone.now().isoformat(), 'by': request.user.name or ''}]
+            investor.save(update_fields=['rejections'])
         from activity.recorder import note
         note(request, f'Undid renewal — {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · removed the '
                       f'renewed term {renewed_label}; back to {investor.investment_date:%d-%m-%Y} → {investor.maturity_date:%d-%m-%Y}',
              action='undo-renewal', target_type='investor', target_id=str(investor.pk), module='Club 1000')
         return Response(InvestorListSerializer(investor).data)
+
+
+class InvestorPendingActionView(APIView):
+    """POST {action: approve|reject, reason} — an approver decides a requested delete
+    or undo-renewal (filed by Delete / Undo renewal). Approve carries it out; reject
+    clears it and keeps the rejection on record."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not is_club1000_manager(request.user):
+            return _no_permission()
+        investor = _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk=pk).first()
+        if not investor or not investor.pending_action:
+            return Response({'detail': 'Nothing is waiting for approval on this investor.'}, status=status.HTTP_404_NOT_FOUND)
+        if not can_approve_investor(request.user, investor.scheme_id, request.user.company):
+            return Response({'detail': 'You are not a configured approver for this scheme.'}, status=status.HTTP_403_FORBIDDEN)
+        pa = investor.pending_action
+        kind = pa.get('type')
+        action = request.data.get('action')
+        from activity.recorder import note
+        what = 'delete' if kind == 'delete' else 'undo renewal'
+        if action == 'reject':
+            reason = (request.data.get('reason') or '').strip()[:1000]
+            if not reason:
+                return Response({'detail': 'Give a reason for rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
+            investor.rejections = (investor.rejections or []) + [{
+                'kind': 'delete' if kind == 'delete' else 'undo-renewal', 'no': investor.revision_no, 'reason': reason,
+                'by': request.user.name or '', 'at': timezone.now().isoformat(),
+                'asked_by': pa.get('by_name', ''), 'asked_reason': pa.get('reason', '')}]
+            investor.pending_action = None
+            investor.save(update_fields=['rejections', 'pending_action'])
+            note(request, f'Rejected the {what} of {investor.name}: {reason}', action='reject', target_type='investor',
+                 target_id=str(investor.pk), module='Club 1000')
+            try:
+                from notifications import notify
+                asker = User.objects.filter(pk=pa.get('by')).first()
+                if asker:
+                    notify(asker, 'investor_rejected', f'{what.capitalize()} rejected', f'{investor.name}: {reason}', {'investor_id': investor.id})
+            except Exception:
+                pass
+            return Response(InvestorListSerializer(investor).data)
+        if action != 'approve':
+            return Response({'detail': "action must be 'approve' or 'reject'."}, status=status.HTTP_400_BAD_REQUEST)
+        investor.pending_action = None
+        investor.save(update_fields=['pending_action'])
+        if kind == 'delete':
+            why, _ = _delete_investor(request, investor, include_paid=True)
+            if why:
+                return Response({'detail': why}, status=status.HTTP_409_CONFLICT)
+            return Response({'deleted': True})
+        request._c1_execute = True
+        return InvestorUndoRenewalView().post(request, pk)
 
 
 class InvestorLoiNoView(APIView):
