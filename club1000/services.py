@@ -248,7 +248,10 @@ def past_terms(investor):
         pct = Decimal(str(t.get('return_pct', investor.total_return_pct) or 0))
         at_maturity = (t.get('interest_payout') or investor.interest_payout) not in ('quarterly', 'monthly')
         interest = (maturity_value(principal, pct, start, maturity) - principal) if at_maturity else (principal * pct / Decimal('100'))
-        rolled = max(Decimal('0'), min(interest, nxt - principal)) if at_maturity else Decimal('0')
+        if t.get('rolled_interest') not in (None, ''):
+            rolled = Decimal(str(t['rolled_interest']))          # recorded at the renewal
+        else:
+            rolled = max(Decimal('0'), min(interest, nxt - principal)) if at_maturity else Decimal('0')
         terms.append({'start': start, 'maturity': maturity, 'principal': principal, 'next': nxt, 'pct': pct,
                       'interest': interest.quantize(Decimal('0.01')), 'rolled': rolled.quantize(Decimal('0.01')),
                       'returned': max(Decimal('0'), principal - nxt).quantize(Decimal('0.01')),
@@ -265,8 +268,9 @@ def money_in(investor):
         return investor.amount_invested or Decimal('0')
     total = terms[0]['principal']
     for t in terms:
-        handed_back = t['principal'] + (t['interest'] if t['at_maturity'] else Decimal('0'))
-        total += max(Decimal('0'), t['next'] - handed_back)
+        # New money at a renewal = what it renewed with beyond the principal and the
+        # interest that was added into it.
+        total += max(Decimal('0'), t['next'] - t['principal'] - t['rolled'])
     return total
 
 
@@ -301,7 +305,7 @@ def term_of(terms, due_date):
     return pick
 
 
-def close_term(investor, term, next_principal, maturity_paid=False):
+def close_term(investor, term, next_principal, maturity_paid=False, roll_room=None):
     """On a renewal: the term just finished, as its payouts should stand — its
     at-maturity interest (less whatever was rolled into a larger renewal) and the
     principal paid back when it renewed for less. Quarterly / monthly interest
@@ -311,9 +315,11 @@ def close_term(investor, term, next_principal, maturity_paid=False):
     at_maturity = (term.get('interest_payout') or 'maturity') not in ('quarterly', 'monthly')
     rows = []
     label = f'Term ending {maturity:%d-%m-%Y}'
+    rolled = Decimal('0')
     if at_maturity and not maturity_paid:
         interest = maturity_value(principal, pct, start, maturity) - principal
-        rolled = max(Decimal('0'), min(interest, next_principal - principal))
+        room = max(Decimal('0'), next_principal - principal) if roll_room is None else roll_room
+        rolled = max(Decimal('0'), min(interest, room))
         if interest - rolled > 0:
             rows.append(Payout(investor=investor, payout_type='interest', due_date=maturity,
                                amount_due=(interest - rolled).quantize(Decimal('0.01')),
@@ -323,7 +329,7 @@ def close_term(investor, term, next_principal, maturity_paid=False):
         rows.append(Payout(investor=investor, payout_type='maturity', due_date=maturity, amount_due=returned,
                            notes=label + ' · principal returned on renewal'))
     Payout.objects.bulk_create(rows)
-    return rows
+    return rolled
 
 
 def generate_past_term_payouts(investor):

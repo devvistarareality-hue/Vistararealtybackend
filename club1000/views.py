@@ -2262,9 +2262,28 @@ class InvestorActionView(APIView):
                         due_date=date.fromisoformat(finished['maturity'])).exists()
                     Payout.objects.filter(investor=investor, status='pending', payout_type='maturity').delete()
                     if finished:
+                        new_principal = investor.amount_invested or Decimal('0')
+                        # The finished term's unpaid interest is either paid to him (it stays
+                        # due on Payouts) or added to the renewal — settled into the new
+                        # principal, never overdue. Unsaid: added when he renews for more.
+                        reinvest = (pr.get('interest_choice') or ('reinvest' if new_principal > old_principal else 'pay')) == 'reinvest'
+                        room = max(new_principal - old_principal, Decimal('0')) if reinvest else Decimal('0')
+                        rolled = close_term(investor, finished, new_principal, maturity_paid=paid_mat, roll_room=room)
+                        room -= rolled
+                        if room > 0:
+                            renewed_on = investor.investment_date
+                            for p in Payout.objects.filter(investor=investor, status='pending', payout_type='interest',
+                                                           due_date__lte=date.fromisoformat(finished['maturity'])).order_by('due_date', 'id'):
+                                if room <= 0:
+                                    break
+                                part = min(room, p.amount_due)
+                                _pay_payout(p, part, renewed_on, f'Added to renewal R{investor.renewal_count}', request.user)
+                                room -= part
+                                rolled += part
+                        finished['rolled_interest'] = str(rolled.quantize(Decimal('0.01')))
+                        finished['interest_choice'] = 'reinvest' if reinvest else 'pay'
                         investor.past_terms = (investor.past_terms or []) + [finished]
                         investor.save(update_fields=['past_terms'])
-                        close_term(investor, finished, investor.amount_invested or Decimal('0'), maturity_paid=paid_mat)
                 else:
                     Payout.objects.filter(investor=investor, status='pending').delete()
                 generate_payout_schedule(investor, custom_entries=payout_schedule)
@@ -2571,6 +2590,10 @@ class InvestorRenewView(APIView):
         except (ValueError, TypeError):
             return Response({'detail': 'Invalid investment_date.'}, status=status.HTTP_400_BAD_REQUEST)
         pending['investment_date'] = renewal_date
+        # The finished term's unpaid interest: paid out to him, or added to the renewal.
+        choice = str(request.data.get('interest_choice') or '').lower()
+        if choice in ('pay', 'reinvest'):
+            pending['interest_choice'] = choice
         payout_schedule = request.data.get('payout_schedule')
         if isinstance(payout_schedule, list):
             pending['payout_schedule'] = payout_schedule

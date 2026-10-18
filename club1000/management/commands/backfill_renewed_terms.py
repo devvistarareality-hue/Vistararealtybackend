@@ -87,8 +87,8 @@ class Command(BaseCommand):
                     after = Decimal(terms[n + 1]['principal'] if n + 1 < len(terms) else str(inv.amount_invested))
                     paid = Payout.objects.filter(investor=inv, payout_type='maturity', status='paid',
                                                  due_date=date.fromisoformat(t['maturity'])).exists()
-                    made = close_term(inv, t, after, maturity_paid=paid)
-                    for p in made:
+                    close_term(inv, t, after, maturity_paid=paid)
+                    for p in Payout.objects.filter(investor=inv, due_date=date.fromisoformat(t['maturity']), status='pending'):
                         self.stdout.write(f'      + {p.payout_type} ₹{p.amount_due:,.0f} due {p.due_date} ({p.notes})')
         if not opts['apply']:
             self.stdout.write('\nNothing saved — run with --apply to save.')

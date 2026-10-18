@@ -179,3 +179,50 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(by[first['label']]['kind'], 'original')
         self.assertEqual(Decimal(str(by[first['label']]['interest']).replace('₹', '').replace(',', '')),
                          Decimal(first['summary']['interest']))
+
+    def _renew_quarterly(self, amount, choice=None):
+        """A quarterly investment whose term ended with 2 interest instalments unpaid, renewed."""
+        inv = self._inv(date.today() - relativedelta(months=25))      # ₹1,00,000, 30% total, quarterly
+        old_maturity = inv.maturity_date
+        a = Payout.objects.create(investor=inv, payout_type='interest', due_date=old_maturity - relativedelta(months=3), amount_due=Decimal('3750'))
+        b = Payout.objects.create(investor=inv, payout_type='interest', due_date=old_maturity, amount_due=Decimal('3750'))
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=old_maturity, amount_due=Decimal('100000'))
+        pr = {'amount_invested': str(amount), 'investment_date': str(old_maturity), 'interest_payout': 'quarterly'}
+        if choice:
+            pr['interest_choice'] = choice
+        Investor.objects.filter(pk=inv.pk).update(approval_status='pending', pending_revision_type='renew', pending_revision=pr)
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
+        return inv, a, b, old_maturity
+
+    def test_case1_everything_added_into_the_renewal(self):
+        from club1000.services import money_in
+        inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')
+        self.assertEqual((a.status, b.status), ('paid', 'paid'))                 # settled — not overdue
+        self.assertIn('Added to renewal', a.notes)
+        self.assertEqual(inv.past_terms[-1]['rolled_interest'], '7500.00')
+        self.assertEqual(money_in(inv), Decimal('100000'))                      # no new money
+
+    def test_case2_interest_paid_out_principal_renewed(self):
+        inv, a, b, _ = self._renew_quarterly(100000, 'pay')
+        self.assertEqual((a.status, b.status), ('pending', 'pending'))           # still owed to him
+        self.assertFalse(Payout.objects.filter(investor=inv, payout_type='maturity', notes__icontains='returned').exists())
+
+    def test_case3_some_principal_and_the_interest_paid_out(self):
+        inv, a, b, old = self._renew_quarterly(60000, 'pay')
+        self.assertEqual((a.status, b.status), ('pending', 'pending'))
+        back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old, status='pending')
+        self.assertEqual(back.amount_due, Decimal('40000.00'))
+
+    def test_case4_more_added_on_top_of_principal_and_interest(self):
+        from club1000.services import money_in
+        inv, a, b, _ = self._renew_quarterly(150000, 'reinvest')
+        self.assertEqual((a.status, b.status), ('paid', 'paid'))
+        self.assertEqual(money_in(inv), Decimal('142500'))                      # 1,00,000 + 42,500 fresh
+
+    def test_partly_added_leaves_the_rest_due(self):
+        inv, a, b, _ = self._renew_quarterly(105000, 'reinvest')                 # only ₹5,000 of ₹7,500 added
+        self.assertEqual(a.status, 'paid')
+        self.assertEqual(b.paid_amount, Decimal('1250'))
+        self.assertEqual([x.amount_due for x in Payout.objects.filter(investor=inv, balance_of=b, status='pending')], [Decimal('2500.00')])
