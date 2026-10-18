@@ -1043,7 +1043,31 @@ class InvestorLedgerView(APIView):
                        **(outcomes[t['no']] if t['no'] < len(outcomes) and not t['current'] else {})}
                       for t in terms],
             'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0),
+            # How many times the running term has been revised (its LOI reads "Renewal 2 · Revision 1").
+            'current_term_revisions': term_revisions(investor),
         })
+
+
+def term_revisions(investor):
+    """Approved revisions of the term running now: those approved after its renewal was
+    approved (all of them for an investment never renewed). revision_no counts revisions
+    and renewals together, so it cannot tell "Renewal 2 revised once" from "R3"."""
+    from activity.models import ActivityLog
+    submitted, count, renewals = None, 0, 0
+    for a in (ActivityLog.objects.filter(target_type='investor', target_id=str(investor.pk))
+              .order_by('created_at', 'id').values_list('action', flat=True)):
+        if a in ('revise', 'renew'):
+            submitted = a
+        elif a == 'approve' and submitted == 'revise':
+            count += 1; submitted = None
+        elif a == 'approve' and submitted == 'renew':
+            count, renewals, submitted = 0, renewals + 1, None
+        elif a == 'reject':
+            submitted = None
+    if not renewals and investor.renewal_count:
+        # Renewed before the log knew of it — at best the revisions since.
+        return max(count, 0)
+    return count
 
 
 def _months_between(start, end):
