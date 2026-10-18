@@ -981,7 +981,8 @@ class InvestorLedgerView(APIView):
             'interest_added': str(o['rolled']), 'interest_to_investor': str(max(o['interest'] - o['rolled'], Decimal('0'))),
             'principal_returned': str(o['returned']),
             'fresh_money': str(max(o['next'] - o['principal'] - o['rolled'], Decimal('0'))),
-        } for o in past_terms(investor)]
+            'paid_at_renewal': ((investor.past_terms or [])[n] or {}).get('paid_at_renewal') or '',
+        } for n, o in enumerate(past_terms(investor))]
 
         def _term_summary(t):
             mine = [p for p in all_payouts if term_of(terms, p.due_date) == t['no']]
@@ -2305,6 +2306,16 @@ class InvestorActionView(APIView):
                                 _pay_payout(p, part, renewed_on, f'Added to renewal R{investor.renewal_count}', request.user)
                                 room -= part
                                 rolled += part
+                        # Handed over at the renewal: what stayed due to him from the ended
+                        # term (its interest, principal taken back) is paid now.
+                        pay_now = pr.get('pay_now') or {}
+                        if pay_now.get('paid_date'):
+                            paid_on = date.fromisoformat(pay_now['paid_date'])
+                            note_txt = pay_now.get('notes') or f'Paid at renewal R{investor.renewal_count}'
+                            for p in Payout.objects.filter(investor=investor, status='pending',
+                                                           due_date__lte=date.fromisoformat(finished['maturity'])).order_by('due_date', 'id'):
+                                _pay_payout(p, p.amount_due, paid_on, note_txt, request.user)
+                            finished['paid_at_renewal'] = pay_now['paid_date']
                         finished['rolled_interest'] = str(rolled.quantize(Decimal('0.01')))
                         finished['interest_choice'] = 'reinvest' if reinvest else 'pay'
                         investor.past_terms = (investor.past_terms or []) + [finished]
@@ -2629,6 +2640,14 @@ class InvestorRenewView(APIView):
         choice = str(request.data.get('interest_choice') or '').lower()
         if choice in ('pay', 'reinvest'):
             pending['interest_choice'] = choice
+        # The money going to him at this renewal (the ended term's interest he takes,
+        # principal taken back) was handed over now: paid on approval, on this date.
+        pn = request.data.get('pay_now')
+        if isinstance(pn, dict) and pn.get('paid_date'):
+            paid_on = _parse_date(pn.get('paid_date'))
+            if not paid_on or paid_on > date.today():
+                return Response({'detail': 'The paid date must be today or earlier.'}, status=status.HTTP_400_BAD_REQUEST)
+            pending['pay_now'] = {'paid_date': paid_on.isoformat(), 'notes': str(pn.get('notes') or '')[:200]}
         # Exactly how much of that interest goes into the renewal, when the form knows
         # (he took part of it and added fresh money besides).
         if request.data.get('interest_added') not in (None, ''):

@@ -282,3 +282,18 @@ class SettlementFlowTests(TestCase):
         rows = self.api.get('/api/club1000/investors/?approval_status=rejected').data
         rows = rows if isinstance(rows, list) else rows.get('results', [])
         self.assertEqual([x['id'] for x in rows], [inv.pk])
+
+    def test_money_handed_over_at_renewal_is_marked_paid(self):
+        inv = self._inv(date.today() - relativedelta(months=25))
+        old = inv.maturity_date
+        a = Payout.objects.create(investor=inv, payout_type='interest', due_date=old, amount_due=Decimal('7500'))
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=old, amount_due=Decimal('100000'))
+        Investor.objects.filter(pk=inv.pk).update(approval_status='pending', pending_revision_type='renew', pending_revision={
+            'amount_invested': '80000', 'investment_date': str(old), 'interest_payout': 'quarterly', 'interest_choice': 'pay',
+            'pay_now': {'paid_date': str(old), 'notes': 'UTR 99'}})
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
+        a.refresh_from_db()
+        back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old)
+        self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'UTR 99'))
+        self.assertEqual((back.status, back.amount_due), ('paid', Decimal('20000.00')))
+        self.assertFalse(Payout.objects.filter(investor=inv, status='pending', due_date__lte=old).exists())
