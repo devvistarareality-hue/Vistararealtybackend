@@ -260,3 +260,87 @@ def term_rows(user, company_id=None):
                 'due_now': str(sum((_money(p.amount_due) for p in mine if p.status != 'paid' and p.due_date <= today), Decimal('0'))),
             })
     return rows
+
+
+def _ai_request(user, company_id=None):
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from rest_framework.request import Request
+    raw = APIRequestFactory().get('/ai/', {'company_id': str(company_id)} if company_id else {})
+    force_authenticate(raw, user=user)
+    raw.user = user
+    request = Request(raw)
+    request._force_auth_user = user
+    request.user = user
+    return request
+
+
+def approval_rows(user, company_id=None):
+    """Ask Nexora's club_approvals: what the Approvals screen shows — one row per thing
+    waiting for an approver (a new investment, a revision, a renewal, an undo-renewal
+    request) with where it stands in the two levels, and one row per rejection on
+    record (a whole investment rejected, or a revision / renewal / undo request turned
+    down while the investment stays as it was)."""
+    from .views import _investor_visibility_qs
+    invs = list(_investor_visibility_qs(_ai_request(user, company_id)).exclude(approval_status='draft')
+                .select_related('scheme', 'added_by'))
+    rows = []
+    for inv in invs:
+        sch = inv.scheme
+        step = inv.approval_step or {}
+        two = bool(sch and sch.investor_approvers_l2)
+        stage = ('waiting for level 2' if step else 'waiting for level 1') if two else 'waiting for approval'
+        base = {'investor': inv.name, 'phone': inv.phone, 'loi_no': inv.loi_no or '',
+                'scheme': sch.name if sch else '', 'amount': str(inv.amount_invested or 0)}
+        if inv.approval_status == 'pending':
+            kind = ('renewal' if inv.pending_revision_type == 'renew' else 'revision') if inv.pending_revision else 'new investment'
+            proposed = (inv.pending_revision or {}).get('amount_invested')
+            rows.append({**base, 'status': 'pending', 'kind': kind, 'stage': stage,
+                         'level1_by': step.get('by_name', ''), 'by': inv.added_by.name if inv.added_by else '',
+                         'reason': '', 'date': inv.updated_at.date(), 'proposed_amount': str(proposed or '')})
+        pa = inv.pending_action or {}
+        if pa:
+            rows.append({**base, 'status': 'pending', 'kind': 'undo renewal request', 'stage': stage,
+                         'level1_by': step.get('by_name', ''), 'by': pa.get('by_name', ''), 'reason': pa.get('reason', ''),
+                         'date': str(pa.get('at') or '')[:10] or None, 'proposed_amount': ''})
+        if inv.approval_status == 'rejected':
+            rows.append({**base, 'status': 'rejected', 'kind': 'new investment', 'stage': 'rejected',
+                         'level1_by': '', 'by': '', 'reason': '', 'date': inv.updated_at.date(), 'proposed_amount': ''})
+        for rj in inv.rejections or []:
+            k = rj.get('kind')
+            undone = k == 'undone-renewal'
+            rows.append({**base, 'status': 'undone' if undone else 'rejected',
+                         'kind': {'undo-renewal': 'undo renewal request', 'undone-renewal': 'renewal',
+                                  'delete': 'delete request'}.get(k, k or ''),
+                         'stage': f"renewal R{rj.get('no')} undone" if undone else (f"R{rj.get('no')} rejected" if k in ('renewal', 'revision') else 'rejected'),
+                         'level1_by': '', 'by': rj.get('by', ''), 'reason': rj.get('reason', ''),
+                         'date': str(rj.get('at') or '')[:10] or None, 'proposed_amount': str(rj.get('amount') or '')})
+    for r in rows:
+        if isinstance(r['date'], str):
+            try:
+                r['date'] = date.fromisoformat(r['date'])
+            except ValueError:
+                r['date'] = None
+    return rows
+
+
+def scheme_rows(user, company_id=None):
+    """Ask Nexora's club_schemes: each scheme with its terms and who approves it —
+    level 1 approvers, and the level 2 (final) approvers when the scheme has them."""
+    from accounts.models import User
+    from .models import Scheme
+    cid = company_id or getattr(user, 'company_id', None)
+    schemes = list(Scheme.objects.filter(company_id=cid)) if cid else []
+    ids = {i for s in schemes for i in (s.investor_approvers or []) + (s.investor_approvers_l2 or [])}
+    names = {u.id: u.name or '' for u in User.objects.filter(id__in=ids)}
+    out = []
+    for s in schemes:
+        l1 = ', '.join(names.get(i, '') for i in s.investor_approvers or [] if names.get(i))
+        l2 = ', '.join(names.get(i, '') for i in s.investor_approvers_l2 or [] if names.get(i))
+        out.append({'scheme': s.name, 'active': 'yes' if s.is_active else 'no', 'tenure_months': s.tenure_months,
+                    'min_ticket': str(s.min_ticket_size), 'payout_options': ', '.join(s.interest_payout_options or []),
+                    'rates': ', '.join(f'{k} {v}%' for k, v in (s.payout_rates or {}).items()),
+                    'principal_payout': s.principal_payout,
+                    'premature_exit': 'yes' if s.premature_redemption_allowed else 'no',
+                    'level1_approvers': l1 or '— (admins only)', 'level2_approvers': l2 or '— (one level)',
+                    'approval_levels': 2 if s.investor_approvers_l2 else 1})
+    return out

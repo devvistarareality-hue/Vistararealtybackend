@@ -89,62 +89,34 @@ class InvestorImportTests(TestCase):
         api = APIClient(); api.force_authenticate(staff)
         self.assertEqual(api.get('/api/club1000/investors/import-template/').status_code, 403)
 
-    def _book(self, inv_rows, past_rows=()):
-        wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Investors'
-        ws.append(['Investor Name *', 'Mobile *', 'Scheme *', 'Amount Invested *', 'Investment Date *', 'Interest Payout', 'Return %'])
-        for r in inv_rows:
-            ws.append(r)
-        pt = wb.create_sheet('Past Terms')
-        pt.append(['Mobile', 'Investor Name', 'Term', 'Term Start', 'Maturity', 'Scheme', 'Interest Payout', 'Return %',
-                   'Principal (if different)'])
-        for mobile, nm, start, principal in past_rows:
-            pt.append([mobile, nm, None, start, None, None, None, None, principal])
-        buf = io.BytesIO(); wb.save(buf)
-        return SimpleUploadedFile('inv.xlsx', buf.getvalue())
-
-    def test_terms_are_worked_out_from_the_first_investment_date(self):
-        from club1000.models import Payout
-        from club1000.services import money_in
-        first = date.today().replace(day=1) - relativedelta(years=6)            # with the club 6 years
-        f = self._book([['Ramesh Patel', '9876500000', 'RISE', 5350000, first, 'maturity', 15]],
-                       [['9876500000', 'Ramesh Patel', first, 10000000],                         # 1st year: ₹1 cr
-                        ['9876500000', 'ramesh patel', first + relativedelta(years=1), 9000000]])  # 2nd: ₹90 L
+    def test_old_investment_is_imported_as_it_is_never_renewed(self):
+        """Renewals are not imported (they are done by hand on the website): an old date
+        is that investment's own date, and a matured one comes in due for renewal."""
+        old = date.today().replace(day=1) - relativedelta(years=6)
+        f = self._file([['Ramesh Patel', '9876500000', 'RISE', 5350000, old.strftime('%d-%m-%Y'), 'maturity', '', '']])
         r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
         self.assertEqual((r.data['created'], r.data['failed']), (1, 0), r.data)
+        self.assertTrue(any('due for renewal' in w for w in r.data['rows'][0]['warnings']))
+        self.assertNotIn('past_terms', r.data['rows'][0]['preview'])
         inv = Investor.objects.get()
-        self.assertEqual((inv.renewal_count, inv.first_invested_on), (6, first))
-        self.assertEqual((inv.investment_date, inv.maturity_date), (first + relativedelta(years=6), first + relativedelta(years=7)))
-        self.assertEqual([t['principal'] for t in inv.past_terms], ['10000000', '9000000'] + ['5350000'] * 4)
-        self.assertEqual(money_in(inv), Decimal('10000000'))
-        a = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
-        self.assertEqual(a.status_code, 200, a.data)
-        y1 = first + relativedelta(years=1)
-        rows = sorted((p.payout_type, p.amount_due) for p in Payout.objects.filter(investor=inv, due_date=y1))
-        self.assertEqual(rows, [('interest', Decimal('1500000.00')), ('maturity', Decimal('1000000.00'))])   # 15 L interest + 10 L back
-        # a term at today's amount: interest only, nothing returned
-        y4 = first + relativedelta(years=4)
-        self.assertEqual([(p.payout_type, p.amount_due) for p in Payout.objects.filter(investor=inv, due_date=y4)],
-                         [('interest', Decimal('802500.00'))])
+        self.assertEqual((inv.renewal_count, inv.past_terms, inv.first_invested_on), (0, None, None))
+        self.assertEqual((inv.investment_date, inv.maturity_date), (old, old + relativedelta(months=12)))
 
-    def test_still_in_first_term_has_no_past_terms(self):
-        f = self._book([['New One', '9876500001', 'RISE', 500000, RECENT, 'maturity', 15]])
-        self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
-        inv = Investor.objects.get()
-        self.assertEqual((inv.renewal_count, inv.past_terms, inv.investment_date), (0, None, RECENT))
+    def test_a_past_terms_sheet_in_an_old_file_is_ignored(self):
+        wb = openpyxl.Workbook(); ws = wb.active; ws.title = 'Investors'
+        ws.append(['Investor Name *', 'Mobile *', 'Scheme *', 'Amount Invested *', 'Investment Date *'])
+        ws.append(['New One', '9876500001', 'RISE', 500000, RECENT])
+        pt = wb.create_sheet('Past Terms')
+        pt.append(['Mobile', 'Investor Name', 'Term', 'Term Start', 'Principal (if different)'])
+        pt.append(['9876500001', 'New One', None, RECENT - relativedelta(years=1), 10000000])
+        buf = io.BytesIO(); wb.save(buf)
+        r = self.api.post('/api/club1000/investors/import/', {'file': SimpleUploadedFile('inv.xlsx', buf.getvalue()),
+                                                              'commit': 'true'}, format='multipart')
+        self.assertEqual((r.data['created'], r.data['failed']), (1, 0), r.data)
+        self.assertEqual(Investor.objects.get().renewal_count, 0)
 
-    def test_principal_for_a_term_that_does_not_exist_is_reported(self):
-        first = date.today().replace(day=1) - relativedelta(years=2)
-        f = self._book([['Ramesh Patel', '9876500000', 'RISE', 5350000, first, 'maturity', 15]],
-                       [['9876500000', 'Ramesh Patel', first + relativedelta(months=5), 10000000]])
-        r = self.api.post('/api/club1000/investors/import/', {'file': f}, format='multipart')
-        bad = [x for x in r.data['rows'] if x.get('sheet') == 'Past Terms']
-        self.assertEqual(len(bad), 1)
-        self.assertIn('No term starting', bad[0]['errors'][0])
-
-    def test_template_has_a_self_filling_past_terms_sheet(self):
+    def test_template_has_no_past_terms_sheet(self):
         r = self.api.get('/api/club1000/investors/import-template/')
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
-        self.assertIn('Past Terms', wb.sheetnames)
-        pt = wb['Past Terms']
-        self.assertEqual(pt['I1'].value, 'Principal (if different)')
-        self.assertTrue(str(pt['D2'].value).startswith('=IF(') and 'EDATE' in str(pt['D2'].value))
+        self.assertNotIn('Past Terms', wb.sheetnames)
+        self.assertIn('Renewals are not imported', ' '.join(str(c.value or '') for row in wb['Help'].iter_rows() for c in row))

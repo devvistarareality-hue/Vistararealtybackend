@@ -122,7 +122,7 @@ def _entities():
     from attendance.views import TeamLeaveRequestsView
     from club1000.views import (InvestorListCreateView, PayoutListView, ReferralRewardListView,
                                 LeadListCreateView as C1LeadListView, FollowUpListCreateView as C1FollowUpListView)
-    from club1000.portfolio import PortfolioListView, term_rows
+    from club1000.portfolio import PortfolioListView, approval_rows, scheme_rows, term_rows
     from receivables.collections import ARFollowUpListView
     from receivables.views import ARRegisterView
     from tasks.views import TasksView
@@ -263,7 +263,11 @@ def _entities():
         'investors': {'module': ('Club 1000',), 'view': InvestorListCreateView, 'date': 'invested',
                       'company': 'company_id',
                       'default_filters': [{'field': 'approval', 'op': 'eq', 'value': 'approved'}],
-                      'note': 'one row per INVESTMENT, not per person. Counts APPROVED investments only, exactly as the '
+                      'annotate': '_investor_status',
+                      'note': 'one row per INVESTMENT, not per person. status is as the dashboard\'s Portfolio status '
+                      'shows it: active (running, not yet matured) / due_for_renewal (past maturity, not renewed or paid '
+                      'out yet) / redeemed / premature_redeemed — the Investors screen\'s Active filter is active + '
+                      'due_for_renewal. Counts APPROVED investments only, exactly as the '
                       'Investors screen does — filter approval eq pending for ones awaiting approval, approval eq all for '
                       'both. For how many investors / people / portfolios use the portfolios entity instead. renewals = '
                       'times the investment was renewed; referred_by = who brought them into the club', 'fields': {
@@ -271,7 +275,7 @@ def _entities():
             'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
             'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),
             'interest_payout': ('interest_payout', 'choice'), 'return_pct': ('total_return_pct', 'number'),
-            'status': ('status', 'choice'), 'approval': ('approval_status', 'choice'),
+            'status': ('_status_shown', 'choice'), 'approval': ('approval_status', 'choice'),
             'added_by': ('added_by__name', 'text'),
             'approved_by': ('approved_by__name', 'text'), 'approved_on': ('approved_at', 'date'),
             'referred_by': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
@@ -308,6 +312,33 @@ def _entities():
             'maturity': ('maturity', 'date'), 'principal': ('principal', 'money'), 'interest': ('interest', 'money'),
             'total_payouts': ('total_payouts', 'money'), 'paid_out': ('paid_out', 'money'),
             'to_pay': ('to_pay', 'money'), 'due_now': ('due_now', 'money'),
+        }},
+        'club_approvals': {'module': ('Club 1000',), 'rows_fn': approval_rows, 'date': 'date',
+                           'note': 'Club 1000 Approvals screen. status pending = waiting for an approver (the Pending tab): '
+                           'kind new investment / revision / renewal / undo renewal request; stage waiting for approval '
+                           '(one-level scheme) / waiting for level 1 / waiting for level 2 (level1_by approved it, a level 2 '
+                           'approver gives the final approval). status rejected = turned down (kind new investment, '
+                           'revision, renewal or undo renewal request, with reason and by whom; a rejected revision / '
+                           'renewal leaves the investment on its old terms); status undone = a renewal undone after it '
+                           'was approved. The Rejected tab lists investments, so count distinct loi_no for it. by = who '
+                           'submitted / requested (pending) or who rejected.',
+                           'fields': {
+            'investor': ('investor', 'text'), 'phone': ('phone', 'text'), 'loi_no': ('loi_no', 'text'),
+            'scheme': ('scheme', 'text'), 'status': ('status', 'choice'), 'kind': ('kind', 'choice'),
+            'stage': ('stage', 'text'), 'level1_by': ('level1_by', 'text'), 'by': ('by', 'text'),
+            'reason': ('reason', 'text'), 'date': ('date', 'date'), 'amount': ('amount', 'money'),
+            'proposed_amount': ('proposed_amount', 'money'),
+        }},
+        'club_schemes': {'module': ('Club 1000',), 'rows_fn': scheme_rows,
+                         'note': 'Club 1000 Schemes and who approves each: level1_approvers approve first; when '
+                         'level2_approvers are set (approval_levels 2) their approval is the final one. No level 1 '
+                         'approvers = only admins approve. rates = annual return % per payout option.',
+                         'fields': {
+            'scheme': ('scheme', 'text'), 'active': ('active', 'choice'), 'tenure_months': ('tenure_months', 'number'),
+            'min_ticket': ('min_ticket', 'money'), 'payout_options': ('payout_options', 'text'), 'rates': ('rates', 'text'),
+            'principal_payout': ('principal_payout', 'choice'), 'premature_exit': ('premature_exit', 'choice'),
+            'level1_approvers': ('level1_approvers', 'text'), 'level2_approvers': ('level2_approvers', 'text'),
+            'approval_levels': ('approval_levels', 'number'),
         }},
         'referral_rewards': {'module': ('Club 1000',), 'view': ReferralRewardListView, 'date': 'earned',
                              'company': 'investor__company_id',
@@ -467,7 +498,10 @@ SYSTEM = (
     "At a renewal the ended term's unpaid interest is either paid to the investor or added to the renewal; a renewal "
     "settles the term it ends: its payouts show as paid with notes 'Settled to renewal R…' (or the older 'Added to "
     "renewal R…' / 'Settled at renewal R…') — call them settled to that renewal, not cash paid; '… added to the "
-    "principal' ones became principal (payouts entity: filter notes).\n\n"
+    "principal' ones became principal (payouts entity: filter notes). Approvals (pending, waiting for level 1 / "
+    "level 2, rejected renewals / revisions, undo-renewal requests): club_approvals. Who approves a scheme, level 1 / "
+    "level 2: club_schemes. Deleting an investor is done at once by a manager (no approval); only Undo renewal "
+    "goes to the approvers.\n\n"
     "Answering:\n"
     "- Query before you answer; for comparisons or 'why' questions run several queries (periods, "
     "projects, people, funnel steps) and compute rates yourself.\n"
@@ -498,6 +532,16 @@ def _lead_status_changes(leads_qs):
     from .models import LeadStatusHistory
     return LeadStatusHistory.objects.filter(lead__in=leads_qs.values('id'),
                                             field_changed__in=('telecaller_status', 'stm_status'))
+
+
+def _investor_status(qs):
+    """Club 1000 status as the dashboard counts it: an active investment past its
+    maturity date is due for renewal, not active (Investor.is_matured)."""
+    from datetime import date
+    from django.db.models import Case, CharField, F, Q, Value, When
+    return qs.annotate(_status_shown=Case(
+        When(Q(status='active') & Q(maturity_date__lte=date.today()), then=Value('due_for_renewal')),
+        default=F('status'), output_field=CharField()))
 
 
 def _booking_stage(qs):
@@ -793,7 +837,7 @@ def _run_rows(rows, fields, args, date_alias, list_cap=LIST_LIMIT, mask=True):
     if mode == 'list':
         cols = [c for c in (args.get('fields') or []) if c in fields] or list(fields)[:6]
         limit = max(1, min(list_cap, int(args.get('limit') or 25)))
-        order = args.get('order_by') or ('-' + date_alias)
+        order = args.get('order_by') or ('-' + date_alias if date_alias else '')
         oalias = order.lstrip('-')
         if oalias in fields:
             key, kind = fields[oalias]
@@ -864,7 +908,7 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
         args = {**args, 'filters': rest}
     qs, rows = _scoped(user, spec, args.get('book'), company_id, screen)
     if rows is not None:
-        return _run_rows(rows, fields, args, spec['date'], list_cap, mask)
+        return _run_rows(rows, fields, args, spec.get('date'), list_cap, mask)
     if 'stage' in fields and not any(f.get('field') == 'stage' and 'draft' in str(f.get('value')).lower()
                                      for f in args.get('filters') or []):
         qs = qs.exclude(_stage='draft')

@@ -114,7 +114,12 @@ class PortfolioTests(TestCase):
         q = lambda a: assistant.run_query(self.admin, None, a)
         screen = self.api.get('/api/club1000/investors/?approval_status=approved&status=active').data
         screen_n = len(screen) if isinstance(screen, list) else screen.get('count')
-        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'status', 'op': 'eq', 'value': 'active'}]})['total'], screen_n)
+        # The Investors screen's Active filter is the dashboard's active + due for renewal
+        # (both past maturity here, so the dashboard counts them Due for renewal).
+        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [
+            {'field': 'status', 'op': 'in', 'value': ['active', 'due_for_renewal']}]})['total'], screen_n)
+        self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [
+            {'field': 'status', 'op': 'eq', 'value': 'due_for_renewal'}]})['total'], 2)
         self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'approval', 'op': 'eq', 'value': 'pending'}]})['total'], 1)
         self.assertEqual(q({'entity': 'investors', 'mode': 'count', 'filters': [{'field': 'approval', 'op': 'eq', 'value': 'all'}]})['total'], 3)
         portfolios = self.api.get('/api/club1000/portfolios/').data
