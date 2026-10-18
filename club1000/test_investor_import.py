@@ -1,4 +1,4 @@
-"""Importing investors from Excel: checked row by row, saved as pending (Approvals)."""
+"""Importing investors from Excel: checked row by row, saved as drafts (Approvals → Drafts)."""
 import io
 from datetime import date
 from decimal import Decimal
@@ -62,7 +62,7 @@ class InvestorImportTests(TestCase):
         self.assertTrue(any('Scheme' in e for e in bad['errors']))
         self.assertEqual(Investor.objects.count(), 0)
 
-    def test_commit_saves_pending_investors(self):
+    def test_commit_saves_drafts(self):
         f = self._file([['A One', '9800000001', 'RISE', 500000, RECENT_S, 'quarterly', 'Ref', '9811111111'],
                         ['B Two', '9800000002', 'rise', '2,00,000', RECENT2_S, '', '', '']])
         r = self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
@@ -71,7 +71,7 @@ class InvestorImportTests(TestCase):
         by = {i.name: i for i in Investor.objects.all()}   # names are encrypted — match in Python
         a = by['A One']
         self.assertEqual((a.approval_status, a.interest_payout, a.amount_invested, a.investment_date, a.maturity_date),
-                         ('pending', 'quarterly', Decimal('500000'), RECENT, RECENT + relativedelta(months=12)))
+                         ('draft', 'quarterly', Decimal('500000'), RECENT, RECENT + relativedelta(months=12)))
         self.assertEqual(a.payouts.count(), 0)          # schedule waits for approval
         b = by['B Two']
         self.assertEqual((b.interest_payout, b.amount_invested), ('quarterly', Decimal('200000')))
@@ -120,3 +120,30 @@ class InvestorImportTests(TestCase):
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
         self.assertNotIn('Past Terms', wb.sheetnames)
         self.assertIn('Renewals are not imported', ' '.join(str(c.value or '') for row in wb['Help'].iter_rows() for c in row))
+
+    def test_imported_draft_goes_for_approval_once_its_signed_loi_is_attached(self):
+        import base64
+        f = self._file([['A One', '9800000001', 'RISE', 500000, RECENT_S, 'quarterly', '', '']])
+        self.api.post('/api/club1000/investors/import/', {'file': f, 'commit': 'true'}, format='multipart')
+        inv = Investor.objects.get()
+        drafts = self.api.get('/api/club1000/investors/', {'approval_status': 'draft'}).data
+        self.assertEqual([d['id'] for d in drafts], [inv.id])
+        self.assertEqual(self.api.get('/api/club1000/investors/', {'approval_status': 'pending'}).data, [])
+        self.assertNotEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'},
+                                          format='json').status_code, 200)        # a draft cannot be approved
+        r = self.api.post('/api/club1000/investors/', {
+            'draft_id': inv.id, 'scheme': self.scheme.id, 'name': 'A One', 'phone': '9800000001',
+            'amount_invested': '500000', 'investment_date': str(RECENT), 'interest_payout': 'quarterly', 'source': 'walk_in',
+            'loi_file': {'name': 'loi.pdf', 'type': 'application/pdf', 'data': base64.b64encode(b'%PDF-1.4 signed').decode()},
+        }, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+        inv.refresh_from_db()
+        self.assertEqual(Investor.objects.count(), 1)                                 # the same row, not a second one
+        self.assertEqual(inv.approval_status, 'pending')
+        self.assertTrue(inv.loi_document)
+
+    def test_importing_the_same_file_twice_is_caught_while_still_drafts(self):
+        row = ['A One', '9800000001', 'RISE', 500000, RECENT_S, 'quarterly', '', '']
+        self.api.post('/api/club1000/investors/import/', {'file': self._file([row]), 'commit': 'true'}, format='multipart')
+        r = self.api.post('/api/club1000/investors/import/', {'file': self._file([row])}, format='multipart')
+        self.assertTrue(any('Already in Nexora' in e for e in r.data['rows'][0]['errors']))

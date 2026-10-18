@@ -651,7 +651,8 @@ class InvestorListCreateView(APIView):
         )
         total_return_pct = ser.validated_data.get('total_return_pct')
         if total_return_pct is None:
-            total_return_pct = scheme.rate_for(interest_payout) or 0
+            # payout_rates holds text ("15.00") — make it a number before it is used.
+            total_return_pct = Decimal(str(scheme.rate_for(interest_payout) or 0))
 
         # Canonicalize the reference by phone number — free-typed names drift
         # ("chinmay" vs "Chinmay"), but a phone number is stable. If this phone

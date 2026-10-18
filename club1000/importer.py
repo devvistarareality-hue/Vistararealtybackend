@@ -3,9 +3,10 @@
 The template (InvestorImportTemplateView) has one row per investment with dropdowns
 for scheme, interest payout and source, two worked examples and a Help sheet. An
 upload (InvestorImportView) is read and checked row by row first — every problem is
-reported against its Excel row number — and only then saved. Each saved row is
-exactly what Add Investor makes: a pending investor that waits in Approvals, whose
-payout schedule, lead and referral reward are created when it is approved.
+reported against its Excel row number — and only then saved. Each saved row is a
+DRAFT, exactly like Add Investor → Save Draft: the signed LOI is attached in
+Approvals → Drafts → Edit & Submit, which sends it for approval (and tells the
+approvers); its payout schedule, lead and referral reward are created on approval.
 """
 import base64
 import io
@@ -151,7 +152,8 @@ class InvestorImportTemplateView(APIView):
             hlp.append([h, 'Yes' if required else '', d])
         hlp.append([])
         hlp.append(['Rows 2–3 are examples — replace or delete them.'])
-        hlp.append(['Each imported investor waits in Club 1000 → Approvals, like one added by hand.'])
+        hlp.append(['Each imported investor is saved as a DRAFT: open Club 1000 → Approvals → Drafts → Edit & Submit, '
+                    'attach the signed LOI and submit — only then does it go to the approvers.'])
         hlp.append(['Columns marked * (red) must be filled. A row with any of them empty is NOT imported — '
                     'it is listed with the reason so you can fix it and upload again.'])
         hlp.append(['One row per investment: its amount and its own Investment Date. Each one is a new investment '
@@ -236,7 +238,8 @@ def _check(rows, request):
     schemes = {s.name.strip().lower(): s for s in _schemes(request)}
     company = request.user.company
     existing = {}
-    for inv in Investor.objects.filter(company=company).exclude(approval_status__in=['rejected', 'draft']).only(
+    # Drafts count too: an import is saved as drafts, so uploading the same file twice is caught.
+    for inv in Investor.objects.filter(company=company).exclude(approval_status='rejected').only(
             'phone_key', 'scheme_id', 'investment_date', 'amount_invested', 'name'):
         existing.setdefault((inv.phone_key, inv.scheme_id, inv.investment_date), []).append(inv)
     seen = set()
@@ -317,7 +320,8 @@ class InvestorImportView(APIView):
       file        multipart upload, or {name, data(base64)} in JSON (the app)
       commit      false (default) = check only and report; true = save the rows
                   that passed (the rest are left out and listed)
-    Saved rows are pending investors in Approvals, exactly like Add Investor."""
+    Saved rows are drafts (Approvals → Drafts): each is sent for approval once its
+    signed LOI is attached there, exactly like an Add Investor draft."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -353,14 +357,13 @@ class InvestorImportView(APIView):
                         continue
                     d = c['data']
                     inv = Investor.objects.create(
-                        company=request.user.company, added_by=request.user, approval_status='pending', status='active',
+                        company=request.user.company, added_by=request.user, approval_status='draft', status='active',
                         **{k: v for k, v in d.items() if k != 'loi_no'}, loi_no=d['loi_no'],
                     )
                     created.append(inv)
                     c['investor_id'] = inv.id
-            _notify_import(request, created)
             from activity.recorder import note
-            note(request, f'Imported {len(created)} investor{"s" if len(created) != 1 else ""} from Excel for approval'
+            note(request, f'Imported {len(created)} investor{"s" if len(created) != 1 else ""} from Excel as drafts (signed LOI to attach, then submit)'
                           + (f' · {sum(1 for c in checked if not c["ok"])} rows left out' if any(not c['ok'] for c in checked) else ''),
                  action='import', target_type='investor', module='Club 1000')
         for c in checked:
@@ -374,29 +377,3 @@ class InvestorImportView(APIView):
             'created': len(created),
             'amount': str(sum((Decimal(c['preview']['amount'] or 0) for c in checked if c['ok']), Decimal('0'))),
         })
-
-
-def _notify_import(request, investors):
-    """One message per approver for the whole import, not one per row."""
-    if not investors:
-        return
-    try:
-        from notifications import notify, reporting_chain
-        from accounts.models import User
-        from django.db.models import Q
-        from sales.views import MANAGER_ROLES
-        company, me = request.user.company, request.user
-        ids = set()
-        for inv in investors:
-            ids.update(inv.scheme.investor_approvers or [])
-        recipients = list(User.objects.filter(id__in=ids, company=company, is_active=True)) if ids else []
-        if not recipients:
-            recipients = reporting_chain(me)
-        if not recipients:
-            recipients = list(User.objects.filter(company=company, is_active=True).filter(Q(role__in=MANAGER_ROLES) | Q(is_staff=True)))
-        total = sum((i.amount_invested or 0) for i in investors)
-        msg = f'{len(investors)} investor{"s" if len(investors) != 1 else ""} imported from Excel · ₹{int(total):,} — by {me.name}'
-        for u in {u.id: u for u in recipients if u and u.id != me.id}.values():
-            notify(u, 'investor_approval', 'Investors to approve', msg, {'investor_id': investors[0].id})
-    except Exception:
-        pass
