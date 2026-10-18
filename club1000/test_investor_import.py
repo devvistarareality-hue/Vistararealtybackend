@@ -152,3 +152,14 @@ class InvestorImportTests(TestCase):
         self.api.post('/api/club1000/investors/import/', {'file': self._file([row]), 'commit': 'true'}, format='multipart')
         r = self.api.post('/api/club1000/investors/import/', {'file': self._file([row])}, format='multipart')
         self.assertTrue(any('Already in Nexora' in e for e in r.data['rows'][0]['errors']))
+
+    def test_payout_dropdown_follows_the_scheme(self):
+        Scheme.objects.create(company=self.co, name='EQUITY', tenure_months=48, min_ticket_size=1,
+                              interest_payout_options=['maturity'], payout_rates={'maturity': '100'})
+        wb = openpyxl.load_workbook(io.BytesIO(self.api.get('/api/club1000/investors/import-template/').content))
+        lists = {r[0]: [v for v in r[6:9] if v] for r in wb['Lists'].iter_rows(values_only=True) if r[0]}
+        self.assertEqual(lists, {'EQUITY': ['maturity'], 'RISE': ['quarterly', 'maturity']})
+        self.assertEqual([r[1] for r in wb['Lists'].iter_rows(values_only=True) if r[1]], ['quarterly', 'maturity'])   # no monthly
+        dv = [d for d in wb['Investors'].data_validations.dataValidation if 'H2' in str(d.sqref)][0]
+        self.assertIn('OFFSET(Lists!$G$1', dv.formula1)
+        self.assertLess(len(dv.formula1), 255)           # Excel's limit for a list formula

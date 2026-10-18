@@ -34,7 +34,7 @@ COLUMNS = [
     ('scheme', 'Scheme', True, 'Pick from the list — must match a scheme exactly.'),
     ('amount_invested', 'Amount Invested', True, 'In rupees (paise allowed), no commas needed. At least the scheme\'s minimum ticket.'),
     ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) of this investment. Maturity is worked out from the scheme\'s tenure. Renewals are NOT imported — renew it on the website (Investors → Renew) after it is approved.'),
-    ('interest_payout', 'Interest Payout', False, 'monthly / quarterly / maturity — must be one the scheme offers. Blank = the scheme\'s first option.'),
+    ('interest_payout', 'Interest Payout', False, 'Pick from the list — it shows only what the chosen scheme offers (e.g. RISE: quarterly or maturity; the others: maturity). Blank = the scheme\'s first option.'),
     ('source', 'Source', False, 'referral / walk_in / website / other. Blank = referral.'),
     ('reference_name', 'Reference Name', False, 'Who referred them — earns the referral reward on approval.'),
     ('reference_phone', 'Reference Mobile', False, ''),
@@ -130,14 +130,25 @@ class InvestorImportTemplateView(APIView):
             lists.cell(row=i, column=4, value=s.tenure_months)
             lists.cell(row=i, column=5, value=pay_of(s))
             lists.cell(row=i, column=6, value=float(s.rate_for(pay_of(s)) or 0))
-        for i, p in enumerate(PAYOUTS, start=1):
+        # Column B: every payout any scheme offers (the list before a scheme is picked);
+        # from column G, each scheme's own options on its row — the Interest Payout
+        # dropdown shows only those of the scheme picked on that row.
+        offered = [p for p in PAYOUTS if any(p in (s.interest_payout_options or ['maturity']) for s in schemes)] or ['maturity']
+        for i, p in enumerate(offered, start=1):
             lists.cell(row=i, column=2, value=p)
+        for i, s in enumerate(schemes, start=1):
+            for j, p in enumerate([p for p in PAYOUTS if p in (s.interest_payout_options or ['maturity'])], start=7):
+                lists.cell(row=i, column=j, value=p)
         for i, s in enumerate(SOURCES, start=1):
             lists.cell(row=i, column=3, value=s)
         lists.sheet_state = 'hidden'
         col_of = {k: get_column_letter(i) for i, (k, _, _, _) in enumerate(COLUMNS, start=1)}
-        for key, src in (('scheme', f'Lists!$A$1:$A${max(1, len(schemes))}'),
-                         ('interest_payout', f'Lists!$B$1:$B${len(PAYOUTS)}'),
+        names = f'Lists!$A$1:$A${max(1, len(schemes))}'
+        sc_cell = f'${col_of["scheme"]}2'
+        row_of = f'MATCH({sc_cell},{names},0)-1'
+        own = f'OFFSET(Lists!$G$1,{row_of},0,1,COUNTIF(OFFSET(Lists!$G$1,{row_of},0,1,3),"?*"))'
+        payout_list = f'IF(ISNA(MATCH({sc_cell},{names},0)),Lists!$B$1:$B${len(offered)},{own})'
+        for key, src in (('scheme', names), ('interest_payout', payout_list),
                          ('source', f'Lists!$C$1:$C${len(SOURCES)}')):
             dv = DataValidation(type='list', formula1=src, allow_blank=True)
             ws.add_data_validation(dv)
