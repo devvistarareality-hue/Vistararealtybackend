@@ -33,7 +33,7 @@ MODULES = {
 VERBS = {
     'approve': 'Approved', 'reject': 'Rejected', 'cancel': 'Cancelled', 'withdraw': 'Withdrew',
     'created': 'Created', 'updated': 'Updated', 'deleted': 'Deleted', 'discard': 'Discarded',
-    'mark-paid': 'Marked paid', 'mark-unpaid': 'Undid paid on', 'mature-payout': 'Paid out and closed', 'redeem': 'Redeemed', 'renew': 'Renewed', 'revise': 'Revised',
+    'mark-paid': 'Marked paid', 'mark-unpaid': 'Undid paid on', 'delete-refused': 'Refused to delete', 'loi-upload': 'Uploaded the signed LOI for', 'mature-payout': 'Paid out and closed', 'redeem': 'Redeemed', 'renew': 'Renewed', 'revise': 'Revised',
     'done': 'Completed', 'cancelled': 'Cancelled',
 }
 # Request fields worth keeping the value of (short, not personal). Everything else
@@ -43,9 +43,13 @@ KEEP_VALUES = {'action', 'status', 'stm_status', 'approval_status', 'reason', 'r
 SECRET = re.compile(r'pass|otp|token|secret|pin$|aadhaar|pan_|account_no|ifsc', re.I)
 
 
-def note(request, summary, action=None, target_type=None, target_id=None, module=None, details=None):
-    """Describe the change this request made; the middleware writes it."""
+def note(request, summary, action=None, target_type=None, target_id=None, module=None, details=None, even_if_refused=False):
+    """Describe the change this request made; the middleware writes it. A refused
+    request is not logged unless `even_if_refused` (an attempt worth keeping, such as
+    a delete that money already paid out blocked)."""
     raw = getattr(request, '_request', request)
+    if even_if_refused:
+        raw._activity_even_if_refused = True
     raw._activity = {k: v for k, v in {
         'summary': summary, 'action': action, 'target_type': target_type,
         'target_id': target_id, 'module': module, 'details': details}.items() if v not in (None, '')}
@@ -233,7 +237,9 @@ class ActivityLogMiddleware:
         return response
 
     def _record(self, request, response, body, captured=(), plots=''):
-        if response.status_code >= 400 or getattr(request, '_activity_skip', False):
+        if getattr(request, '_activity_skip', False):
+            return
+        if response.status_code >= 400 and not getattr(request, '_activity_even_if_refused', False):
             return
         user = getattr(request, 'user', None)
         if not (user and getattr(user, 'is_authenticated', False)):

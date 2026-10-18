@@ -769,29 +769,41 @@ class InvestorDetailView(APIView):
         investor = self._get(request, pk)
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-        refused = _delete_investor(request, investor)
-        if refused:
-            return Response({'detail': refused}, status=status.HTTP_409_CONFLICT)
+        include_paid = str(request.query_params.get('include_paid') or request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
+        why, (n_pay, amt_pay, n_rew, amt_rew) = _delete_investor(request, investor, include_paid)
+        if why:
+            # The screen asks "delete these payments too?" and sends include_paid.
+            return Response({'detail': why, 'code': 'has_paid', 'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
+                             'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)}, status=status.HTTP_409_CONFLICT)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-def _delete_investor(request, investor):
-    """Delete one investment; returns why not, or None once it is gone.
+def _paid_on(investor):
+    """What has already been paid out on an investment: (payouts, ₹, rewards, ₹)."""
+    amt = lambda o: o.paid_amount if o.paid_amount is not None else (getattr(o, 'amount_due', None) or getattr(o, 'amount', None) or Decimal('0'))
+    pays = [p for p in investor.payouts.all() if p.status == 'paid']
+    rews = [r for r in investor.referral_rewards.all() if r.status == 'paid']
+    return (len(pays), sum((amt(p) for p in pays), Decimal('0')), len(rews), sum((amt(r) for r in rews), Decimal('0')))
 
-    Refused once money has moved (a payout or referral reward marked paid): those
-    are books of record, so the payment is undone first, or the investment is closed
-    by Redeem / Payout instead. Its schedule, rewards and stored documents go with
-    it, and its lead stops reading Converted — it reads Investor Deleted."""
-    paid = investor.payouts.filter(status='paid').count()
-    paid_rewards = investor.referral_rewards.filter(status='paid').count()
-    if paid or paid_rewards:
+
+def _delete_investor(request, investor, include_paid=False):
+    """Delete one investment; returns (why not, what was paid) or (None, what was paid)
+    once it is gone. Its schedule, rewards and stored documents go with it, and its lead
+    stops reading Converted — it reads Investor Deleted.
+
+    Money already paid out (payouts or referral rewards marked paid) is a book of
+    record, so the delete stops and says so unless `include_paid` — the person has
+    been shown what will go and confirmed it; then those payments go too and the log
+    keeps what they were."""
+    n_pay, amt_pay, n_rew, amt_rew = paid = _paid_on(investor)
+    if (n_pay or n_rew) and not include_paid:
         bits = []
-        if paid:
-            bits.append(f'{paid} payout{"s" if paid != 1 else ""}')
-        if paid_rewards:
-            bits.append(f'{paid_rewards} referral reward{"s" if paid_rewards != 1 else ""}')
-        return (f'{" and ".join(bits)} for this investor {"are" if paid + paid_rewards > 1 else "is"} already paid. '
-                'Undo those payments first, or close the investment with Redeem / Payout instead.')
+        if n_pay:
+            bits.append(f'{n_pay} payout{"s" if n_pay != 1 else ""} (₹{amt_pay:,.0f})')
+        if n_rew:
+            bits.append(f'{n_rew} referral reward{"s" if n_rew != 1 else ""} (₹{amt_rew:,.0f})')
+        why = f'{" and ".join(bits)} for this investor {"are" if n_pay + n_rew > 1 else "is"} already paid.'
+        return why, paid
     from activity.recorder import note
     pk = investor.pk
     label = f'{investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · {investor.scheme.name} · ₹{investor.amount_invested:,.0f}'
@@ -809,8 +821,14 @@ def _delete_investor(request, investor):
             f.storage.delete(f.name)
         except Exception:
             pass
-    note(request, f'Deleted investor — {label}', action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
-    return None
+    gone = []
+    if n_pay:
+        gone.append(f'{n_pay} paid payout{"s" if n_pay != 1 else ""} (₹{amt_pay:,.0f})')
+    if n_rew:
+        gone.append(f'{n_rew} paid referral reward{"s" if n_rew != 1 else ""} (₹{amt_rew:,.0f})')
+    note(request, f'Deleted investor — {label}' + (f' · with {" and ".join(gone)} deleted too' if gone else ''),
+         action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
+    return None, paid
 
 
 class InvestorBulkDeleteView(APIView):
@@ -831,6 +849,7 @@ class InvestorBulkDeleteView(APIView):
             return Response({'detail': 'ids must be a list of investor ids.'}, status=status.HTTP_400_BAD_REQUEST)
         if not ids:
             return Response({'detail': 'Pick at least one investor.'}, status=status.HTTP_400_BAD_REQUEST)
+        include_paid = str(request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
         found = {i.pk: i for i in _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)}
         deleted, refused = [], []
         for pk in ids:
@@ -839,12 +858,24 @@ class InvestorBulkDeleteView(APIView):
                 refused.append({'id': pk, 'name': '', 'reason': 'Not found.'})
                 continue
             name = inv.name
-            why = _delete_investor(request, inv)
+            why, (n_pay, amt_pay, n_rew, amt_rew) = _delete_investor(request, inv, include_paid)
             if why:
-                refused.append({'id': pk, 'name': name, 'reason': why})
+                refused.append({'id': pk, 'name': name, 'reason': why, 'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
+                                'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)})
             else:
-                deleted.append(pk)
-        return Response({'deleted': deleted, 'refused': refused})
+                deleted.append({'id': pk, 'name': name})
+        # One entry for the whole action — every investor deleted, and every one refused
+        # with why (each delete above replaced the previous note, so this is the record).
+        from activity.recorder import note
+        parts = []
+        if deleted:
+            parts.append(f'Deleted {len(deleted)} investor{"s" if len(deleted) != 1 else ""} — ' + ', '.join(d['name'] for d in deleted))
+        if refused:
+            parts.append(f'kept {len(refused)} (payments already made — not confirmed) — ' + ', '.join(r['name'] or f'#{r["id"]}' for r in refused))
+        if parts:
+            note(request, ' · '.join(parts), action='deleted' if deleted else 'delete-refused', target_type='investor',
+                 module='Club 1000', details={'deleted': [d['id'] for d in deleted], 'refused': [r['id'] for r in refused]})
+        return Response({'deleted': [d['id'] for d in deleted], 'refused': refused})
 
 
 class InvestorLedgerView(APIView):

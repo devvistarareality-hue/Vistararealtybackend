@@ -54,3 +54,30 @@ class BulkDeleteTests(TestCase):
         a = self._inv('A', '9800000001')
         self.assertEqual(api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk]}, format='json').status_code, 403)
         self.assertTrue(Investor.objects.filter(pk=a.pk).exists())
+
+    def test_paid_investor_asks_first_then_deletes_its_payouts_too(self):
+        from activity.models import ActivityLog
+        c = self._inv('C', '9800000003')
+        Payout.objects.create(investor=c, payout_type='interest', due_date=date(2025, 4, 1), amount_due=Decimal('100'),
+                              status='paid', paid_amount=Decimal('100'))
+        Payout.objects.create(investor=c, payout_type='maturity', due_date=date(2026, 1, 1), amount_due=Decimal('100000'))
+        r = self.api.delete(f'/api/club1000/investors/{c.pk}/')
+        self.assertEqual((r.status_code, r.json()['code'], r.json()['paid_payouts']), (409, 'has_paid', 1))
+        self.assertTrue(Investor.objects.filter(pk=c.pk).exists())                 # nothing gone without the OK
+        r = self.api.delete(f'/api/club1000/investors/{c.pk}/?include_paid=1')
+        self.assertEqual(r.status_code, 204)
+        self.assertFalse(Investor.objects.filter(pk=c.pk).exists())
+        self.assertFalse(Payout.objects.filter(investor_id=c.pk).exists())
+        log = ActivityLog.objects.filter(action='deleted', target_id=str(c.pk)).first()
+        self.assertIn('with 1 paid payout (₹100) deleted too', log.summary)
+
+    def test_bulk_delete_logs_everyone(self):
+        from activity.models import ActivityLog
+        a, b, c = self._inv('Aa', '9800000001'), self._inv('Bb', '9800000002'), self._inv('Cc', '9800000003')
+        Payout.objects.create(investor=c, payout_type='interest', due_date=date(2025, 4, 1), amount_due=Decimal('100'), status='paid')
+        self.api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk, b.pk, c.pk]}, format='json')
+        log = ActivityLog.objects.filter(module='Club 1000', path__icontains='bulk-delete').latest('created_at')
+        self.assertIn('Deleted 2 investors — Aa, Bb', log.summary)
+        self.assertIn('kept 1', log.summary)
+        r = self.api.post('/api/club1000/investors/bulk-delete/', {'ids': [c.pk], 'include_paid': True}, format='json')
+        self.assertEqual(r.json()['deleted'], [c.pk])
