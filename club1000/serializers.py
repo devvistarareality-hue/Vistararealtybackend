@@ -169,11 +169,32 @@ class PayoutSerializer(serializers.ModelSerializer):
     # shows who to pay and their LOI alongside the money.
     investor_phone = serializers.CharField(source='investor.phone', read_only=True, default='')
     investor_loi_no = serializers.CharField(source='investor.loi_no', read_only=True, default='')
+    # Which term of a renewed investment it belongs to (0 = the original) — the Pay
+    # and Paid lists group by it, so an old term's payouts stay traceable.
+    term_no = serializers.SerializerMethodField()
+    term_label = serializers.SerializerMethodField()
+
+    def _term(self, obj):
+        from .services import term_list, term_of
+        cache = self.context.setdefault('_terms', {}) if isinstance(self.context, dict) else {}
+        terms = cache.get(obj.investor_id)
+        if terms is None:
+            terms = cache[obj.investor_id] = term_list(obj.investor)
+        no = term_of(terms, obj.due_date)
+        return no, next((t['label'] for t in terms if t['no'] == no), ''), len(terms)
+
+    def get_term_no(self, obj):
+        return self._term(obj)[0]
+
+    def get_term_label(self, obj):
+        no, label, n = self._term(obj)
+        return label if n > 1 else ''
 
     class Meta:
         model = Payout
         fields = [
             'id', 'investor', 'investor_name', 'investor_phone', 'investor_loi_no', 'scheme_name', 'payout_type', 'due_date',
+            'term_no', 'term_label',
             'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'balance_of', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due', 'balance_of',

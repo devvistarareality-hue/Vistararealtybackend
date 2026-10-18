@@ -25,7 +25,8 @@ from .serializers import (
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
-from .services import generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods
+from .services import (generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
+                       close_term, term_list, term_of)
 
 
 def _company_filtered(qs, request, field='company'):
@@ -864,16 +865,24 @@ class InvestorLedgerView(APIView):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         payout_labels = dict(PAYOUT_TYPE_CHOICES)
+        # Each term (the original investment and every renewal) is its own ledger:
+        # its entries carry `term`, and `terms` gives each one's own figures.
+        terms = term_list(investor)
         entries = [{
             'type': 'investment',
             'payout_id': None,
-            'date': str(investor.investment_date),
-            'label': f'Investment — {investor.scheme.name}',
-            'amount': str(investor.amount_invested),
+            'date': str(t['start']),
+            'label': (f'Investment — {investor.scheme.name}' if t['no'] == 0 else f'Renewal {t["no"]} — {investor.scheme.name}'),
+            'amount': str(t['principal']),
             'paid_amount': None,
             'status': 'completed',
-            'paid_date': str(investor.investment_date),
+            'paid_date': str(t['start']),
             'notes': '',
+            'term': t['no'],
+        } for t in terms] or [{
+            'type': 'investment', 'payout_id': None, 'date': str(investor.investment_date),
+            'label': f'Investment — {investor.scheme.name}', 'amount': str(investor.amount_invested),
+            'paid_amount': None, 'status': 'completed', 'paid_date': str(investor.investment_date), 'notes': '', 'term': 0,
         }]
         total_due = Decimal('0')
         total_paid = Decimal('0')
@@ -896,6 +905,7 @@ class InvestorLedgerView(APIView):
                 'period': {k: (str(v) if not isinstance(v, int) else v) for k, v in periods[p.id].items()} if p.id in periods else None,
                 'is_balance': bool(p.balance_of_id),
                 'due_date': str(p.due_date),
+                'term': term_of(terms, p.due_date),
                 '_id': p.id,
             })
             total_due += p.amount_due
@@ -929,10 +939,27 @@ class InvestorLedgerView(APIView):
             'total_paid': str(total_paid),
             'total_pending': str(total_due - total_paid),
         }
+        def _term_summary(t):
+            mine = [p for p in all_payouts if term_of(terms, p.due_date) == t['no']]
+            amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
+            due = sum((p.amount_due or Decimal('0') for p in mine), Decimal('0'))
+            paid = sum((amt(p) or Decimal('0') for p in mine if p.status == 'paid'), Decimal('0'))
+            back = sum((p.amount_due or Decimal('0') for p in mine if p.payout_type != 'interest'), Decimal('0'))
+            interest = sum((p.amount_due or Decimal('0') for p in mine if p.payout_type == 'interest'), Decimal('0')) \
+                + max(back - t['principal'], Decimal('0'))
+            return {
+                'principal': str(t['principal']), 'interest': str(interest), 'total': str(due),
+                'due_till_today': str(sum((p.amount_due or Decimal('0') for p in mine if p.due_date <= today), Decimal('0'))),
+                'paid_out': str(paid), 'pending': str(due - paid),
+                'upcoming_interest': str(sum((p.amount_due or Decimal('0') for p in mine if p.payout_type == 'interest'
+                                              and p.status == 'pending' and p.due_date > today), Decimal('0'))),
+            }
         return Response({
             'investor': InvestorListSerializer(investor).data,
             'summary': summary,
             'entries': entries,
+            'terms': [{'no': t['no'], 'label': t['label'], 'start': str(t['start']), 'maturity': str(t['maturity']),
+                       'principal': str(t['principal']), 'current': t['current'], 'summary': _term_summary(t)} for t in terms],
         })
 
 
@@ -2121,6 +2148,10 @@ class InvestorActionView(APIView):
             if is_revision:
                 pr = investor.pending_revision or {}
                 old_principal = investor.amount_invested or Decimal('0')
+                # The term as it stood — kept as a past term if this is a renewal.
+                finished = {'start': investor.investment_date.isoformat(), 'maturity': investor.maturity_date.isoformat(),
+                            'principal': str(old_principal), 'return_pct': str(investor.total_return_pct or 0),
+                            'interest_payout': investor.interest_payout} if investor.investment_date and investor.maturity_date else None
                 if 'amount_invested' in pr:
                     investor.amount_invested = Decimal(str(pr['amount_invested']))
                 if 'total_return_pct' in pr:
@@ -2189,15 +2220,20 @@ class InvestorActionView(APIView):
                 # Regenerate the payout schedule from the revised terms — only
                 # still-pending entries; anything already paid is left untouched.
                 if is_renewal:
-                    # Renewal: the old term's unpaid interest is still owed, so it
-                    # stays on Payouts. Only the old principal rolls over; renewing
-                    # for less pays the difference out on the renewal date.
+                    # Renewal: the finished term is kept (its ledger and payouts stay
+                    # readable as their own term). Its unpaid interest is still owed;
+                    # its maturity payout — principal (+ interest for an at-maturity
+                    # scheme) — becomes what really happens at a renewal: the interest
+                    # paid out (less any rolled into a bigger renewal) and the principal
+                    # paid back when renewing for less. The rest rolls over.
+                    paid_mat = bool(finished) and Payout.objects.filter(
+                        investor=investor, payout_type='maturity', status='paid',
+                        due_date=date.fromisoformat(finished['maturity'])).exists()
                     Payout.objects.filter(investor=investor, status='pending', payout_type='maturity').delete()
-                    returned = (old_principal - investor.amount_invested).quantize(Decimal('0.01'))
-                    if returned > 0:
-                        Payout.objects.create(investor=investor, payout_type='maturity',
-                                              due_date=investor.investment_date, amount_due=returned,
-                                              notes='Principal returned on renewal')
+                    if finished:
+                        investor.past_terms = (investor.past_terms or []) + [finished]
+                        investor.save(update_fields=['past_terms'])
+                        close_term(investor, finished, investor.amount_invested or Decimal('0'), maturity_paid=paid_mat)
                 else:
                     Payout.objects.filter(investor=investor, status='pending').delete()
                 generate_payout_schedule(investor, custom_entries=payout_schedule)

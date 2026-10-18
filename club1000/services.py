@@ -270,6 +270,58 @@ def money_in(investor):
     return total
 
 
+def term_list(investor):
+    """Every term of an investment, oldest first, the running one last:
+    [{no, start, maturity, principal, label}] — no 0 is the original investment."""
+    out = []
+    for n, t in enumerate(investor.past_terms or []):
+        out.append({'no': n, 'start': date.fromisoformat(t['start']), 'maturity': date.fromisoformat(t['maturity']),
+                    'principal': Decimal(str(t['principal'])), 'current': False})
+    if investor.investment_date and investor.maturity_date:
+        out.append({'no': len(out), 'start': investor.investment_date, 'maturity': investor.maturity_date,
+                    'principal': investor.amount_invested or Decimal('0'), 'current': True})
+    for t in out:
+        span = f'{t["start"]:%Y}–{t["maturity"]:%y}' if t['start'].year != t['maturity'].year else f'{t["start"]:%Y}'
+        name = 'Original' if t['no'] == 0 else 'Renewal %d' % t['no']
+        t['label'] = f'{name} · {span}'
+    return out
+
+
+def term_of(terms, due_date):
+    """Which term a payout belongs to: the last one that had started before it fell due
+    (a term's own maturity payout falls on the day the next one starts)."""
+    pick = 0
+    for t in terms:
+        if due_date and t['start'] < due_date:
+            pick = t['no']
+    return pick
+
+
+def close_term(investor, term, next_principal, maturity_paid=False):
+    """On a renewal: the term just finished, as its payouts should stand — its
+    at-maturity interest (less whatever was rolled into a larger renewal) and the
+    principal paid back when it renewed for less. Quarterly / monthly interest
+    instalments of that term are already on the books."""
+    principal, pct = Decimal(str(term['principal'])), Decimal(str(term.get('return_pct') or 0))
+    start, maturity = date.fromisoformat(term['start']), date.fromisoformat(term['maturity'])
+    at_maturity = (term.get('interest_payout') or 'maturity') not in ('quarterly', 'monthly')
+    rows = []
+    label = f'Term ending {maturity:%d-%m-%Y}'
+    if at_maturity and not maturity_paid:
+        interest = maturity_value(principal, pct, start, maturity) - principal
+        rolled = max(Decimal('0'), min(interest, next_principal - principal))
+        if interest - rolled > 0:
+            rows.append(Payout(investor=investor, payout_type='interest', due_date=maturity,
+                               amount_due=(interest - rolled).quantize(Decimal('0.01')),
+                               notes=label + (f' · ₹{rolled:,.0f} of the interest renewed' if rolled else '')))
+    returned = (principal - next_principal).quantize(Decimal('0.01'))
+    if returned > 0 and not maturity_paid:
+        rows.append(Payout(investor=investor, payout_type='maturity', due_date=maturity, amount_due=returned,
+                           notes=label + ' · principal returned on renewal'))
+    Payout.objects.bulk_create(rows)
+    return rows
+
+
 def generate_past_term_payouts(investor):
     """Payouts for the finished terms of an imported old investment — what an
     in-app renewal leaves behind: every interest instalment of each term, and

@@ -82,8 +82,26 @@ class SettlementFlowTests(TestCase):
         r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
         self.assertTrue(Payout.objects.filter(pk=old_int.pk, status='pending').exists(), 'old unpaid interest was wiped')
-        returned = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=date.today(), status='pending')
-        self.assertEqual([p.amount_due for p in returned], [Decimal('20000.00')])
+        old_maturity = inv.maturity_date
+        returned = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=old_maturity, status='pending')
+        self.assertEqual([p.amount_due for p in returned], [Decimal('20000.00')])     # on the finished term's maturity
+        inv.refresh_from_db()
+        self.assertEqual([t['start'] for t in inv.past_terms], [str(date.today() - relativedelta(months=25))])
+
+    def test_renewing_an_at_maturity_term_keeps_its_interest(self):
+        inv = self._inv(date.today() - relativedelta(months=25))
+        Investor.objects.filter(pk=inv.pk).update(interest_payout='maturity')
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('130000'))
+        Investor.objects.filter(pk=inv.pk).update(
+            approval_status='pending', pending_revision_type='renew',
+            pending_revision={'amount_invested': '100000', 'investment_date': str(date.today()), 'interest_payout': 'maturity'})
+        old_maturity = inv.maturity_date
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
+        old = list(Payout.objects.filter(investor=inv, due_date=old_maturity).values_list('payout_type', 'amount_due'))
+        self.assertEqual(old, [('interest', Decimal('30000.00'))])                   # the 30% earned is not lost
+        d = self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data
+        self.assertEqual([t['label'].split(' · ')[0] for t in d['terms']], ['Original', 'Renewal 1'])
+        self.assertEqual({e['term'] for e in d['entries'] if e.get('due_date') == str(old_maturity)}, {0})
 
     def test_history_counts_renewals_and_lists_payments(self):
         inv = self._inv(date.today() - relativedelta(months=25))
