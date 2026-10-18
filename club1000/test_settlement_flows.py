@@ -160,3 +160,22 @@ class SettlementFlowTests(TestCase):
         api = APIClient(); api.force_authenticate(staff)
         self.assertEqual(api.delete(f'/api/club1000/investors/{inv.pk}/').status_code, 403)
         self.assertTrue(Investor.objects.filter(pk=inv.pk).exists())
+
+    def test_ask_nexora_terms_match_the_ledger_tabs(self):
+        from sales import assistant
+        inv = self._inv(date.today() - relativedelta(months=25))
+        Investor.objects.filter(pk=inv.pk).update(interest_payout='maturity')
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('130000'))
+        Investor.objects.filter(pk=inv.pk).update(
+            approval_status='pending', pending_revision_type='renew',
+            pending_revision={'amount_invested': '100000', 'investment_date': str(date.today()), 'interest_payout': 'maturity'})
+        self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
+        ledger = self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data['terms']
+        rows = assistant.run_query(self.admin, None, {'entity': 'investment_terms', 'mode': 'list', 'limit': 50,
+                                                      'fields': ['term', 'kind', 'interest', 'current']})['rows']
+        by = {r['term']: r for r in rows}
+        self.assertEqual(sorted(by), sorted(t['label'] for t in ledger))
+        first = ledger[0]
+        self.assertEqual(by[first['label']]['kind'], 'original')
+        self.assertEqual(Decimal(str(by[first['label']]['interest']).replace('₹', '').replace(',', '')),
+                         Decimal(first['summary']['interest']))

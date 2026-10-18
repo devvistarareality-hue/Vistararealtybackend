@@ -280,9 +280,13 @@ def term_list(investor):
     if investor.investment_date and investor.maturity_date:
         out.append({'no': len(out), 'start': investor.investment_date, 'maturity': investor.maturity_date,
                     'principal': investor.amount_invested or Decimal('0'), 'current': True})
+    # Renewals made before terms were kept left no record of the earlier ones: count
+    # from the renewal number so the running term still reads 'Renewal N'.
+    offset = max(0, (investor.renewal_count or 0) - len(investor.past_terms or []))
     for t in out:
         span = f'{t["start"]:%Y}–{t["maturity"]:%y}' if t['start'].year != t['maturity'].year else f'{t["start"]:%Y}'
-        name = 'Original' if t['no'] == 0 else 'Renewal %d' % t['no']
+        t['renewal_no'] = t['no'] + offset
+        name = 'Original' if t['renewal_no'] == 0 else 'Renewal %d' % t['renewal_no']
         t['label'] = f'{name} · {span}'
     return out
 

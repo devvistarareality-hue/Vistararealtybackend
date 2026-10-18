@@ -111,6 +111,7 @@ def _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone):
         'awaiting_approval': sum(1 for i in person if i.approval_status == 'pending'),
         'renewals': renewals,
         'times_invested': len(approved) + renewals,
+        'added_more': max(len(approved) - 1, 0),     # extra investments beyond the first ('Add more')
         'schemes': [{'scheme': k, 'count': v['count'], 'active': str(v['active']), 'total': str(v['total'])}
                     for k, v in sorted(schemes.items(), key=lambda kv: -kv[1]['active'])],
         'active_amount': str(sum((_money(i.amount_invested) for i in approved if i.status == 'active'), Decimal('0'))),
@@ -218,3 +219,44 @@ class PortfolioDetailView(APIView):
                               else 'pending' if reward_of.get(r.pk) else ''),
         } for r in sorted(referred, key=lambda r: (r.investment_date or person[0].investment_date), reverse=True)]
         return Response(out)
+
+
+def term_rows(user, company_id=None):
+    """Ask Nexora's investment_terms: one row per term of every investment the person
+    can see — the original and each renewal — with that term's own money, exactly as
+    the Ledger's term tabs show it."""
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    from rest_framework.request import Request
+    from .services import term_list, term_of
+    from .views import _investor_visibility_qs
+    raw = APIRequestFactory().get('/ai/', {'company_id': str(company_id)} if company_id else {})
+    force_authenticate(raw, user=user)
+    raw.user = user
+    request = Request(raw)
+    request._force_auth_user = user
+    request.user = user
+    investors = list(_investor_visibility_qs(request).filter(approval_status='approved').select_related('scheme'))
+    payouts = defaultdict(list)
+    for p in Payout.objects.filter(investor_id__in=[i.pk for i in investors]):
+        payouts[p.investor_id].append(p)
+    today = date.today()
+    rows = []
+    for inv in investors:
+        terms = term_list(inv)
+        for t in terms:
+            mine = [p for p in payouts.get(inv.pk, []) if term_of(terms, p.due_date) == t['no']]
+            amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
+            due = sum((_money(p.amount_due) for p in mine), Decimal('0'))
+            paid = sum((_money(amt(p)) for p in mine if p.status == 'paid'), Decimal('0'))
+            back = sum((_money(p.amount_due) for p in mine if p.payout_type != 'interest'), Decimal('0'))
+            interest = sum((_money(p.amount_due) for p in mine if p.payout_type == 'interest'), Decimal('0')) \
+                + max(back - t['principal'], Decimal('0'))
+            rows.append({
+                'investor': inv.name, 'phone': inv.phone, 'loi_no': inv.loi_no or '', 'scheme': inv.scheme.name,
+                'term_no': t['renewal_no'], 'term': t['label'], 'kind': 'original' if t['renewal_no'] == 0 else 'renewal',
+                'current': 'yes' if t['current'] else 'no', 'start': t['start'], 'maturity': t['maturity'],
+                'principal': str(t['principal']), 'interest': str(interest), 'total_payouts': str(due),
+                'paid_out': str(paid), 'to_pay': str(due - paid),
+                'due_now': str(sum((_money(p.amount_due) for p in mine if p.status != 'paid' and p.due_date <= today), Decimal('0'))),
+            })
+    return rows

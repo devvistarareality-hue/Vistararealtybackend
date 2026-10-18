@@ -122,7 +122,7 @@ def _entities():
     from attendance.views import TeamLeaveRequestsView
     from club1000.views import (InvestorListCreateView, PayoutListView, ReferralRewardListView,
                                 LeadListCreateView as C1LeadListView, FollowUpListCreateView as C1FollowUpListView)
-    from club1000.portfolio import PortfolioListView
+    from club1000.portfolio import PortfolioListView, term_rows
     from receivables.collections import ARFollowUpListView
     from receivables.views import ARRegisterView
     from tasks.views import TasksView
@@ -276,6 +276,7 @@ def _entities():
             'approved_by': ('approved_by__name', 'text'), 'approved_on': ('approved_at', 'date'),
             'referred_by': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
             'renewals': ('renewal_count', 'number'), 'first_invested': ('first_invested_on', 'date'),
+            'current_term_start': ('investment_date', 'date'),
         }},
         'portfolios': {'module': ('Club 1000',), 'view': PortfolioListView, 'rows': True, 'date': 'since',
                        'note': 'one row per PERSON (mobile number) — exactly the Investor Portfolios screen: how many '
@@ -285,6 +286,7 @@ def _entities():
                        'fields': {
             'name': ('name', 'text'), 'names': ('names', 'text'), 'phone': ('phone', 'text'), 'since': ('since', 'date'),
             'investments': ('investments', 'number'), 'renewals': ('renewals', 'number'),
+            'added_more': ('added_more', 'number'),
             'times_invested': ('times_invested', 'number'), 'awaiting_approval': ('awaiting_approval', 'number'),
             'schemes': ('schemes', 'text'), 'active_amount': ('active_amount', 'money'),
             'total_invested': ('total_invested', 'money'), 'paid_out': ('paid_out', 'money'),
@@ -294,6 +296,18 @@ def _entities():
             'principal_pending': ('principal_pending', 'money'), 'interest_pending': ('interest_pending', 'money'),
             'referrals': ('referrals', 'number'), 'referred_amount': ('referred_amount', 'money'),
             'rewards_earned': ('rewards_earned', 'money'), 'rewards_paid': ('rewards_paid', 'money'),
+        }},
+        'investment_terms': {'module': ('Club 1000',), 'rows_fn': term_rows, 'date': 'start',
+                             'note': 'one row per TERM of every approved investment — the original (term_no 0, kind '
+                             'original) and each renewal (kind renewal), as the Ledger term tabs show it: its dates, '
+                             'principal, interest, payouts, paid out, to pay and due now. current = the term running now.',
+                             'fields': {
+            'investor': ('investor', 'text'), 'phone': ('phone', 'text'), 'loi_no': ('loi_no', 'text'),
+            'scheme': ('scheme', 'text'), 'term_no': ('term_no', 'number'), 'term': ('term', 'text'),
+            'kind': ('kind', 'choice'), 'current': ('current', 'choice'), 'start': ('start', 'date'),
+            'maturity': ('maturity', 'date'), 'principal': ('principal', 'money'), 'interest': ('interest', 'money'),
+            'total_payouts': ('total_payouts', 'money'), 'paid_out': ('paid_out', 'money'),
+            'to_pay': ('to_pay', 'money'), 'due_now': ('due_now', 'money'),
         }},
         'referral_rewards': {'module': ('Club 1000',), 'view': ReferralRewardListView, 'date': 'earned',
                              'company': 'investor__company_id',
@@ -441,7 +455,14 @@ SYSTEM = (
     "or principal paid / still to pay (in total or per person): ALWAYS the portfolios entity's interest_* and "
     "principal_* fields — an at-maturity scheme pays its interest inside the 'maturity' payout, so adding up "
     "interest-type payouts undercounts it. Investors per scheme: investors entity grouped by scheme "
-    "(approved only, as the screen's scheme groups).\n\n"
+    "(approved only, as the screen's scheme groups).\n"
+    "Club 1000 RENEW vs ADD MORE: a renewal keeps the SAME investment (same LOI, R1, R2…) and starts a new "
+    "term on the day the last one ended — counted in renewals; its earlier terms (original, renewal 1 …) "
+    "with their own interest and payouts are in investment_terms. 'Add more' is a NEW investment (new LOI) "
+    "for the same person, same or another scheme — counted in a portfolio's investments / added_more, never "
+    "as a renewal. Times invested = investments + renewals. 'Who renewed', 'how many renewals': investors "
+    "renewals gte 1 (or portfolios renewals). 'Who added more / invested again': portfolios added_more gte 1. "
+    "An old term's interest, payouts or dues: investment_terms filtered by investor / term_no / kind / current.\n\n"
     "Answering:\n"
     "- Query before you answer; for comparisons or 'why' questions run several queries (periods, "
     "projects, people, funnel steps) and compute rates yourself.\n"
