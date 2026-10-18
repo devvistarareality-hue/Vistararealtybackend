@@ -25,7 +25,7 @@ from .serializers import (
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
-from .services import (generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
+from .services import (maturity_value, generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
                        close_term, term_list, term_of)
 
 
@@ -990,7 +990,11 @@ class InvestorLedgerView(APIView):
             'summary': summary,
             'entries': entries,
             'terms': [{'no': t['no'], 'label': t['label'], 'start': str(t['start']), 'maturity': str(t['maturity']),
-                       'principal': str(t['principal']), 'current': t['current'], 'summary': _term_summary(t)} for t in terms],
+                       'principal': str(t['principal']), 'current': t['current'], 'summary': _term_summary(t),
+                       # its signed LOI can be opened (the running term's is the live one)
+                       'has_loi': bool(investor.loi_document) if t['current'] else bool(((investor.past_terms or [])[t['no']] or {}).get('loi_document'))}
+                      for t in terms],
+            'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0),
         })
 
 
@@ -2238,7 +2242,12 @@ class InvestorActionView(APIView):
                     investor.renewal_count = (investor.renewal_count or 0) + 1
                     update_fields += ['investment_date', 'maturity_date', 'status', 'renewal_count', 'first_invested_on']
                 if investor.loi_document:
-                    investor.loi_document.delete(save=False)
+                    if is_renewal and finished:
+                        # The ended term keeps its signed LOI — readable from its Ledger
+                        # term, and back in place if this renewal is ever undone.
+                        finished['loi_document'] = investor.loi_document.name
+                    else:
+                        investor.loi_document.delete(save=False)
                 if investor.pending_loi_document:
                     investor.loi_document.name = investor.pending_loi_document.name
                     investor.pending_loi_document = None
@@ -2617,6 +2626,86 @@ class InvestorRenewView(APIView):
         return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
 
+class InvestorUndoRenewalView(APIView):
+    """POST — undo the latest renewal (managers): the investment goes back to the term
+    before it. The renewed term's payouts and its renewal referral reward go; interest
+    that was added to the renewal is due again; the ended term's maturity payout is put
+    back; and its signed LOI is restored if it was kept. Money already paid in the
+    renewed term (or its reward paid) stops it unless confirm_paid — the screen shows
+    what will go and asks first."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        if not is_club1000_manager(request.user):
+            return Response({'detail': 'Only a Club 1000 manager can undo a renewal.'}, status=status.HTTP_403_FORBIDDEN)
+        investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if investor.approval_status != 'approved':
+            return Response({'detail': 'Finish the pending approval first.'}, status=status.HTTP_400_BAD_REQUEST)
+        past = list(investor.past_terms or [])
+        if not investor.renewal_count or len(past) < investor.renewal_count:
+            return Response({'detail': 'This renewal was made before Nexora kept the term it replaced, so it cannot be '
+                                       'undone automatically.'}, status=status.HTTP_400_BAD_REQUEST)
+        last = past[-1]
+        terms = term_list(investor)
+        cur_no = terms[-1]['no']
+        ended_maturity = date.fromisoformat(last['maturity'])
+        all_pays = list(investor.payouts.all())
+        current = [p for p in all_pays if term_of(terms, p.due_date) == cur_no]
+        made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
+        settled = [p for p in all_pays if (p.notes or '').startswith(f'Added to renewal R{investor.renewal_count}')]
+        reward = investor.referral_rewards.filter(pct=REINVESTMENT_REFERRAL_REWARD_PCT).order_by('-created_at').first()
+        paid_rows = [p for p in current + made_at_renewal if p.status == 'paid']
+        reward_paid = bool(reward and reward.status == 'paid')
+        confirm = str(request.data.get('confirm_paid') or '').lower() in ('1', 'true', 'yes')
+        if (paid_rows or reward_paid) and not confirm:
+            amt = sum(((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0') for p in paid_rows), Decimal('0'))
+            return Response({'detail': f'{len(paid_rows)} payment{"s" if len(paid_rows) != 1 else ""} (₹{amt:,.0f}) already made in the '
+                                       f'renewed term{" and its referral reward is paid" if reward_paid else ""}.',
+                             'code': 'has_paid', 'paid_payouts': len(paid_rows), 'paid_amount': str(amt),
+                             'reward_paid': reward_paid}, status=status.HTTP_409_CONFLICT)
+        renewed_label = f'{investor.investment_date:%d-%m-%Y} → {investor.maturity_date:%d-%m-%Y} · ₹{investor.amount_invested:,.0f}'
+        with transaction.atomic():
+            for p in settled:
+                _undo_paid(p)                          # added to the renewal → due again
+            Payout.objects.filter(pk__in=[p.pk for p in current + made_at_renewal]).delete()
+            if reward:
+                reward.delete()
+            new_loi = investor.loi_document.name if investor.loi_document else ''
+            investor.amount_invested = Decimal(str(last['principal']))
+            investor.total_return_pct = Decimal(str(last.get('return_pct') or investor.total_return_pct or 0))
+            investor.interest_payout = last.get('interest_payout') or investor.interest_payout
+            investor.investment_date = date.fromisoformat(last['start'])
+            investor.maturity_date = ended_maturity
+            investor.renewal_count = max(0, investor.renewal_count - 1)
+            investor.revision_no = max(0, (investor.revision_no or 0) - 1)
+            investor.past_terms = past[:-1] or None
+            investor.status = 'active'
+            if last.get('loi_document'):
+                investor.loi_document.name = last['loi_document']
+            investor.save()
+            # The ended term's own maturity payout, as it stood before the renewal.
+            if not Payout.objects.filter(investor=investor, payout_type='maturity', due_date=ended_maturity).exists():
+                at_maturity = investor.interest_payout not in ('quarterly', 'monthly')
+                amount = (maturity_value(investor.amount_invested, investor.total_return_pct, investor.investment_date, ended_maturity)
+                          if at_maturity else investor.amount_invested)
+                Payout.objects.create(investor=investor, payout_type='maturity', due_date=ended_maturity,
+                                      amount_due=amount.quantize(Decimal('0.01')))
+        if last.get('loi_document') and new_loi and new_loi != last['loi_document']:
+            try:
+                investor.loi_document.storage.delete(new_loi)
+            except Exception:
+                pass
+        from activity.recorder import note
+        note(request, f'Undid renewal — {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · removed the '
+                      f'renewed term {renewed_label}; back to {investor.investment_date:%d-%m-%Y} → {investor.maturity_date:%d-%m-%Y}',
+             action='undo-renewal', target_type='investor', target_id=str(investor.pk), module='Club 1000')
+        return Response(InvestorListSerializer(investor).data)
+
+
 class InvestorLoiNoView(APIView):
     """Reserves (assigning + persisting if not already set) and returns this
     investor's LOI number — called before PDF generation so the number is
@@ -2675,6 +2764,19 @@ class InvestorLoiUrlView(APIView):
         investor = _company_filtered(Investor.objects.all(), request).filter(pk=pk).first()
         wants_pending = request.query_params.get('pending') == '1'
         doc = investor.pending_loi_document if (investor and wants_pending) else (investor.loi_document if investor else None)
+        # ?term=N — a renewed investment's earlier term (0 = the original) keeps its own LOI.
+        term = request.query_params.get('term')
+        if investor and term not in (None, ''):
+            past = investor.past_terms or []
+            try:
+                t = past[int(term)]
+            except (ValueError, IndexError):
+                t = None
+            if not t or not t.get('loi_document'):
+                return Response({'detail': "This term's signed LOI was not kept — it was renewed before Nexora kept old LOIs."},
+                                status=status.HTTP_404_NOT_FOUND)
+            from types import SimpleNamespace
+            doc = SimpleNamespace(name=t['loi_document'], url='')
         if not investor or not doc:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         is_scheme_approver = investor.scheme_id in _scheme_approver_ids(request.user, request.user.company)

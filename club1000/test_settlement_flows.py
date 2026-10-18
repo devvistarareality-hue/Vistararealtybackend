@@ -226,3 +226,29 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(a.status, 'paid')
         self.assertEqual(b.paid_amount, Decimal('1250'))
         self.assertEqual([x.amount_due for x in Payout.objects.filter(investor=inv, balance_of=b, status='pending')], [Decimal('2500.00')])
+
+    def test_undo_renewal_puts_the_ended_term_back(self):
+        from django.core.files.base import ContentFile
+        from club1000.models import ReferralReward
+        inv, a, b, old_maturity = self._renew_quarterly(107500, 'reinvest')
+        self.assertEqual((a.status, b.status), ('paid', 'paid'))
+        ReferralReward.objects.create(investor=inv, reference_name='R', reference_phone='9800000009', amount=Decimal('268.75'), pct=Decimal('0.25'))
+        d = self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data
+        self.assertTrue(d['can_undo_renewal'])
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
+        self.assertEqual((inv.renewal_count, inv.amount_invested, inv.maturity_date, inv.past_terms), (0, Decimal('100000'), old_maturity, None))
+        self.assertEqual((a.status, b.status), ('pending', 'pending'))            # added interest is due again
+        self.assertFalse(Payout.objects.filter(investor=inv, due_date__gt=old_maturity).exists())
+        self.assertEqual([p.amount_due for p in Payout.objects.filter(investor=inv, payout_type='maturity')], [Decimal('100000.00')])
+        self.assertFalse(ReferralReward.objects.filter(investor=inv, pct=Decimal('0.25')).exists())
+
+    def test_undo_renewal_with_payments_asks_first(self):
+        inv, a, b, old_maturity = self._renew_quarterly(100000, 'pay')
+        p = Payout.objects.filter(investor=inv, due_date__gt=old_maturity, payout_type='interest').order_by('due_date').first()
+        self.api.post(f'/api/club1000/payouts/{p.pk}/mark-paid/', {'amount': str(p.amount_due), 'paid_date': str(date.today())}, format='json')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {}, format='json')
+        self.assertEqual((r.status_code, r.data.get('code')), (409, 'has_paid'))
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'confirm_paid': True}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
