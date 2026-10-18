@@ -200,14 +200,14 @@ class SettlementFlowTests(TestCase):
         from club1000.services import money_in
         inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')
         self.assertEqual((a.status, b.status), ('paid', 'paid'))                 # settled — not overdue
-        self.assertIn('Added to renewal', a.notes)
+        self.assertIn('added to the principal', a.notes)
         self.assertEqual(inv.past_terms[-1]['rolled_interest'], '7500.00')
         self.assertEqual(money_in(inv), Decimal('100000'))                      # no new money
 
     def test_case2_interest_paid_out_principal_renewed(self):
         inv, a, b, _ = self._renew_quarterly(100000, 'pay')
         self.assertEqual((a.status, b.status), ('paid', 'paid'))                 # handed over at the renewal
-        self.assertTrue(a.notes.startswith('Settled at renewal R1'))
+        self.assertTrue(a.notes.startswith('Settled to renewal R1'))
         self.assertFalse(Payout.objects.filter(investor=inv, payout_type='maturity', notes__icontains='returned').exists())
 
     def test_case3_some_principal_and_the_interest_paid_out(self):
@@ -296,6 +296,6 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
         a.refresh_from_db()
         back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old)
-        self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'Settled at renewal R1 · UTR 99'))
+        self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'Settled to renewal R1 · UTR 99'))
         self.assertEqual((back.status, back.amount_due), ('paid', Decimal('20000.00')))
         self.assertFalse(Payout.objects.filter(investor=inv, status='pending', due_date__lte=old).exists())

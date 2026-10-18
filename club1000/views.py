@@ -2303,7 +2303,7 @@ class InvestorActionView(APIView):
                                 if room <= 0:
                                     break
                                 part = min(room, p.amount_due)
-                                _pay_payout(p, part, renewed_on, f'Added to renewal R{investor.renewal_count}', request.user)
+                                _pay_payout(p, part, renewed_on, f'Settled to renewal R{investor.renewal_count} · added to the principal', request.user)
                                 room -= part
                                 rolled += part
                         # Handed over at the renewal: what stayed due to him from the ended
@@ -2315,7 +2315,7 @@ class InvestorActionView(APIView):
                         pay_now = pr.get('pay_now') or {}
                         paid_on = (date.fromisoformat(pay_now['paid_date']) if pay_now.get('paid_date')
                                    else min(investor.investment_date, date.today()))
-                        note_txt = f'Settled at renewal R{investor.renewal_count}' + (f' · {pay_now["notes"]}' if pay_now.get('notes') else '')
+                        note_txt = f'Settled to renewal R{investor.renewal_count}' + (f' · {pay_now["notes"]}' if pay_now.get('notes') else '')
                         settled_any = False
                         for p in Payout.objects.filter(investor=investor, status='pending',
                                                        due_date__lte=date.fromisoformat(finished['maturity'])).order_by('due_date', 'id'):
@@ -2716,7 +2716,8 @@ class InvestorUndoRenewalView(APIView):
         current = [p for p in all_pays if term_of(terms, p.due_date) == cur_no]
         made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
         settled = [p for p in all_pays if (p.notes or '').startswith((f'Added to renewal R{investor.renewal_count}',
-                                                                      f'Settled at renewal R{investor.renewal_count}'))]
+                                                                      f'Settled at renewal R{investor.renewal_count}',
+                                                                      f'Settled to renewal R{investor.renewal_count}'))]
         reward = investor.referral_rewards.filter(pct=REINVESTMENT_REFERRAL_REWARD_PCT).order_by('-created_at').first()
         paid_rows = [p for p in current + made_at_renewal if p.status == 'paid' and p not in settled]
         reward_paid = bool(reward and reward.status == 'paid')
