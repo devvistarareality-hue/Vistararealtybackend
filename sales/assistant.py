@@ -346,6 +346,7 @@ def _entities():
             'status': ('status', 'choice'), 'paid_amount': ('paid_amount', 'enc_money'),
             'paid_date': ('paid_date', 'date'), 'investor': ('investor__name', 'enc'),
             'scheme': ('investor__scheme__name', 'text'),
+            'notes': ('notes', 'enc'),
         }},
     }
 
