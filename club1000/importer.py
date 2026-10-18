@@ -31,10 +31,8 @@ COLUMNS = [
     ('email', 'Email', False, ''),
     ('pan', 'PAN', False, ''),
     ('scheme', 'Scheme', True, 'Pick from the list — must match a scheme exactly.'),
-    ('amount_invested', 'Amount Invested', True, 'In rupees, no commas needed. At least the scheme\'s minimum ticket.'),
-    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) the CURRENT term started — for a renewed investment, the date of the latest renewal. Maturity is worked out from the scheme\'s tenure.'),
-    ('renewal_count', 'Times Renewed', False, 'How many times this investment has already been renewed before the current term. 0 or blank = first time. One row per investment — never a row per renewal.'),
-    ('first_invested_on', 'First Invested On', False, 'DD-MM-YYYY the money first came in (before any renewal). Blank = Investment Date.'),
+    ('amount_invested', 'Amount Invested', True, 'In rupees, no commas needed — the amount invested TODAY (in the current term). At least the scheme\'s minimum ticket.'),
+    ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) the investor FIRST invested. Every investor here is active today, so Nexora works out each renewal since then from the scheme\'s tenure — the current term, its maturity and the past terms (see Past Terms).'),
     ('interest_payout', 'Interest Payout', False, 'monthly / quarterly / maturity — must be one the scheme offers. Blank = the scheme\'s first option.'),
     ('total_return_pct', 'Return %', False, 'Total return by maturity. Blank = the scheme\'s rate for that payout.'),
     ('source', 'Source', False, 'referral / walk_in / website / other. Blank = referral.'),
@@ -49,8 +47,7 @@ for _k, _h, _r, _d in COLUMNS:
     for alias in (_k, _h, _h.replace(' ', '_'), _h.replace(' %', '_pct')):
         HEADER_TO_KEY[alias.strip().lower().replace(' ', '_')] = _k
 HEADER_TO_KEY.update({'mobile_number': 'phone', 'amount': 'amount_invested', 'date': 'investment_date',
-                      'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout',
-                      'reinvested': 'renewal_count', 'times_reinvested': 'renewal_count', 'renewals': 'renewal_count', 'renewed': 'renewal_count'})
+                      'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout'})
 SOURCES = [k for k, _ in LEAD_SOURCE_CHOICES]
 PAYOUTS = ['monthly', 'quarterly', 'maturity']
 
@@ -102,15 +99,16 @@ class InvestorImportTemplateView(APIView):
         sc2 = schemes[1] if len(schemes) > 1 else sc
         def pay_of(s):
             return (s.interest_payout_options or ['maturity'])[0] if s else 'maturity'
+        today = date.today()
         examples = [
             {'name': 'Rahul Sharma', 'phone': '9876543210', 'email': 'rahul@example.com', 'scheme': sc.name if sc else 'RISE',
-             'amount_invested': 1000000, 'investment_date': date(2025, 4, 1), 'interest_payout': pay_of(sc),
+             'amount_invested': 1000000, 'investment_date': (today - relativedelta(months=3)).replace(day=1), 'interest_payout': pay_of(sc),
              'source': 'referral', 'reference_name': 'Amit Patel', 'reference_phone': '9898989898'},
             {'name': 'Priya Mehta', 'phone': '9988776655', 'scheme': sc2.name if sc2 else 'RISE',
-             'amount_invested': 500000, 'investment_date': date(2025, 8, 15), 'interest_payout': pay_of(sc2), 'source': 'walk_in'},
-            # Renewed twice — its two finished terms are on the Past Terms sheet.
+             'amount_invested': 500000, 'investment_date': (today - relativedelta(months=1)).replace(day=15), 'interest_payout': pay_of(sc2), 'source': 'walk_in'},
+            # With the club since 2020 — Past Terms lists every year since by itself.
             {'name': 'Ramesh Patel', 'phone': '9876500000', 'scheme': sc.name if sc else 'RISE',
-             'amount_invested': 5350000, 'investment_date': date(2022, 4, 1), 'interest_payout': 'maturity',
+             'amount_invested': 5350000, 'investment_date': date(2020, 4, 1), 'interest_payout': 'maturity',
              'total_return_pct': 15, 'source': 'walk_in'},
         ]
         for ex in examples:
@@ -162,17 +160,16 @@ class InvestorImportTemplateView(APIView):
         hlp.append(['Each imported investor waits in Club 1000 → Approvals, like one added by hand.'])
         hlp.append(['Columns marked * (red) must be filled. A row with any of them empty is NOT imported — '
                     'it is listed with the reason so you can fix it and upload again.'])
-        hlp.append(['A renewed investment is ONE row on Investors: today\'s principal and the date the current term started '
-                    'as Investment Date.'])
-        hlp.append(['Its finished terms go on the Past Terms sheet, oldest first: type only Mobile, Investor Name (as on '
-                    'Investors) and that term\'s Principal. Scheme, payout, %, the dates, the interest, what it renewed '
-                    'with and the amount taken out fill themselves from the Investors sheet. Times Renewed and First '
-                    'Invested On are then worked out from it.'])
-        hlp.append(['Taken Out is what he took home at that renewal (interest + any principal); a minus means he added money.'])
+        hlp.append(['Investors: one row per investment that is ACTIVE TODAY — today\'s amount, and the date the '
+                    'investor FIRST invested as Investment Date (e.g. 01-04-2020).'])
+        hlp.append(['Past Terms fills itself: from the first date and the scheme\'s tenure (RISE = 12 months) it lists '
+                    'every finished term up to today — 2020-21, 2021-22 … — and the current term starts after the last one.'])
+        hlp.append(['A term at today\'s amount needs nothing. Where the amount was different (e.g. ₹1 crore in 2020-21), '
+                    'type it in "Principal (if different)" on that term\'s row; Interest, Renewed With and Taken Out follow.'])
+        hlp.append(['Fill the Investors sheet completely first, then type any different principals — rows on Past Terms '
+                    'move when Investors rows are added or removed.'])
         hlp.append(['Past payouts (each term\'s interest and any principal taken out) are created as due — mark them paid '
                     'in Payouts with the dates they were actually paid.'])
-        hlp.append(['No exact past principals? Leave Past Terms empty and just fill Times Renewed and First Invested On.'])
-        hlp.append(['Investor Portfolios puts every row with the same mobile number together.'])
         hlp.append(['Schemes: ' + ', '.join(f'{s.name} ({s.tenure_months} mo, min ₹{int(s.min_ticket_size):,}, payouts: {", ".join(s.interest_payout_options or ["maturity"])})' for s in schemes)])
         hlp.column_dimensions['A'].width = 20
         hlp.column_dimensions['C'].width = 90
@@ -184,78 +181,100 @@ class InvestorImportTemplateView(APIView):
         return resp
 
 
-PAST_TYPED = ['Mobile *', 'Investor Name *', 'Principal *']
-PAST_AUTO = ['Scheme', 'Interest Payout', 'Return %', 'Term Start', 'Maturity', 'Interest', 'Renewed With', 'Taken Out']
+PAST_HEADERS = ['Mobile', 'Investor Name', 'Term', 'Term Start', 'Maturity', 'Scheme', 'Interest Payout', 'Return %',
+                'Principal (if different)', 'Principal', 'Interest', 'Renewed With', 'Taken Out']
+PAST_INPUT = 'Principal (if different)'
+PAST_ROWS = 600
 
 
 def _past_terms_sheet(wb, inv_ws, n_schemes):
-    """The Past Terms sheet: the person types Mobile, Name and each finished term's
-    Principal, oldest first; everything else is a formula off the Investors sheet —
-    so the working (dates, interest, what was taken out) shows while filling it."""
+    """Past Terms fills itself: every investor on the Investors sheet is active today, so
+    each one's finished terms run from their first investment date in steps of the
+    scheme's tenure up to today — one row per term, all by formula. The only thing
+    typed here is a Principal for a term whose amount was different from today's."""
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
     col = {k: get_column_letter(i) for i, (k, _, _, _) in enumerate(COLUMNS, start=1)}
-    key_col = get_column_letter(len(COLUMNS) + 1)          # hidden: mobile|name on Investors
-    for r in range(2, 2001):
-        inv_ws[f'{key_col}{r}'] = f'=IF({col["phone"]}{r}="","",TRIM({col["phone"]}{r})&"|"&LOWER(TRIM({col["name"]}{r})))'
-    inv_ws.column_dimensions[key_col].hidden = True
+    n = len(COLUMNS)
+    key_col, cnt_col, cum_col = (get_column_letter(n + 1), get_column_letter(n + 2), get_column_letter(n + 3))
+    lists = f'Lists!$A$1:$A${max(1, n_schemes)}'
+    ten_of = lambda cell: f'INDEX(Lists!$D$1:$D${max(1, n_schemes)},MATCH({cell},{lists},0))'
+    last = 2000
+    for r in range(2, last + 1):
+        ph, nm, dt, sc = (f'{col["phone"]}{r}', f'{col["name"]}{r}', f'{col["investment_date"]}{r}', f'{col["scheme"]}{r}')
+        inv_ws[f'{key_col}{r}'] = f'=IF({ph}="","",TRIM({ph})&"|"&LOWER(TRIM({nm})))'
+        # finished terms between the first investment and today
+        inv_ws[f'{cnt_col}{r}'] = (f'=IF(OR({ph}="",{dt}="",{sc}=""),0,IFERROR(MAX(0,INT(DATEDIF({dt},TODAY(),"m")/{ten_of(sc)})),0))')
+        inv_ws[f'{cum_col}{r}'] = f'=SUM(${cnt_col}$2:{cnt_col}{r})'
+    for c in (key_col, cnt_col, cum_col):
+        inv_ws.column_dimensions[c].hidden = True
 
     ws = wb.create_sheet('Past Terms', 1)
-    ws.append(PAST_TYPED + PAST_AUTO)
-    for i in range(1, len(PAST_TYPED) + len(PAST_AUTO) + 1):
+    ws.append(PAST_HEADERS)
+    for i, h in enumerate(PAST_HEADERS, start=1):
         c = ws.cell(row=1, column=i)
         c.font = Font(bold=True, color='FFFFFF')
-        c.fill = PatternFill('solid', fgColor='C0392B' if i <= len(PAST_TYPED) else '8A94A6')
-        c.alignment = Alignment(vertical='center')
-        ws.column_dimensions[get_column_letter(i)].width = 17
+        c.fill = PatternFill('solid', fgColor='D68910' if h == PAST_INPUT else '8A94A6')
+        c.alignment = Alignment(vertical='center', wrap_text=True)
+        ws.column_dimensions[get_column_letter(i)].width = 16
     ws.column_dimensions['B'].width = 24
-    for row in (['9876500000', 'Ramesh Patel', 10000000], ['9876500000', 'Ramesh Patel', 9000000]):
-        ws.append(row)
-    L = 'L'                                                  # hidden key on this sheet
+    ws.row_dimensions[1].height = 30
     inv = 'Investors!'
-    last = 300
-    for r in range(2, last + 1):
-        m = f'MATCH($L{r},{inv}${key_col}:${key_col},0)'
-        ws[f'L{r}'] = f'=IF($A{r}="","",TRIM($A{r})&"|"&LOWER(TRIM($B{r})))'
-        ws[f'D{r}'] = f'=IF($A{r}="","",IFERROR(INDEX({inv}${col["scheme"]}:${col["scheme"]},{m}),"not on Investors"))'
-        ten = f'INDEX(Lists!$D$1:$D${max(1, n_schemes)},MATCH($D{r},Lists!$A$1:$A${max(1, n_schemes)},0))'
-        ws[f'E{r}'] = (f'=IF($A{r}="","",IFERROR(IF(INDEX({inv}${col["interest_payout"]}:${col["interest_payout"]},{m})="",'
-                       f'INDEX(Lists!$E$1:$E${max(1, n_schemes)},MATCH($D{r},Lists!$A$1:$A${max(1, n_schemes)},0)),'
-                       f'INDEX({inv}${col["interest_payout"]}:${col["interest_payout"]},{m})),""))')
-        ws[f'F{r}'] = (f'=IF($A{r}="","",IFERROR(IF(INDEX({inv}${col["total_return_pct"]}:${col["total_return_pct"]},{m})="",'
-                       f'INDEX(Lists!$F$1:$F${max(1, n_schemes)},MATCH($D{r},Lists!$A$1:$A${max(1, n_schemes)},0)),'
-                       f'INDEX({inv}${col["total_return_pct"]}:${col["total_return_pct"]},{m})),""))')
-        ws[f'G{r}'] = (f'=IF($A{r}="","",IFERROR(EDATE(INDEX({inv}${col["investment_date"]}:${col["investment_date"]},{m}),'
-                       f'-{ten}*(COUNTIF($L:$L,$L{r})-COUNTIF($L$2:$L{r},$L{r})+1)),""))')
-        ws[f'H{r}'] = f'=IF($G{r}="","",EDATE($G{r},{ten}))'
-        ws[f'I{r}'] = f'=IF(OR($C{r}="",$F{r}=""),"",ROUND($C{r}*$F{r}/100,0))'
-        ws[f'J{r}'] = (f'=IF($A{r}="","",IFERROR(INDEX($C{r + 1}:$C${last + 1},MATCH($L{r},$L{r + 1}:$L${last + 1},0)),'
-                       f'IFERROR(INDEX({inv}${col["amount_invested"]}:${col["amount_invested"]},{m}),"")))')
-        ws[f'K{r}'] = f'=IF(OR($J{r}="",$I{r}=""),"",IF($E{r}="maturity",$C{r}+$I{r}-$J{r},$C{r}-$J{r}))'
-        for c in 'GH':
+    cum = f'{inv}${cum_col}$2:${cum_col}${last}'
+    input_fill = PatternFill('solid', fgColor='FFF4D6')
+    for r in range(2, PAST_ROWS + 2):
+        j = r - 1
+        # hidden: which Investors row this term belongs to (N) and its term number (O)
+        ws[f'N{r}'] = f'=IF({j}>MAX({cum}),"",IFERROR(MATCH({j}-0.5,{cum},1),0)+2)'
+        ws[f'O{r}'] = f'=IF($N{r}="","",{j}-IF($N{r}=2,0,INDEX({inv}${cum_col}:${cum_col},$N{r}-1)))'
+        g = lambda key: f'INDEX({inv}${col[key]}:${col[key]},$N{r})'
+        ws[f'A{r}'] = f'=IF($N{r}="","",{g("phone")})'
+        ws[f'B{r}'] = f'=IF($N{r}="","",{g("name")})'
+        ws[f'C{r}'] = f'=IF($N{r}="","",$O{r})'
+        ws[f'F{r}'] = f'=IF($N{r}="","",{g("scheme")})'
+        ten = ten_of(f'$F{r}')
+        ws[f'D{r}'] = f'=IF($N{r}="","",EDATE({g("investment_date")},($O{r}-1)*{ten}))'
+        ws[f'E{r}'] = f'=IF($D{r}="","",EDATE($D{r},{ten}))'
+        ws[f'G{r}'] = (f'=IF($N{r}="","",IF({g("interest_payout")}="",INDEX(Lists!$E$1:$E${max(1, n_schemes)},'
+                       f'MATCH($F{r},{lists},0)),{g("interest_payout")}))')
+        ws[f'H{r}'] = (f'=IF($N{r}="","",IF({g("total_return_pct")}="",INDEX(Lists!$F$1:$F${max(1, n_schemes)},'
+                       f'MATCH($F{r},{lists},0)),{g("total_return_pct")}))')
+        ws[f'I{r}'].fill = input_fill
+        ws[f'J{r}'] = f'=IF($N{r}="","",IF($I{r}<>"",$I{r},{g("amount_invested")}))'
+        ws[f'K{r}'] = f'=IF($J{r}="","",ROUND($J{r}*$H{r}/100,0))'
+        ws[f'L{r}'] = f'=IF($N{r}="","",IF($N{r + 1}=$N{r},$J{r + 1},{g("amount_invested")}))'
+        ws[f'M{r}'] = f'=IF($L{r}="","",IF($G{r}="maturity",$J{r}+$K{r}-$L{r},$J{r}-$L{r}))'
+        for c in 'DE':
             ws[f'{c}{r}'].number_format = 'DD-MM-YYYY'
-        for c in 'CIJK':
+        for c in 'IJKLM':
             ws[f'{c}{r}'].number_format = '#,##0'
-    for r in (2, 3):
-        for c in 'ABC':
-            ws[f'{c}{r}'].font = Font(italic=True, color='7A869A')
-    ws.column_dimensions['L'].hidden = True
-    ws.freeze_panes = 'D2'
+    ws.column_dimensions['N'].hidden = True
+    ws.column_dimensions['O'].hidden = True
+    ws.freeze_panes = 'C2'
 
 
 def _read_past(raw, name):
-    """The Past Terms sheet as [(excel_row_no, mobile, name, principal)], in sheet order."""
+    """Past Terms rows where a different principal was typed: [(row, mobile, name,
+    term_start, principal)]. The rest of that sheet is formulas Nexora works out itself."""
     if name.lower().endswith(('.csv', '.txt')):
         return []
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
     if 'Past Terms' not in wb.sheetnames:
         return []
+    rows = list(wb['Past Terms'].iter_rows(values_only=True))
+    if not rows:
+        return []
+    head = [str(h or '').replace('*', '').strip().lower() for h in rows[0]]
+    at = lambda h: head.index(h.lower()) if h.lower() in head else None
+    i_mob, i_name, i_start, i_amt = at('Mobile'), at('Investor Name'), at('Term Start'), at(PAST_INPUT)
+    if None in (i_mob, i_name, i_start, i_amt):
+        return []
     out = []
-    for n, row in enumerate(wb['Past Terms'].iter_rows(min_row=2, max_col=3, values_only=True), start=2):
-        mobile, nm, principal = (list(row) + [None, None, None])[:3]
-        if any(v not in (None, '') for v in (mobile, nm, principal)):
-            out.append((n, mobile, nm, principal))
+    for n, row in enumerate(rows[1:], start=2):
+        row = list(row) + [None] * len(head)
+        if row[i_amt] not in (None, ''):
+            out.append((n, row[i_mob], row[i_name], row[i_start], row[i_amt]))
     return out
 
 
@@ -315,19 +334,23 @@ def _num(v):
 
 
 def _check(rows, request, past=()):
-    """Check every row; returns [{row, ok, errors, warnings, data, preview}]. `past`
-    (the Past Terms sheet) is matched to its Investors row by mobile + name; a Past
-    Terms row that matches none is reported as a failed row of its own."""
-    terms_of, past_errs = {}, {}
-    for n, mobile, nm, principal in past:
+    """Check every row; returns [{row, ok, errors, warnings, data, preview}].
+
+    Every investor on the sheet is active today, so the Investment Date is when they
+    first invested and the terms since are worked out from the scheme's tenure: the
+    current one is the term running today, and each finished one before it is a past
+    term at today's amount — unless the Past Terms sheet gives that term a different
+    principal (`past`: mobile + name + term start → principal)."""
+    override, past_errs = {}, {}
+    for n, mobile, nm, start, principal in past:
         digits = ''.join(ch for ch in _text(mobile) if ch.isdigit())[-10:]
-        amt = _num(principal)
-        k = (digits, _text(nm).lower())
-        if len(digits) < 10 or not _text(nm):
-            past_errs[n] = 'Past Terms needs the Mobile and Investor Name exactly as on the Investors sheet'
-        elif amt in (None, False) or amt <= 0:
-            past_errs[n] = 'Principal is missing or not a number'
-        terms_of.setdefault(k, []).append((n, amt))
+        amt, when = _num(principal), _date(start)
+        if amt in (None, False) or amt <= 0:
+            past_errs[n] = 'Principal (if different) is not a number'
+        elif len(digits) < 10 or not _text(nm) or not when:
+            past_errs[n] = 'a Principal was typed on a row with no term'
+        else:
+            override[(digits, _text(nm).lower(), when)] = (n, amt)
     used = set()
     schemes = {s.name.strip().lower(): s for s in _schemes(request)}
     company = request.user.company
@@ -366,35 +389,24 @@ def _check(rows, request, past=()):
             errs.append(f'Interest Payout "{_text(r.get("interest_payout"))}" — use monthly / quarterly / maturity')
         elif scheme and payout not in options:
             errs.append(f'{scheme.name} only allows {", ".join(options)}')
-        renewals = _num(r.get('renewal_count'))
-        if renewals is False or (renewals is not None and (renewals < 0 or renewals != int(renewals))):
-            errs.append('Times Renewed must be a whole number (0, 1, 2 …)')
-            renewals = None
-        renewals = int(renewals or 0)
-        first_on = None
-        if _text(r.get('first_invested_on')):
-            first_on = _date(r.get('first_invested_on'))
-            if not first_on:
-                errs.append('First Invested On is not DD-MM-YYYY')
-            elif inv_date and first_on > inv_date:
-                errs.append('First Invested On is after the Investment Date')
-        mine = terms_of.get((digits[-10:], name.lower()), [])
-        past_terms = None
-        if mine:
-            used.add((digits[-10:], name.lower()))
-            bad = [past_errs[n] for n, _ in mine if n in past_errs]
-            if bad:
-                errs.append(f'Past Terms: {bad[0]}')
-            elif scheme and inv_date:
-                ten, k = scheme.tenure_months, len(mine)
+        # The terms since the first investment, up to the one running today.
+        renewals, first_on, past_terms, maturity = 0, None, None, None
+        if scheme and inv_date and inv_date <= date.today():
+            ten, today = scheme.tenure_months, date.today()
+            k = 0
+            while inv_date + relativedelta(months=ten * (k + 1)) <= today:
+                k += 1
+            if k:
+                first_on, renewals = inv_date, k
                 past_terms = []
-                for i, (_, amt) in enumerate(mine):
-                    start = inv_date - relativedelta(months=ten * (k - i))
+                for t in range(k):
+                    start = inv_date + relativedelta(months=ten * t)
+                    hit = override.get((digits[-10:], name.lower(), start))
+                    if hit:
+                        used.add(hit[0])
                     past_terms.append({'start': start.isoformat(), 'maturity': (start + relativedelta(months=ten)).isoformat(),
-                                       'principal': str(amt)})
-                if _text(r.get('renewal_count')) and renewals != k:
-                    warns.append(f'Times Renewed says {renewals}; Past Terms has {k} — using {k}')
-                renewals, first_on = k, date.fromisoformat(past_terms[0]['start'])
+                                       'principal': str(hit[1] if hit else amount if amount not in (None, False) else 0)})
+                inv_date = inv_date + relativedelta(months=ten * k)     # the term running today
         pct = _num(r.get('total_return_pct'))
         if pct is False:
             errs.append('Return % is not a number')
@@ -433,17 +445,21 @@ def _check(rows, request, past=()):
                 'maturity_date': maturity, 'interest_payout': payout, 'total_return_pct': pct, 'source': source,
                 'reference_name': ref_name, 'reference_phone': ref_phone, 'loi_no': _text(r.get('loi_no')),
                 'security': _text(r.get('security')), 'notes': _text(r.get('notes')),
-                'renewal_count': renewals, 'first_invested_on': first_on if first_on and first_on != inv_date else None,
+                'renewal_count': renewals, 'first_invested_on': first_on,
                 'past_terms': past_terms,
             },
         })
-    for k, entries in terms_of.items():
-        if k not in used:
-            for n, _ in entries:
-                out.append({'row': n, 'sheet': 'Past Terms', 'ok': False, 'warnings': [], 'data': None,
-                            'errors': [past_errs.get(n) or f'No row on the Investors sheet with mobile {k[0]} and name "{k[1]}"'],
-                            'preview': {'name': k[1], 'phone': k[0], 'scheme': '', 'amount': '', 'investment_date': '',
-                                        'maturity_date': '', 'interest_payout': '', 'return_pct': '', 'reference': ''}})
+    for n, (bad) in past_errs.items():
+        out.append({'row': n, 'sheet': 'Past Terms', 'ok': False, 'warnings': [], 'data': None, 'errors': [bad],
+                    'preview': {'name': '', 'phone': '', 'scheme': '', 'amount': '', 'investment_date': '',
+                                'maturity_date': '', 'interest_payout': '', 'return_pct': '', 'reference': ''}})
+    for (digits, nm, start), (n, _) in override.items():
+        if n not in used:
+            out.append({'row': n, 'sheet': 'Past Terms', 'ok': False, 'warnings': [], 'data': None,
+                        'errors': [f'No term starting {start:%d-%m-%Y} for {nm} ({digits}) — the Investors row was changed after '
+                                   'typing this principal; check the row and type it again'],
+                        'preview': {'name': nm, 'phone': digits, 'scheme': '', 'amount': '', 'investment_date': '',
+                                    'maturity_date': '', 'interest_payout': '', 'return_pct': '', 'reference': ''}})
     return out
 
 
