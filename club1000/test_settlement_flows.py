@@ -252,3 +252,20 @@ class SettlementFlowTests(TestCase):
         self.assertEqual((r.status_code, r.data.get('code')), (409, 'has_paid'))
         r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'confirm_paid': True}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
+
+    def test_part_interest_taken_and_fresh_money_added(self):
+        """Takes ₹2,500 of the ₹7,500 interest and adds ₹50,000: ₹5,000 goes into the renewal."""
+        from club1000.services import money_in
+        inv = self._inv(date.today() - relativedelta(months=25))
+        old = inv.maturity_date
+        a = Payout.objects.create(investor=inv, payout_type='interest', due_date=old - relativedelta(months=3), amount_due=Decimal('3750'))
+        b = Payout.objects.create(investor=inv, payout_type='interest', due_date=old, amount_due=Decimal('3750'))
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=old, amount_due=Decimal('100000'))
+        Investor.objects.filter(pk=inv.pk).update(approval_status='pending', pending_revision_type='renew', pending_revision={
+            'amount_invested': '155000', 'investment_date': str(old), 'interest_payout': 'quarterly',
+            'interest_choice': 'reinvest', 'interest_added': '5000'})
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
+        inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
+        self.assertEqual(inv.past_terms[-1]['rolled_interest'], '5000.00')
+        self.assertEqual((a.status, b.paid_amount), ('paid', Decimal('1250')))          # ₹2,500 of b stays due to him
+        self.assertEqual(money_in(inv), Decimal('150000'))                              # ₹50,000 fresh

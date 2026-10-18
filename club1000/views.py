@@ -2287,6 +2287,8 @@ class InvestorActionView(APIView):
                         # principal, never overdue. Unsaid: added when he renews for more.
                         reinvest = (pr.get('interest_choice') or ('reinvest' if new_principal > old_principal else 'pay')) == 'reinvest'
                         room = max(new_principal - old_principal, Decimal('0')) if reinvest else Decimal('0')
+                        if reinvest and pr.get('interest_added') not in (None, ''):
+                            room = min(room, Decimal(str(pr['interest_added'])))
                         rolled = close_term(investor, finished, new_principal, maturity_paid=paid_mat, roll_room=room)
                         room -= rolled
                         if room > 0:
@@ -2613,6 +2615,13 @@ class InvestorRenewView(APIView):
         choice = str(request.data.get('interest_choice') or '').lower()
         if choice in ('pay', 'reinvest'):
             pending['interest_choice'] = choice
+        # Exactly how much of that interest goes into the renewal, when the form knows
+        # (he took part of it and added fresh money besides).
+        if request.data.get('interest_added') not in (None, ''):
+            try:
+                pending['interest_added'] = str(max(Decimal(str(request.data['interest_added'])), Decimal('0')))
+            except Exception:
+                return Response({'detail': 'Invalid interest_added.'}, status=status.HTTP_400_BAD_REQUEST)
         payout_schedule = request.data.get('payout_schedule')
         if isinstance(payout_schedule, list):
             pending['payout_schedule'] = payout_schedule
