@@ -100,3 +100,11 @@ class NotificationPrefsTests(APITestCase):
                               {'notification_overrides': {'task': {'mode': 'inapp'}}}, format='json')
         self.assertEqual(r.status_code, 200, r.content)
         self.assertEqual(User.objects.get(pk=self.rep.pk).notification_overrides, {'task': {'mode': 'inapp'}})
+
+    def test_bell_list_says_which_module(self):
+        for t in ('new_lead', 'investor_approval', 'accounts_booking_approval', 'ar_due_soon', 'test'):
+            Notification.objects.create(recipient=self.rep, type=t, title=t)
+        auth(self.client, self.rep)
+        got = {r['type']: r['module'] for r in self.client.get('/api/auth/notifications/').json()['results']}
+        self.assertEqual(got, {'new_lead': 'Sales', 'investor_approval': 'Club 1000',
+                               'accounts_booking_approval': 'Accounts & Finance', 'ar_due_soon': 'Accounts Receivable', 'test': 'Other'})

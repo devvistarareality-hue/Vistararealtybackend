@@ -409,11 +409,14 @@ class NotificationListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .notification_prefs import KIND_MODULE, kind_of
         qs = Notification.objects.filter(recipient=request.user)
         unread = qs.filter(is_read=False).count()
+        # module — which module the notification belongs to, so the bell can group them
         rows = [{
             'id': n.id, 'type': n.type, 'title': n.title, 'body': n.body,
             'data': n.data, 'is_read': n.is_read, 'created_at': n.created_at,
+            'module': {'AR': 'Accounts Receivable'}.get(KIND_MODULE.get(kind_of(n.type)), KIND_MODULE.get(kind_of(n.type), 'Other')),
         } for n in qs[:50]]
         return Response({'unread': unread, 'results': rows})
 
