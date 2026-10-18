@@ -69,3 +69,46 @@ def can_approve_investor(user, scheme_id, company):
     if not scheme_id:
         return False
     return scheme_id in _scheme_approver_ids(user, company)
+
+
+def is_level2_approver(user, scheme):
+    """A real admin, or someone named in the scheme's level 2 approvers."""
+    if _is_hard_admin(user):
+        return True
+    return bool(scheme) and user.id in (scheme.investor_approvers_l2 or [])
+
+
+def approval_gate(request, investor, what):
+    """Two-level approval. Returns (final, response): final=True lets the caller carry
+    out the approval; otherwise `response` is what to send back — the level 1 approval
+    recorded and passed to level 2, or a refusal."""
+    from rest_framework.response import Response
+    from rest_framework import status
+    from django.utils import timezone
+    scheme = investor.scheme
+    l2 = (scheme.investor_approvers_l2 or []) if scheme else []
+    user = request.user
+    if not l2:
+        if not can_approve_investor(user, investor.scheme_id, user.company):
+            return False, Response({'detail': 'You are not a configured approver for this scheme.'}, status=status.HTTP_403_FORBIDDEN)
+        return True, None
+    if not investor.approval_step:
+        if not can_approve_investor(user, investor.scheme_id, user.company):
+            return False, Response({'detail': 'Level 1 approval is needed first.'}, status=status.HTTP_403_FORBIDDEN)
+        investor.approval_step = {'by': user.id, 'by_name': user.name or '', 'at': timezone.now().isoformat()}
+        investor.save(update_fields=['approval_step'])
+        try:
+            from notifications import notify
+            from accounts.models import User
+            for u in User.objects.filter(id__in=l2, company=investor.company, is_active=True):
+                notify(u, 'investor_approval', 'Level 2 approval needed',
+                       f'{what} — {investor.name} · {scheme.name}: approved at level 1 by {user.name}', {'investor_id': investor.id})
+        except Exception:
+            pass
+        from activity.recorder import note
+        note(request, f'Level 1 approved — {what} · {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""}; waiting for level 2',
+             action='approve-l1', target_type='investor', target_id=str(investor.pk), module='Club 1000')
+        return False, Response({'level': 1, 'detail': 'Approved at level 1 — sent to the level 2 approvers.'})
+    if not is_level2_approver(user, scheme):
+        return False, Response({'detail': 'Waiting for a level 2 approver.'}, status=status.HTTP_403_FORBIDDEN)
+    return True, None

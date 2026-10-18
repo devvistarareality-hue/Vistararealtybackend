@@ -180,6 +180,9 @@ class Scheme(models.Model):
     # Manager user IDs who approve investors submitted under THIS scheme
     # (admin-selected) — mirrors sales.Project.booking_approvers exactly.
     investor_approvers = models.JSONField(default=list, blank=True)
+    # Level 2: when set, a level 1 approval only passes it on — these people give
+    # the final approval (new investments, revisions, renewals, undo requests).
+    investor_approvers_l2 = models.JSONField(null=True, blank=True)
     principal_payout = models.CharField(max_length=20, choices=PRINCIPAL_PAYOUT_CHOICES, default='maturity')
     premature_redemption_allowed = models.BooleanField(default=False)
     premature_redemption_lock_months = models.PositiveIntegerField(null=True, blank=True)
@@ -271,6 +274,8 @@ class Investor(models.Model):
     # A delete or an undo-renewal asked for and waiting on an approver:
     # {type: 'delete'|'undo_renewal', by, by_name, at, reason, include_paid}.
     pending_action = models.JSONField(null=True, blank=True)
+    # Level 1 done on a two-level scheme, waiting for level 2: {by, by_name, at}.
+    approval_step = models.JSONField(null=True, blank=True)
     # Who signed the investment off, and when — the latest approval, a revision's
     # included. Shown on the Approved tab.
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')

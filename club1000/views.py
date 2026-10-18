@@ -15,7 +15,7 @@ from accounts.models import User
 from accounts.permissions import is_platform_admin, scope_to_company
 from sales.fields import phone_blind_index
 from sales.views import MANAGER_ROLES
-from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor, can_configure_scheme_approvers
+from .permissions import is_club1000_manager, has_club1000_access, scope_leads_to_role, _scheme_approver_ids, can_approve_investor, can_configure_scheme_approvers, approval_gate, is_level2_approver
 from .models import (
     Scheme, Investor, Payout, ReferralReward, Lead, FollowUp, LeadStatusHistory,
     REFERRAL_REWARD_PCT, REINVESTMENT_REFERRAL_REWARD_PCT, PAYOUT_TYPE_CHOICES,
@@ -303,13 +303,11 @@ class SchemeToggleApproverView(APIView):
             scheme = _company_filtered(Scheme.objects.select_for_update(), request).filter(pk=pk).first()
             if not scheme:
                 return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-            current = scheme.investor_approvers or []
+            field = 'investor_approvers_l2' if str(request.data.get('level')) == '2' else 'investor_approvers'
+            current = getattr(scheme, field) or []
             manager_id = int(manager_id)
-            scheme.investor_approvers = (
-                [m for m in current if m != manager_id] if manager_id in current
-                else [*current, manager_id]
-            )
-            scheme.save(update_fields=['investor_approvers'])
+            setattr(scheme, field, [m for m in current if m != manager_id] if manager_id in current else [*current, manager_id])
+            scheme.save(update_fields=[field])
         return Response(SchemeSerializer(scheme).data)
 
 
@@ -2197,7 +2195,8 @@ class InvestorActionView(APIView):
         # Club 1000 manager could approve another scheme's investor straight
         # through the API — the scheme's own investor_approvers picker (see
         # Investor Approvers — by scheme) would otherwise be purely cosmetic.
-        if not can_approve_investor(request.user, investor.scheme_id, request.user.company):
+        if not (can_approve_investor(request.user, investor.scheme_id, request.user.company)
+                or is_level2_approver(request.user, investor.scheme)):
             return Response(
                 {'detail': 'You are not a configured approver for this scheme.'},
                 status=status.HTTP_403_FORBIDDEN,
@@ -2227,6 +2226,12 @@ class InvestorActionView(APIView):
         is_renewal = revision_type == 'renew'
 
         if action == 'approve':
+            # Two-level schemes: level 1 passes it on; only level 2 makes it final.
+            final, gate = approval_gate(request, investor, 'Renewal' if is_renewal else ('Revision' if is_revision else 'New investment'))
+            if not final:
+                return gate
+            investor.approval_step = None
+            Investor.objects.filter(pk=investor.pk).update(approval_step=None)
             if is_revision:
                 pr = investor.pending_revision or {}
                 old_principal = investor.amount_invested or Decimal('0')
@@ -2425,7 +2430,8 @@ class InvestorActionView(APIView):
             if not reason:
                 return Response({'detail': 'Give a reason for rejecting.'}, status=status.HTTP_400_BAD_REQUEST)
             investor.rejected_reason = reason
-            investor.save(update_fields=['rejected_reason'])
+            investor.approval_step = None
+            investor.save(update_fields=['rejected_reason', 'approval_step'])
             if is_revision:
                 # Reject the PROPOSED revision/renewal only — the original
                 # approved terms and signed LOI are completely untouched.
@@ -2821,7 +2827,8 @@ class InvestorPendingActionView(APIView):
         investor = _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk=pk).first()
         if not investor or not investor.pending_action:
             return Response({'detail': 'Nothing is waiting for approval on this investor.'}, status=status.HTTP_404_NOT_FOUND)
-        if not can_approve_investor(request.user, investor.scheme_id, request.user.company):
+        if not (can_approve_investor(request.user, investor.scheme_id, request.user.company)
+                or is_level2_approver(request.user, investor.scheme)):
             return Response({'detail': 'You are not a configured approver for this scheme.'}, status=status.HTTP_403_FORBIDDEN)
         pa = investor.pending_action
         kind = pa.get('type')
@@ -2837,7 +2844,8 @@ class InvestorPendingActionView(APIView):
                 'by': request.user.name or '', 'at': timezone.now().isoformat(),
                 'asked_by': pa.get('by_name', ''), 'asked_reason': pa.get('reason', '')}]
             investor.pending_action = None
-            investor.save(update_fields=['rejections', 'pending_action'])
+            investor.approval_step = None
+            investor.save(update_fields=['rejections', 'pending_action', 'approval_step'])
             note(request, f'Rejected the {what} of {investor.name}: {reason}', action='reject', target_type='investor',
                  target_id=str(investor.pk), module='Club 1000')
             try:
@@ -2850,8 +2858,12 @@ class InvestorPendingActionView(APIView):
             return Response(InvestorListSerializer(investor).data)
         if action != 'approve':
             return Response({'detail': "action must be 'approve' or 'reject'."}, status=status.HTTP_400_BAD_REQUEST)
+        final, gate = approval_gate(request, investor, 'Delete' if kind == 'delete' else 'Undo renewal')
+        if not final:
+            return gate
         investor.pending_action = None
-        investor.save(update_fields=['pending_action'])
+        investor.approval_step = None
+        investor.save(update_fields=['pending_action', 'approval_step'])
         if kind == 'delete':
             why, _ = _delete_investor(request, investor, include_paid=True)
             if why:
