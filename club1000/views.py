@@ -25,7 +25,7 @@ from .serializers import (
     InvestorCreateSerializer, PayoutSerializer, ReferralRewardSerializer,
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
-from .services import (maturity_value, generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
+from .services import (past_terms, maturity_value, generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
                        close_term, term_list, term_of)
 
 
@@ -970,6 +970,15 @@ class InvestorLedgerView(APIView):
             'total_paid': str(total_paid),
             'total_pending': str(total_due - total_paid),
         }
+        # How each finished term ended — for the term tabs and the renewal LOI's history.
+        outcomes = [{
+            'return_pct': str(o['pct']), 'interest_payout': o['payout'],
+            'renewed_with': str(o['next']), 'interest_earned': str(o['interest']),
+            'interest_added': str(o['rolled']), 'interest_to_investor': str(max(o['interest'] - o['rolled'], Decimal('0'))),
+            'principal_returned': str(o['returned']),
+            'fresh_money': str(max(o['next'] - o['principal'] - o['rolled'], Decimal('0'))),
+        } for o in past_terms(investor)]
+
         def _term_summary(t):
             mine = [p for p in all_payouts if term_of(terms, p.due_date) == t['no']]
             amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
@@ -992,7 +1001,8 @@ class InvestorLedgerView(APIView):
             'terms': [{'no': t['no'], 'label': t['label'], 'start': str(t['start']), 'maturity': str(t['maturity']),
                        'principal': str(t['principal']), 'current': t['current'], 'summary': _term_summary(t),
                        # its signed LOI can be opened (the running term's is the live one)
-                       'has_loi': bool(investor.loi_document) if t['current'] else bool(((investor.past_terms or [])[t['no']] or {}).get('loi_document'))}
+                       'has_loi': bool(investor.loi_document) if t['current'] else bool(((investor.past_terms or [])[t['no']] or {}).get('loi_document')),
+                       **(outcomes[t['no']] if t['no'] < len(outcomes) and not t['current'] else {})}
                       for t in terms],
             'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0),
         })
