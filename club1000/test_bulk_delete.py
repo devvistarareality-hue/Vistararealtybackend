@@ -26,54 +26,36 @@ class BulkDeleteTests(TestCase):
                                        maturity_date=date(2025, 1, 1) + relativedelta(months=12), total_return_pct=Decimal('15'),
                                        status='active', approval_status='approved', lead=lead, **kw)
 
-    def _approve(self, inv):
-        return self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json')
-
-    def test_delete_is_a_request_until_approved(self):
+    def test_delete_is_immediate_and_marks_the_lead(self):
         a = self._inv('A', '9800000001')
         lead = a.lead
-        self.assertEqual(self.api.delete(f'/api/club1000/investors/{a.pk}/').status_code, 400)          # reason needed
-        r = self.api.delete(f'/api/club1000/investors/{a.pk}/?reason=duplicate')
-        self.assertEqual(r.status_code, 202, r.content)
-        a.refresh_from_db()
-        self.assertEqual(a.pending_action['type'], 'delete')
-        pending = self.api.get('/api/club1000/investors/?approval_status=pending').data
-        pending = pending if isinstance(pending, list) else pending.get('results', [])
-        self.assertIn(a.pk, [x['id'] for x in pending])                                                  # on Approvals
-        self.assertEqual(self._approve(a).status_code, 200)
+        self.assertEqual(self.api.delete(f'/api/club1000/investors/{a.pk}/').status_code, 204)
         self.assertFalse(Investor.objects.filter(pk=a.pk).exists())
         lead.refresh_from_db()
         self.assertEqual(lead.status, 'investor_deleted')
 
-    def test_rejected_delete_keeps_the_investor(self):
-        a = self._inv('A', '9800000001')
-        self.api.delete(f'/api/club1000/investors/{a.pk}/?reason=dup')
-        r = self.api.post(f'/api/club1000/investors/{a.pk}/pending-action/', {'action': 'reject', 'reason': 'not a duplicate'}, format='json')
-        self.assertEqual(r.status_code, 200, r.content)
-        a.refresh_from_db()
-        self.assertIsNone(a.pending_action)
-        self.assertEqual(a.rejections[-1]['kind'], 'delete')
-
-    def test_paid_investor_asks_first_then_requests_with_payments(self):
+    def test_paid_investor_asks_first_then_deletes_its_payouts_too(self):
         c = self._inv('C', '9800000003')
         Payout.objects.create(investor=c, payout_type='interest', due_date=date(2025, 4, 1), amount_due=Decimal('100'),
                               status='paid', paid_amount=Decimal('100'))
-        r = self.api.delete(f'/api/club1000/investors/{c.pk}/?reason=x')
+        r = self.api.delete(f'/api/club1000/investors/{c.pk}/')
         self.assertEqual((r.status_code, r.json()['code']), (409, 'has_paid'))
-        self.assertEqual(self.api.delete(f'/api/club1000/investors/{c.pk}/?reason=x&include_paid=1').status_code, 202)
-        self._approve(c)
-        self.assertFalse(Investor.objects.filter(pk=c.pk).exists())
+        self.assertEqual(self.api.delete(f'/api/club1000/investors/{c.pk}/?include_paid=1').status_code, 204)
         self.assertFalse(Payout.objects.filter(investor_id=c.pk).exists())
 
-    def test_bulk_delete_files_requests(self):
-        a, b = self._inv('Aa', '9800000001'), self._inv('Bb', '9800000002')
-        r = self.api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk, b.pk], 'reason': 'test data'}, format='json')
-        self.assertEqual(sorted(r.json()['requested']), sorted([a.pk, b.pk]))
-        self.assertEqual(Investor.objects.filter(pending_action__isnull=False).count(), 2)
+    def test_bulk_delete(self):
+        a, b, c = self._inv('Aa', '9800000001'), self._inv('Bb', '9800000002'), self._inv('Cc', '9800000003')
+        Payout.objects.create(investor=c, payout_type='interest', due_date=date(2025, 4, 1), amount_due=Decimal('100'), status='paid')
+        r = self.api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk, b.pk, c.pk]}, format='json')
+        self.assertEqual(sorted(r.json()['deleted']), sorted([a.pk, b.pk]))
+        self.assertEqual([x['id'] for x in r.json()['refused']], [c.pk])
+        r = self.api.post('/api/club1000/investors/bulk-delete/', {'ids': [c.pk], 'include_paid': True}, format='json')
+        self.assertEqual(r.json()['deleted'], [c.pk])
 
     def test_only_managers(self):
         u = User.objects.create_user('e@bdl.com', company=self.co, user_code='BDL2', password='p',
                                      name='Emp', role='Employee', modules=['Club 1000'])
         api = APIClient(); api.force_authenticate(u)
         a = self._inv('A', '9800000001')
-        self.assertEqual(api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk], 'reason': 'x'}, format='json').status_code, 403)
+        self.assertEqual(api.post('/api/club1000/investors/bulk-delete/', {'ids': [a.pk]}, format='json').status_code, 403)
+        self.assertEqual(api.delete(f'/api/club1000/investors/{a.pk}/').status_code, 403)

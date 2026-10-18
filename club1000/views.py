@@ -785,13 +785,8 @@ class InvestorDetailView(APIView):
             return Response({'detail': f'{" and ".join(b for b in bits if b)} for this investor already paid.', 'code': 'has_paid',
                              'paid_payouts': n_pay, 'paid_amount': str(amt_pay),
                              'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)}, status=status.HTTP_409_CONFLICT)
-        # Not done here: a delete goes to the scheme's approvers (Approvals → Pending).
-        reason = (request.query_params.get('reason') or request.data.get('reason') or '').strip()[:1000]
-        if not reason:
-            return Response({'detail': 'Give a reason for deleting.'}, status=status.HTTP_400_BAD_REQUEST)
-        _request_action(request, investor, 'delete', reason, include_paid)
-        return Response({'requested': True, 'detail': 'Sent to the approvers — it is deleted once approved.'},
-                        status=status.HTTP_202_ACCEPTED)
+        _delete_investor(request, investor, include_paid=True)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 def _paid_on(investor):
@@ -890,9 +885,6 @@ class InvestorBulkDeleteView(APIView):
         if not ids:
             return Response({'detail': 'Pick at least one investor.'}, status=status.HTTP_400_BAD_REQUEST)
         include_paid = str(request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
-        reason = (request.data.get('reason') or '').strip()[:1000]
-        if not reason:
-            return Response({'detail': 'Give a reason for deleting.'}, status=status.HTTP_400_BAD_REQUEST)
         found = {i.pk: i for i in _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)}
         deleted, refused = [], []
         for pk in ids:
@@ -906,20 +898,20 @@ class InvestorBulkDeleteView(APIView):
                 refused.append({'id': pk, 'name': name, 'reason': 'Payments already made.', 'paid_payouts': n_pay,
                                 'paid_amount': str(amt_pay), 'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)})
             else:
-                _request_action(request, inv, 'delete', reason, include_paid)
+                _delete_investor(request, inv, include_paid=True)
                 deleted.append({'id': pk, 'name': name})
         # One entry for the whole action — every investor deleted, and every one refused
         # with why (each delete above replaced the previous note, so this is the record).
         from activity.recorder import note
         parts = []
         if deleted:
-            parts.append(f'Asked to delete {len(deleted)} investor{"s" if len(deleted) != 1 else ""} (sent for approval) — ' + ', '.join(d['name'] for d in deleted))
+            parts.append(f'Deleted {len(deleted)} investor{"s" if len(deleted) != 1 else ""} — ' + ', '.join(d['name'] for d in deleted))
         if refused:
             parts.append(f'kept {len(refused)} (payments already made — not confirmed) — ' + ', '.join(r['name'] or f'#{r["id"]}' for r in refused))
         if parts:
-            note(request, ' · '.join(parts) + f' · reason: {reason}', action='delete-request' if deleted else 'delete-refused', target_type='investor',
+            note(request, ' · '.join(parts), action='deleted' if deleted else 'delete-refused', target_type='investor',
                  module='Club 1000', details={'deleted': [d['id'] for d in deleted], 'refused': [r['id'] for r in refused]})
-        return Response({'requested': [d['id'] for d in deleted], 'deleted': [], 'refused': refused})
+        return Response({'deleted': [d['id'] for d in deleted], 'refused': refused})
 
 
 class InvestorLedgerView(APIView):

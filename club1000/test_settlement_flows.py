@@ -138,9 +138,8 @@ class SettlementFlowTests(TestCase):
     def test_manager_deletes_an_investor_with_nothing_paid(self):
         inv = self._inv(date.today() - relativedelta(months=1))
         Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('100000'))
-        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/?reason=test')
-        self.assertEqual(r.status_code, 202, getattr(r, 'data', None))
-        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json').status_code, 200)
+        r = self.api.delete(f'/api/club1000/investors/{inv.pk}/')
+        self.assertEqual(r.status_code, 204, getattr(r, 'data', None))
         self.assertFalse(Investor.objects.filter(pk=inv.pk).exists())
         self.assertFalse(Payout.objects.filter(investor_id=inv.pk).exists())
 
