@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views, importer, portfolio
+from .statement import InvestorStatementView
 
 urlpatterns = [
     path('stats/',                    views.StatsView.as_view()),
@@ -16,6 +17,7 @@ urlpatterns = [
     path('investors/',                views.InvestorListCreateView.as_view()),
     path('investors/<int:pk>/',       views.InvestorDetailView.as_view()),
     path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),
+    path('investors/<int:pk>/statement/', InvestorStatementView.as_view()),
     path('investors/<int:pk>/redeem/', views.InvestorRedeemView.as_view()),
     path('investors/<int:pk>/settlement/', views.InvestorSettlementView.as_view()),
     path('investors/<int:pk>/portfolio/', portfolio.PortfolioDetailView.as_view()),

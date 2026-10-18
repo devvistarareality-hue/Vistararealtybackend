@@ -20,7 +20,8 @@ WRITE_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 # an act in its own right — the row it leaves is the only record that it happened.
 # Deliberately a short, named list: this is an exception to "GETs are not actions",
 # not an invitation to log reads generally.
-READ_ACTIONS = re.compile(r'^/api/sales/bookings/export/')
+# Reads worth logging: a bookings export, an investor statement given to a client.
+READ_ACTIONS = re.compile(r'^/api/(sales/bookings/export/|club1000/investors/\d+/statement/)')
 # Housekeeping calls that are not anyone "doing" something: signing in, token
 # refresh, reading notifications, autosaves, uploads, searches, webhooks.
 SKIP = re.compile(

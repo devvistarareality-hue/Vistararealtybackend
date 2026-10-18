@@ -1,0 +1,145 @@
+{% load ar %}<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Statement - {{ inv.name }}{% if inv.loi_no %} - {{ inv.loi_no }}{% endif %}</title>
+<style>
+  @page { size: A4; margin: 12mm 0 12mm; }
+  @page :first { margin-top: 0; }
+  :root { --ink: #0f1b2d; --ink2: #3b4a60; --muted: #6b7a90; --line: #e3e9f1; --soft: #f4f7fb;
+          --brand: #1f5490; --brand2: #2f6db5; --good: #177245; --goodbg: #e6f4ec; --bad: #b3261e; --badbg: #fbe9e7;
+          --warn: #8a5a12; --warnbg: #fdf1dc; --info: #1f5490; --infobg: #e8f0fa; }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: "Inter", -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: var(--ink); font-size: 10.5px; line-height: 1.45; background: #fff; }
+  .page { padding: 0 14mm 14mm; }
+
+  .band { background: linear-gradient(120deg, #0f2f57 0%, var(--brand) 55%, var(--brand2) 100%); color: #fff; padding: 11mm 14mm 9mm; position: relative; overflow: hidden; }
+  .band:after { content: ''; position: absolute; right: -40mm; top: -30mm; width: 110mm; height: 110mm; border-radius: 50%; background: rgba(255,255,255,.06); }
+  .band-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; position: relative; z-index: 1; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 44px; height: 44px; border-radius: 12px; background: #fff; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .logo img { width: 100%; height: 100%; object-fit: contain; }
+  .logo span { color: var(--brand); font-weight: 800; font-size: 18px; }
+  .co { font-size: 17px; font-weight: 800; letter-spacing: -.01em; }
+  .co-sub { font-size: 10px; opacity: .75; letter-spacing: .08em; text-transform: uppercase; margin-top: 1px; }
+  .doc { text-align: right; }
+  .doc-title { font-size: 20px; font-weight: 800; letter-spacing: -.01em; }
+  .doc-sub { font-size: 10.5px; opacity: .8; margin-top: 2px; }
+
+  .party { display: grid; grid-template-columns: 1.1fr 1fr; gap: 12px; margin: -6mm 0 14px; position: relative; z-index: 2; }
+  .box { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; box-shadow: 0 6px 18px rgba(15,27,45,.07); }
+  .label { font-size: 8.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+  .client { font-size: 15px; font-weight: 800; margin-top: 3px; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; margin-top: 6px; color: var(--ink2); }
+  .kv b { font-weight: 600; color: var(--muted); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 9px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+  .pill.ok { background: var(--goodbg); color: var(--good); }
+  .pill.warn { background: var(--warnbg); color: var(--warn); }
+  .pill.off { background: var(--soft); color: var(--muted); border: 1px solid var(--line); }
+  .pill.bad { background: var(--badbg); color: var(--bad); }
+  .pill.info { background: var(--infobg); color: var(--info); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+  .tile { border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; background: var(--soft); }
+  .tile .v { font-size: 14.5px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .tile .n { font-size: 9px; color: var(--muted); margin-top: 2px; }
+  .tile.hero { background: linear-gradient(135deg, var(--brand), var(--brand2)); border-color: transparent; color: #fff; }
+  .tile.hero .label, .tile.hero .n { color: rgba(255,255,255,.8); }
+  .tile.good .v { color: var(--good); }
+  .tile.bad .v { color: var(--bad); }
+
+  h2 { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; margin: 16px 0 3px; display: flex; align-items: center; gap: 8px; }
+  h2:before { content: ''; width: 4px; height: 13px; border-radius: 2px; background: var(--brand2); }
+  h2 .cur { font-size: 8.5px; letter-spacing: .06em; padding: 1px 7px; border-radius: 999px; background: var(--goodbg); color: var(--good); }
+  .termline { color: var(--ink2); margin: 0 0 7px 12px; }
+  table { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 6px 9px; text-align: left; vertical-align: middle; }
+  th { background: var(--soft); font-size: 8.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); }
+  td { border-bottom: 1px solid var(--line); }
+  tbody tr:nth-child(even) td { background: #fbfcfe; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tfoot td { background: var(--soft); font-weight: 800; border-top: 1px solid var(--line); border-bottom: 0; }
+  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .credit { color: var(--good); }
+  .muted { color: var(--muted); }
+  .sub { display: block; font-size: 8.5px; color: var(--muted); margin-top: 1px; }
+  .row-avoid { page-break-inside: avoid; }
+  .ended { margin-top: 6px; padding: 7px 10px; border-radius: 8px; background: var(--infobg); color: var(--info); font-size: 9.5px; }
+
+  .note { margin-top: 16px; padding: 10px 12px; border-radius: 10px; background: var(--soft); border: 1px solid var(--line); font-size: 9px; color: var(--muted); line-height: 1.6; }
+  .foot { margin-top: 12px; display: flex; justify-content: space-between; font-size: 8.5px; color: var(--muted); }
+  .term.keep { break-inside: avoid; page-break-inside: avoid; }
+  .termhead { break-after: avoid; page-break-after: avoid; }
+  @media print { .box { box-shadow: none; } .band:after { display: none; } }
+  @media screen { body { background: #e9eef5; } .sheet { max-width: 210mm; margin: 16px auto; background: #fff; box-shadow: 0 10px 40px rgba(15,27,45,.15); } }
+</style></head>
+<body><div class="sheet">
+  <div class="band">
+    <div class="band-row">
+      <div class="brand">
+        <div class="logo">{% if company.logo_url %}<img src="{{ company.logo_url }}" alt="">{% else %}<span>{{ company.name|slice:":1" }}</span>{% endif %}</div>
+        <div><div class="co">{{ company.name }}</div><div class="co-sub">Club 1000</div></div>
+      </div>
+      <div class="doc"><div class="doc-title">Investment Statement</div><div class="doc-sub">As of {{ as_of }}</div></div>
+    </div>
+  </div>
+
+  <div class="page">
+    <div class="party">
+      <div class="box">
+        <div class="label">Statement for</div>
+        <div class="client">{{ inv.name|default:"—" }}</div>
+        <div class="kv">
+          <b>Phone</b><span>{{ inv.phone|default:"—" }}</span>
+          {% if inv.email %}<b>Email</b><span>{{ inv.email }}</span>{% endif %}
+          {% if inv.pan %}<b>PAN</b><span>{{ inv.pan }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="box">
+        <div class="label">Investment</div>
+        <div class="kv">
+          <b>Scheme</b><span>{{ scheme }}</span>
+          <b>LOI No</b><span>{{ inv.loi_no|default:"—" }}</span>
+          <b>Interest</b><span>{{ pct }}% total · {{ payout }}</span>
+          <b>{% if multi %}First invested{% else %}Invested on{% endif %}</b><span>{{ first_on }}</span>
+          {% if multi %}<b>Current term</b><span>{{ term_now }} · renewed {{ renewals }}×</span>{% else %}<b>Term</b><span>{{ term_now }}</span>{% endif %}
+          <b>Status</b><span><span class="pill {{ state_tone }}">{{ state }}</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tiles row-avoid">
+      <div class="tile"><div class="label">Principal</div><div class="v">{{ principal|inr }}</div><div class="n">{% if multi %}first invested {{ first_on }}{% else %}invested {{ first_on }}{% endif %}</div></div>
+      <div class="tile"><div class="label">Interest</div><div class="v">{{ interest|inr }}</div><div class="n">earned over {% if multi %}all terms{% else %}the term{% endif %}</div></div>
+      <div class="tile good"><div class="label">Paid to you</div><div class="v">{{ paid_out|inr }}</div><div class="n">including amounts settled into renewals</div></div>
+      <div class="tile hero"><div class="label">Still to be paid</div><div class="v">{{ pending|inr }}</div><div class="n">{% if overdue > 0 %}{{ overdue|inr }} due now{% else %}nothing due now{% endif %}</div></div>
+    </div>
+
+    {% for t in sections %}
+    <div class="term{% if t.rows|length <= 14 %} keep{% endif %}">
+    <div class="termhead"><h2>{{ t.label }}{% if t.current %} <span class="cur">CURRENT</span>{% endif %}</h2>
+    <div class="termline">{{ t.start }} → {{ t.maturity }} · principal {{ t.principal|inr }} · interest {{ t.interest|inr }}</div></div>
+    <table>
+      <thead><tr><th>#</th><th>Payout</th><th>Due date</th><th class="num">Amount</th><th class="num">Paid</th><th>Paid on</th><th>Status</th></tr></thead>
+      <tbody>{% for r in t.rows %}
+        <tr class="row-avoid"><td class="muted">{{ forloop.counter }}</td>
+          <td>{{ r.label }}{% if r.working %}<span class="sub">{{ r.working }}</span>{% endif %}{% if r.added %}<span class="sub">added to the principal</span>{% endif %}</td>
+          <td>{{ r.due }}</td><td class="num">{{ r.amount|inr }}</td>
+          <td class="num{% if r.paid is not None %} credit{% endif %}">{% if r.paid is not None %}{{ r.paid|inr }}{% else %}—{% endif %}</td>
+          <td>{{ r.paid_on }}</td><td><span class="pill {{ r.tone }}">{{ r.status }}</span></td></tr>
+      {% empty %}<tr><td colspan="7" class="muted">No payouts in this term.</td></tr>{% endfor %}</tbody>
+      <tfoot><tr><td colspan="3">Term total</td><td class="num">{{ t.total|inr }}</td><td class="num">{{ t.paid_out|inr }}</td><td colspan="2" class="num">{% if t.pending > 0 %}{{ t.pending|inr }} to pay{% else %}Settled{% endif %}</td></tr></tfoot>
+    </table>
+    {% if t.renewed_with %}<div class="ended row-avoid">Renewed with {{ t.renewed_with|inr }}{% if t.interest_added > 0 %} · interest added to the principal {{ t.interest_added|inr }}{% endif %}{% if t.fresh_money > 0 %} · new money added {{ t.fresh_money|inr }}{% endif %}{% if t.taken_back > 0 %} · principal taken back {{ t.taken_back|inr }}{% endif %}</div>{% endif %}
+    </div>
+    {% endfor %}
+
+    <div class="note">
+      <b>About this statement.</b> Interest is worked out on the principal for the days of each period, as per the scheme.
+      A payout marked <b>Settled to Renewal</b> was not paid separately — at that renewal it was settled into the new term
+      (added to the principal, or paid out with it). <b>Due</b> means the payout date has passed and it is still to be paid;
+      <b>Upcoming</b> payouts are not due yet. Please contact us if any payment is missing from this statement.
+    </div>
+    <div class="foot"><span>{{ company.name }} · Club 1000 statement for {{ inv.name }}{% if inv.loi_no %} · LOI {{ inv.loi_no }}{% endif %}</span><span>Generated {{ generated }}</span></div>
+  </div>
+</div></body></html>

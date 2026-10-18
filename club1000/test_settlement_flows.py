@@ -303,3 +303,34 @@ class SettlementFlowTests(TestCase):
         self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'Settled to renewal R1 · UTR 99'))
         self.assertEqual((back.status, back.amount_due), ('paid', Decimal('20000.00')))
         self.assertFalse(Payout.objects.filter(investor=inv, status='pending', due_date__lte=old).exists())
+
+
+class InvestorStatementTests(TestCase):
+    def setUp(self):
+        self.co = Company.objects.create(code='STM', name='Statement Co', is_active=True)
+        self.admin = User.objects.create_user('a@stm.com', company=self.co, user_code='STM1', password='p',
+                                              name='Admin', role='Admin', modules=['Club 1000'])
+        self.scheme = Scheme.objects.create(company=self.co, name='RISE', tenure_months=12, min_ticket_size=1)
+        self.api = APIClient(); self.api.force_authenticate(self.admin)
+
+    def test_statement_lists_each_payout_with_its_status(self):
+        start = date.today() - relativedelta(months=6)
+        inv = Investor.objects.create(company=self.co, scheme=self.scheme, added_by=self.admin, name='Prince Test',
+                                      phone='9800000099', loi_no='RISE/043', amount_invested=Decimal('100000'),
+                                      investment_date=start, maturity_date=start + relativedelta(months=12),
+                                      total_return_pct=Decimal('15'), interest_payout='quarterly',
+                                      status='active', approval_status='approved')
+        Payout.objects.create(investor=inv, payout_type='interest', due_date=start + relativedelta(months=3),
+                              amount_due=Decimal('3750'), paid_amount=Decimal('3750'), status='paid',
+                              paid_date=start + relativedelta(months=3))
+        Payout.objects.create(investor=inv, payout_type='interest', due_date=date.today() - timedelta(days=2), amount_due=Decimal('3750'))
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('103750'))
+        r = self.api.get(f'/api/club1000/investors/{inv.pk}/statement/')
+        self.assertEqual(r.status_code, 200)
+        html = r.content.decode()
+        for text in ('Investment Statement', 'Prince Test', 'RISE/043', '>Paid<', '>Due<', '>Upcoming<', '₹ 3,750', '₹ 1,03,750'):
+            self.assertIn(text, html)
+        staff = User.objects.create_user('s@stm.com', company=self.co, user_code='STM2', password='p',
+                                         name='Staff', role='Employee', modules=['Club 1000'])
+        other = APIClient(); other.force_authenticate(staff)
+        self.assertEqual(other.get(f'/api/club1000/investors/{inv.pk}/statement/').status_code, 404)   # not theirs
