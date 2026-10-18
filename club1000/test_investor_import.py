@@ -43,6 +43,9 @@ class InvestorImportTests(TestCase):
         self.assertIn('Investors', wb.sheetnames)
         self.assertEqual(wb['Investors'].cell(row=1, column=1).value, 'Investor Name *')   # must-fill marked
         self.assertNotIn('Times Renewed', [c.value for c in wb['Investors'][1]])     # worked out, not typed
+        heads = [str(c.value or '').replace(' *', '') for c in wb['Investors'][1]]
+        for gone in ('Return %', 'LOI No', 'Security', 'Notes'):     # not asked for in the import
+            self.assertNotIn(gone, heads)
 
     def test_row_missing_a_must_fill_column_is_not_imported(self):
         f = self._file([['Has All', '9800000007', 'RISE', 500000, RECENT_S, '', '', ''],
@@ -69,6 +72,8 @@ class InvestorImportTests(TestCase):
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(r.data['created'], 2)
         by = {i.name: i for i in Investor.objects.all()}   # names are encrypted — match in Python
+        self.assertEqual(by['A One'].total_return_pct, Decimal('15'))   # the scheme's rate for the payout
+        self.assertEqual(by['A One'].loi_no or '', '')                  # given when the draft is submitted
         a = by['A One']
         self.assertEqual((a.approval_status, a.interest_payout, a.amount_invested, a.investment_date, a.maturity_date),
                          ('draft', 'quarterly', Decimal('500000'), RECENT, RECENT + relativedelta(months=12)))

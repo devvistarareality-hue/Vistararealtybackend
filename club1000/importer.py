@@ -35,20 +35,19 @@ COLUMNS = [
     ('amount_invested', 'Amount Invested', True, 'In rupees (paise allowed), no commas needed. At least the scheme\'s minimum ticket.'),
     ('investment_date', 'Investment Date', True, 'DD-MM-YYYY (or an Excel date) of this investment. Maturity is worked out from the scheme\'s tenure. Renewals are NOT imported — renew it on the website (Investors → Renew) after it is approved.'),
     ('interest_payout', 'Interest Payout', False, 'monthly / quarterly / maturity — must be one the scheme offers. Blank = the scheme\'s first option.'),
-    ('total_return_pct', 'Return %', False, 'Total return by maturity. Blank = the scheme\'s rate for that payout.'),
     ('source', 'Source', False, 'referral / walk_in / website / other. Blank = referral.'),
     ('reference_name', 'Reference Name', False, 'Who referred them — earns the referral reward on approval.'),
     ('reference_phone', 'Reference Mobile', False, ''),
-    ('loi_no', 'LOI No', False, 'Keep the LOI number already issued, if any. Blank = assigned later.'),
-    ('security', 'Security', False, 'Printed on the LOI.'),
-    ('notes', 'Notes', False, ''),
 ]
 HEADER_TO_KEY = {}
 for _k, _h, _r, _d in COLUMNS:
     for alias in (_k, _h, _h.replace(' ', '_'), _h.replace(' %', '_pct')):
         HEADER_TO_KEY[alias.strip().lower().replace(' ', '_')] = _k
 HEADER_TO_KEY.update({'mobile_number': 'phone', 'amount': 'amount_invested', 'date': 'investment_date',
-                      'return': 'total_return_pct', 'reference': 'reference_name', 'payout': 'interest_payout'})
+                      'reference': 'reference_name', 'payout': 'interest_payout'})
+# Return %, LOI No, Security and Notes are not in the import (owner, 18 Oct 2026): the
+# return is the scheme's rate for the payout, the LOI No is given when the draft is
+# submitted with its signed LOI, and security / notes are typed in that form.
 SOURCES = [k for k, _ in LEAD_SOURCE_CHOICES]
 PAYOUTS = ['monthly', 'quarterly', 'maturity']
 
@@ -273,11 +272,7 @@ def _check(rows, request):
             errs.append(f'Interest Payout "{_text(r.get("interest_payout"))}" — use monthly / quarterly / maturity')
         elif scheme and payout not in options:
             errs.append(f'{scheme.name} only allows {", ".join(options)}')
-        pct = _num(r.get('total_return_pct'))
-        if pct is False:
-            errs.append('Return % is not a number')
-        if pct in (None, False) and scheme:
-            pct = scheme.rate_for(payout) or Decimal('0')
+        pct = Decimal(str(scheme.rate_for(payout) or 0)) if scheme else None
         source = _text(r.get('source')).lower().replace('-', '_').replace(' ', '_') or 'referral'
         if source not in SOURCES:
             errs.append(f'Source "{_text(r.get("source"))}" — use {", ".join(SOURCES)}')
@@ -308,8 +303,7 @@ def _check(rows, request):
                 'scheme': scheme, 'name': name, 'phone': digits[-10:], 'email': _text(r.get('email')),
                 'pan': _text(r.get('pan')).upper(), 'amount_invested': amount, 'investment_date': inv_date,
                 'maturity_date': maturity, 'interest_payout': payout, 'total_return_pct': pct, 'source': source,
-                'reference_name': ref_name, 'reference_phone': ref_phone, 'loi_no': _text(r.get('loi_no')),
-                'security': _text(r.get('security')), 'notes': _text(r.get('notes')),
+                'reference_name': ref_name, 'reference_phone': ref_phone,
             },
         })
     return out
@@ -358,7 +352,7 @@ class InvestorImportView(APIView):
                     d = c['data']
                     inv = Investor.objects.create(
                         company=request.user.company, added_by=request.user, approval_status='draft', status='active',
-                        **{k: v for k, v in d.items() if k != 'loi_no'}, loi_no=d['loi_no'],
+                        **d,
                     )
                     created.append(inv)
                     c['investor_id'] = inv.id
