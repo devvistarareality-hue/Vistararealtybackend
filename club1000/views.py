@@ -345,7 +345,9 @@ class Club1000UsersView(APIView):
         users = (User.objects.filter(company=request.user.company, is_active=True)
                  .select_related('company').order_by('name'))
         data = [
-            {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation}
+            {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation,
+             # can act as an approver (approving needs manager-level Club 1000 access)
+             'club_manager': is_club1000_manager(u)}
             for u in users if has_club1000_access(u)
         ]
         return Response(data)
