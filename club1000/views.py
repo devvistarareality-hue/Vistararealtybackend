@@ -2308,14 +2308,21 @@ class InvestorActionView(APIView):
                                 rolled += part
                         # Handed over at the renewal: what stayed due to him from the ended
                         # term (its interest, principal taken back) is paid now.
+                        # A renewal settles the term it ends: what stayed due to him from it
+                        # (interest he takes, principal taken back, interest left unpaid in
+                        # earlier instalments) is handed over at the renewal — paid on the
+                        # renewal date (or the date given). Only the running term can owe.
                         pay_now = pr.get('pay_now') or {}
-                        if pay_now.get('paid_date'):
-                            paid_on = date.fromisoformat(pay_now['paid_date'])
-                            note_txt = pay_now.get('notes') or f'Paid at renewal R{investor.renewal_count}'
-                            for p in Payout.objects.filter(investor=investor, status='pending',
-                                                           due_date__lte=date.fromisoformat(finished['maturity'])).order_by('due_date', 'id'):
-                                _pay_payout(p, p.amount_due, paid_on, note_txt, request.user)
-                            finished['paid_at_renewal'] = pay_now['paid_date']
+                        paid_on = (date.fromisoformat(pay_now['paid_date']) if pay_now.get('paid_date')
+                                   else min(investor.investment_date, date.today()))
+                        note_txt = f'Settled at renewal R{investor.renewal_count}' + (f' · {pay_now["notes"]}' if pay_now.get('notes') else '')
+                        settled_any = False
+                        for p in Payout.objects.filter(investor=investor, status='pending',
+                                                       due_date__lte=date.fromisoformat(finished['maturity'])).order_by('due_date', 'id'):
+                            _pay_payout(p, p.amount_due, paid_on, note_txt, request.user)
+                            settled_any = True
+                        if settled_any:
+                            finished['paid_at_renewal'] = paid_on.isoformat()
                         finished['rolled_interest'] = str(rolled.quantize(Decimal('0.01')))
                         finished['interest_choice'] = 'reinvest' if reinvest else 'pay'
                         investor.past_terms = (investor.past_terms or []) + [finished]
@@ -2643,11 +2650,11 @@ class InvestorRenewView(APIView):
         # The money going to him at this renewal (the ended term's interest he takes,
         # principal taken back) was handed over now: paid on approval, on this date.
         pn = request.data.get('pay_now')
-        if isinstance(pn, dict) and pn.get('paid_date'):
-            paid_on = _parse_date(pn.get('paid_date'))
-            if not paid_on or paid_on > date.today():
+        if isinstance(pn, dict) and (pn.get('paid_date') or pn.get('notes')):
+            paid_on = _parse_date(pn.get('paid_date')) if pn.get('paid_date') else None
+            if pn.get('paid_date') and (not paid_on or paid_on > date.today()):
                 return Response({'detail': 'The paid date must be today or earlier.'}, status=status.HTTP_400_BAD_REQUEST)
-            pending['pay_now'] = {'paid_date': paid_on.isoformat(), 'notes': str(pn.get('notes') or '')[:200]}
+            pending['pay_now'] = {**({'paid_date': paid_on.isoformat()} if paid_on else {}), 'notes': str(pn.get('notes') or '')[:200]}
         # Exactly how much of that interest goes into the renewal, when the form knows
         # (he took part of it and added fresh money besides).
         if request.data.get('interest_added') not in (None, ''):
@@ -2708,9 +2715,10 @@ class InvestorUndoRenewalView(APIView):
         all_pays = list(investor.payouts.all())
         current = [p for p in all_pays if term_of(terms, p.due_date) == cur_no]
         made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
-        settled = [p for p in all_pays if (p.notes or '').startswith(f'Added to renewal R{investor.renewal_count}')]
+        settled = [p for p in all_pays if (p.notes or '').startswith((f'Added to renewal R{investor.renewal_count}',
+                                                                      f'Settled at renewal R{investor.renewal_count}'))]
         reward = investor.referral_rewards.filter(pct=REINVESTMENT_REFERRAL_REWARD_PCT).order_by('-created_at').first()
-        paid_rows = [p for p in current + made_at_renewal if p.status == 'paid']
+        paid_rows = [p for p in current + made_at_renewal if p.status == 'paid' and p not in settled]
         reward_paid = bool(reward and reward.status == 'paid')
         confirm = str(request.data.get('confirm_paid') or '').lower() in ('1', 'true', 'yes')
         if (paid_rows or reward_paid) and not confirm:

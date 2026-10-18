@@ -81,10 +81,10 @@ class SettlementFlowTests(TestCase):
             pending_revision={'amount_invested': '80000', 'investment_date': str(date.today()), 'interest_payout': 'maturity'})
         r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
-        self.assertTrue(Payout.objects.filter(pk=old_int.pk, status='pending').exists(), 'old unpaid interest was wiped')
+        self.assertTrue(Payout.objects.filter(pk=old_int.pk, status='paid').exists(), 'old interest must stay, settled at the renewal')
         old_maturity = inv.maturity_date
-        returned = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=old_maturity, status='pending')
-        self.assertEqual([p.amount_due for p in returned], [Decimal('20000.00')])     # on the finished term's maturity
+        returned = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=old_maturity, status='paid')
+        self.assertEqual([p.amount_due for p in returned], [Decimal('20000.00')])     # on the finished term's maturity, settled
         inv.refresh_from_db()
         self.assertEqual([t['start'] for t in inv.past_terms], [str(date.today() - relativedelta(months=25))])
 
@@ -206,13 +206,14 @@ class SettlementFlowTests(TestCase):
 
     def test_case2_interest_paid_out_principal_renewed(self):
         inv, a, b, _ = self._renew_quarterly(100000, 'pay')
-        self.assertEqual((a.status, b.status), ('pending', 'pending'))           # still owed to him
+        self.assertEqual((a.status, b.status), ('paid', 'paid'))                 # handed over at the renewal
+        self.assertTrue(a.notes.startswith('Settled at renewal R1'))
         self.assertFalse(Payout.objects.filter(investor=inv, payout_type='maturity', notes__icontains='returned').exists())
 
     def test_case3_some_principal_and_the_interest_paid_out(self):
         inv, a, b, old = self._renew_quarterly(60000, 'pay')
-        self.assertEqual((a.status, b.status), ('pending', 'pending'))
-        back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old, status='pending')
+        self.assertEqual((a.status, b.status), ('paid', 'paid'))
+        back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old, status='paid')
         self.assertEqual(back.amount_due, Decimal('40000.00'))
 
     def test_case4_more_added_on_top_of_principal_and_interest(self):
@@ -225,7 +226,8 @@ class SettlementFlowTests(TestCase):
         inv, a, b, _ = self._renew_quarterly(105000, 'reinvest')                 # only ₹5,000 of ₹7,500 added
         self.assertEqual(a.status, 'paid')
         self.assertEqual(b.paid_amount, Decimal('1250'))
-        self.assertEqual([x.amount_due for x in Payout.objects.filter(investor=inv, balance_of=b, status='pending')], [Decimal('2500.00')])
+        # the ₹2,500 he takes is handed over at the renewal too
+        self.assertEqual([(x.amount_due, x.status) for x in Payout.objects.filter(investor=inv, balance_of=b)], [(Decimal('2500.00'), 'paid')])
 
     def test_undo_renewal_puts_the_ended_term_back(self):
         from django.core.files.base import ContentFile
@@ -267,7 +269,7 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
         inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
         self.assertEqual(inv.past_terms[-1]['rolled_interest'], '5000.00')
-        self.assertEqual((a.status, b.paid_amount), ('paid', Decimal('1250')))          # ₹2,500 of b stays due to him
+        self.assertEqual((a.status, b.paid_amount), ('paid', Decimal('1250')))          # ₹2,500 of b handed to him at renewal
         self.assertEqual(money_in(inv), Decimal('150000'))                              # ₹50,000 fresh
 
     def test_rejected_renewal_rolls_back_the_number_and_is_listed(self):
@@ -294,6 +296,6 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
         a.refresh_from_db()
         back = Payout.objects.get(investor=inv, payout_type='maturity', due_date=old)
-        self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'UTR 99'))
+        self.assertEqual((a.status, a.paid_date, a.notes), ('paid', old, 'Settled at renewal R1 · UTR 99'))
         self.assertEqual((back.status, back.amount_due), ('paid', Decimal('20000.00')))
         self.assertFalse(Payout.objects.filter(investor=inv, status='pending', due_date__lte=old).exists())
