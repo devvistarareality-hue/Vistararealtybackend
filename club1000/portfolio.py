@@ -182,6 +182,11 @@ class PortfolioDetailView(APIView):
         if not person:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         out = _summary(person, payouts_by_inv, referred_by_phone, rewards_by_phone)
+        # What 'Add more' carries into a new investment for this person — from their latest one.
+        latest = max(person, key=lambda i: (i.investment_date or date.min, i.pk))
+        out['prefill'] = {'name': latest.name, 'phone': latest.phone, 'email': latest.email or '', 'pan': latest.pan or '',
+                          'source': latest.source or 'referral', 'reference_name': latest.reference_name or '',
+                          'reference_phone': latest.reference_phone or ''}
         out['history'] = []
         for i in sorted(person, key=lambda i: (i.investment_date, i.pk), reverse=True):
             pays = payouts_by_inv.get(i.pk, [])
