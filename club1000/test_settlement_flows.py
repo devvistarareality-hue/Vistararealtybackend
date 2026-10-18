@@ -269,3 +269,16 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(inv.past_terms[-1]['rolled_interest'], '5000.00')
         self.assertEqual((a.status, b.paid_amount), ('paid', Decimal('1250')))          # ₹2,500 of b stays due to him
         self.assertEqual(money_in(inv), Decimal('150000'))                              # ₹50,000 fresh
+
+    def test_rejected_renewal_rolls_back_the_number_and_is_listed(self):
+        inv = self._inv(date.today() - relativedelta(months=25))
+        Investor.objects.filter(pk=inv.pk).update(approval_status='pending', pending_revision_type='renew', revision_no=1,
+                                                  pending_revision={'amount_invested': '150000', 'investment_date': str(date.today())})
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'reject', 'reason': 'again sign'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        inv.refresh_from_db()
+        self.assertEqual((inv.approval_status, inv.revision_no, inv.amount_invested), ('approved', 0, Decimal('100000')))
+        self.assertEqual((inv.rejections[0]['kind'], inv.rejections[0]['no'], inv.rejections[0]['reason']), ('renewal', 1, 'again sign'))
+        rows = self.api.get('/api/club1000/investors/?approval_status=rejected').data
+        rows = rows if isinstance(rows, list) else rows.get('results', [])
+        self.assertEqual([x['id'] for x in rows], [inv.pk])

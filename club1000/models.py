@@ -263,6 +263,11 @@ class Investor(models.Model):
     # brought in by import: [{start, maturity, principal, return_pct, interest_payout}].
     # Their payouts are made on approval (services.generate_past_term_payouts).
     past_terms = models.JSONField(null=True, blank=True)
+    # Revisions and renewals that were turned down, newest last:
+    # [{kind: 'renewal'|'revision', no, reason, by, at, amount}]. The investment itself
+    # stays approved on its old terms; this keeps the rejection on record (and on the
+    # Approvals screen's Rejected tab).
+    rejections = models.JSONField(null=True, blank=True)
     # Who signed the investment off, and when — the latest approval, a revision's
     # included. Shown on the Approved tab.
     approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='club1000_investors_approved')

@@ -598,6 +598,10 @@ class InvestorListCreateView(APIView):
         approval_status = request.query_params.get('approval_status')
         if approval_status == 'all':
             pass  # Approvals page's "All" tab — no filter, includes rejected.
+        elif approval_status == 'rejected':
+            # Rejected investments, and approved ones whose revision or renewal was
+            # turned down (they stay on their old terms; the rejection is shown).
+            qs = qs.filter(Q(approval_status='rejected') | Q(approval_status='approved', rejections__isnull=False))
         elif approval_status:
             qs = qs.filter(approval_status=approval_status)
         else:
@@ -2384,10 +2388,20 @@ class InvestorActionView(APIView):
                         default_storage.delete(staged_doc)
                     except Exception:
                         pass
+                # Kept on record, and the revision number goes back — R1 rejected
+                # leaves the investment as it was, not reading R1.
+                proposed = investor.pending_revision or {}
+                investor.rejections = (investor.rejections or []) + [{
+                    'kind': 'renewal' if is_renewal else 'revision', 'no': investor.revision_no,
+                    'reason': reason, 'by': request.user.name or '', 'at': timezone.now().isoformat(),
+                    'amount': str(proposed.get('amount_invested') or ''),
+                }]
+                investor.revision_no = max(0, (investor.revision_no or 0) - 1)
                 investor.pending_revision = None
                 investor.pending_revision_type = 'revise'
                 investor.approval_status = 'approved'
-                investor.save(update_fields=['pending_revision', 'pending_revision_type', 'pending_loi_document', 'approval_status', 'updated_at'])
+                investor.save(update_fields=['pending_revision', 'pending_revision_type', 'pending_loi_document', 'approval_status',
+                                             'rejections', 'revision_no', 'updated_at'])
             else:
                 investor.approval_status = 'rejected'
                 if investor.loi_document:
