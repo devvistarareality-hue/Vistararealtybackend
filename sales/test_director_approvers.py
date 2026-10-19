@@ -68,12 +68,12 @@ class DirectorApproverPoolTests(TestCase):
         self.assertIn('Bare Director', names)
         self.assertIn('Sales Director', names)
 
-    def test_accounts_pool_is_only_people_with_accounts_access(self):
-        # The owner (19 Oct 2026): the Accounts approver picker lists only people who
-        # have Accounts & Finance — not every Director or Admin.
+    def test_accounts_pool_is_accounts_access_and_directors(self):
+        # The owner (19 Oct 2026): the Accounts approver picker lists the people who
+        # have Accounts & Finance and every Director — not an Admin without the module.
         names = self._names('accounts_module')
-        self.assertNotIn('Bare Director', names)
-        self.assertNotIn('Sales Director', names)
+        self.assertIn('Bare Director', names)
+        self.assertIn('Sales Director', names)
         self.assertNotIn('The Admin', names)
         User.objects.create_user('acc@dir.com', company=self.co, user_code='DIR006', password='p',
                                  name='Accounts Director', role='Director', modules=['Accounts & Finance'])

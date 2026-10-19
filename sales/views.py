@@ -4613,14 +4613,14 @@ class TelecallerListView(APIView):
                 key=lambda u: u.name or '',
             )
         elif crm_role == 'accounts_module':
-            # Only people who have the Accounts & Finance module — an Accounts
+            # People who have the Accounts & Finance module — an Accounts
             # Admin-Modules user, or anyone granted it (employee-level `modules` or
-            # manager-level `manager_modules`). The owner (19 Oct 2026): the Accounts
-            # Approvers picker lists only them — an Admin or a Director without the
-            # module is not offered (unlike cp_module, which still offers Directors).
+            # manager-level `manager_modules`) — and every Director (see is_director:
+            # a Director can be appointed an approver in any module). The owner
+            # (19 Oct 2026): an Admin without the module is not offered.
             users = sorted(
-                (u for u in base_qs
-                 if 'Accounts & Finance' in (getattr(u, 'admin_modules', None) or [])
+                (u for u in base_qs if is_director(u)
+                 or 'Accounts & Finance' in (getattr(u, 'admin_modules', None) or [])
                  or 'Accounts & Finance' in (getattr(u, 'modules', None) or [])
                  or 'Accounts & Finance' in (getattr(u, 'manager_modules', None) or [])),
                 key=lambda u: u.name or '',
