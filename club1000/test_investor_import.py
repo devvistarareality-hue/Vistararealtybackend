@@ -183,3 +183,6 @@ class InvestorImportTests(TestCase):
         r = self.api.post('/api/club1000/investors/bulk-delete/', {'ids': ids}, format='json')
         self.assertEqual((len(r.data['deleted']), len(r.data['refused'])), (2, 0), r.data)
         self.assertEqual(Investor.objects.count(), 0)
+        from activity.models import ActivityLog
+        self.assertTrue(ActivityLog.objects.filter(summary__startswith='Deleted 2 draft investors').exists()
+                        or any(str(x.summary).startswith('Deleted 2 draft investors') for x in ActivityLog.objects.all()))

@@ -916,14 +916,20 @@ class InvestorBulkDeleteView(APIView):
                 refused.append({'id': pk, 'name': name, 'reason': 'Payments already made.', 'paid_payouts': n_pay,
                                 'paid_amount': str(amt_pay), 'paid_rewards': n_rew, 'paid_rewards_amount': str(amt_rew)})
             else:
+                was_draft = inv.approval_status == 'draft'
                 _delete_investor(request, inv, include_paid=True)
-                deleted.append({'id': pk, 'name': name})
+                deleted.append({'id': pk, 'name': name, 'draft': was_draft})
         # One entry for the whole action — every investor deleted, and every one refused
         # with why (each delete above replaced the previous note, so this is the record).
         from activity.recorder import note
         parts = []
         if deleted:
-            parts.append(f'Deleted {len(deleted)} investor{"s" if len(deleted) != 1 else ""} — ' + ', '.join(d['name'] for d in deleted))
+            # Say what was deleted: drafts (unsent work) or investments.
+            n_draft = sum(1 for d in deleted if d.get('draft'))
+            n = len(deleted)
+            what = (f'draft investor{"s" if n != 1 else ""}' if n_draft == n
+                    else f'investor{"s" if n != 1 else ""}' + (f' ({n_draft} of them drafts)' if n_draft else ''))
+            parts.append(f'Deleted {n} {what} — ' + ', '.join(d['name'] for d in deleted))
         if refused:
             parts.append(f'kept {len(refused)} (payments already made — not confirmed) — ' + ', '.join(r['name'] or f'#{r["id"]}' for r in refused))
         if parts:
