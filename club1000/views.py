@@ -782,9 +782,11 @@ class InvestorDetailView(APIView):
         """Delete an investment — managers and above only. See _delete_investor."""
         if not has_club1000_access(request.user):
             return _no_access()
-        if not is_club1000_manager(request.user):
-            return Response({'detail': 'Only a Club 1000 manager can delete an investor.'}, status=status.HTTP_403_FORBIDDEN)
         investor = self._get(request, pk)
+        # Anyone may delete their own draft (unsent work); everything else is managers only.
+        own_draft = bool(investor and investor.approval_status == 'draft' and investor.added_by_id == request.user.id)
+        if not is_club1000_manager(request.user) and not own_draft:
+            return Response({'detail': 'Only a Club 1000 manager can delete an investor.'}, status=status.HTTP_403_FORBIDDEN)
         if not investor:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         include_paid = str(request.query_params.get('include_paid') or request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
@@ -872,7 +874,7 @@ def _delete_investor(request, investor, include_paid=False):
         gone.append(f'{n_pay} paid payout{"s" if n_pay != 1 else ""} (₹{amt_pay:,.0f})')
     if n_rew:
         gone.append(f'{n_rew} paid referral reward{"s" if n_rew != 1 else ""} (₹{amt_rew:,.0f})')
-    note(request, f'Deleted investor — {label}' + (f' · with {" and ".join(gone)} deleted too' if gone else ''),
+    note(request, f'Deleted {"draft " if investor.approval_status == "draft" else ""}investor — {label}' + (f' · with {" and ".join(gone)} deleted too' if gone else ''),
          action='deleted', target_type='investor', target_id=str(pk), module='Club 1000')
     return None, paid
 
@@ -886,8 +888,7 @@ class InvestorBulkDeleteView(APIView):
     def post(self, request):
         if not has_club1000_access(request.user):
             return _no_access()
-        if not is_club1000_manager(request.user):
-            return Response({'detail': 'Only a Club 1000 manager can delete investors.'}, status=status.HTTP_403_FORBIDDEN)
+        manager = is_club1000_manager(request.user)
         ids = request.data.get('ids') or []
         try:
             ids = sorted({int(i) for i in ids})
@@ -896,7 +897,13 @@ class InvestorBulkDeleteView(APIView):
         if not ids:
             return Response({'detail': 'Pick at least one investor.'}, status=status.HTTP_400_BAD_REQUEST)
         include_paid = str(request.data.get('include_paid') or '').lower() in ('1', 'true', 'yes')
-        found = {i.pk: i for i in _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)}
+        qs = _company_filtered(Investor.objects.select_related('scheme', 'lead'), request).filter(pk__in=ids)
+        if not manager:
+            # Anyone may delete their own drafts (unsent work); everything else is managers only.
+            qs = qs.filter(approval_status='draft', added_by=request.user)
+            if not qs.exists():
+                return Response({'detail': 'Only a Club 1000 manager can delete investors.'}, status=status.HTTP_403_FORBIDDEN)
+        found = {i.pk: i for i in qs}
         deleted, refused = [], []
         for pk in ids:
             inv = found.get(pk)
