@@ -19,6 +19,8 @@ urlpatterns = [
     path('investors/<int:pk>/ledger/', views.InvestorLedgerView.as_view()),
     path('investors/<int:pk>/statement/', InvestorStatementView.as_view()),
     path('investors/<int:pk>/redeem/', views.InvestorRedeemView.as_view()),
+    path('investors/<int:pk>/redeem/quote/', views.InvestorRedeemQuoteView.as_view()),
+    path('investors/<int:pk>/redeem/request/', views.InvestorRedeemRequestView.as_view()),
     path('investors/<int:pk>/settlement/', views.InvestorSettlementView.as_view()),
     path('investors/<int:pk>/portfolio/', portfolio.PortfolioDetailView.as_view()),
     path('portfolios/',               portfolio.PortfolioListView.as_view()),

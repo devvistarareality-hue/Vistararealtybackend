@@ -253,6 +253,16 @@ class Investor(models.Model):
     # signed LOI are held in the pending_* fields below and only applied to the
     # live fields on approval (see InvestorActionView) — a rejected revision
     # leaves the original terms and loi_document completely untouched.
+    # Principal taken out early, cumulative across partial redemptions.
+    # amount_invested is reduced as each one is approved, so this is what says
+    # the investment was once larger — the LOI and the ledger both need it, and
+    # it cannot be recovered from amount_invested alone afterwards.
+    redeemed_principal = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    # How many redemptions have been approved on this investment. Counted
+    # rather than derived from the payout rows so a pending one can be labelled
+    # "Redemption 2" before it is approved — and so the number does not shift
+    # if a payout is ever edited.
+    redemption_count = models.IntegerField(default=0)
     revision_no = models.IntegerField(default=0)
     # Why it was rejected (a new investment, a revision or a renewal) — required.
     rejected_reason = EncryptedTextField(blank=True, default='')
@@ -348,6 +358,17 @@ class Payout(models.Model):
     # A short payment keeps the rest due: the instalment is settled for what was
     # paid and the remainder becomes its own pending payout pointing back here.
     balance_of = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='balances')
+    # The signed LOI for THIS payout, kept only for premature redemptions. The
+    # investor's own loi_document is replaced by whatever was signed most
+    # recently, so without a copy here a later revision would quietly take the
+    # place of the redemption's paper and the ledger could not show it again.
+    loi_document = models.FileField(max_length=300, null=True, blank=True)
+    # The working behind a premature redemption — principal taken out, days
+    # held, per-day interest, what stayed invested. amount_due alone is the
+    # total, which cannot be taken apart again, so an earlier redemption could
+    # only ever be shown as a single figure. Plain JSON like Investor's
+    # past_terms and pending_revision, which already hold money this way.
+    redemption_detail = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

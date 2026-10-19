@@ -244,7 +244,17 @@ def past_terms(investor):
     for n, t in enumerate(raw):
         start, maturity = date.fromisoformat(t['start']), date.fromisoformat(t['maturity'])
         principal = Decimal(str(t['principal']))
-        nxt = Decimal(str(raw[n + 1]['principal'])) if n + 1 < len(raw) else (investor.amount_invested or Decimal('0'))
+        if n + 1 < len(raw):
+            nxt = Decimal(str(raw[n + 1]['principal']))
+        else:
+            # The running term's principal as it STARTED, not as it stands now.
+            # A premature redemption reduces amount_invested, and reading it
+            # raw made the last finished term claim it had renewed into the
+            # smaller figure — inventing a "principal paid back to him" line
+            # for money that was actually redeemed later, under its own LOI.
+            # Adding back what has been redeemed keeps a renewal's history
+            # about the renewal.
+            nxt = (investor.amount_invested or Decimal('0')) + (investor.redeemed_principal or Decimal('0'))
         pct = Decimal(str(t.get('return_pct', investor.total_return_pct) or 0))
         at_maturity = (t.get('interest_payout') or investor.interest_payout) not in ('quarterly', 'monthly')
         interest = (maturity_value(principal, pct, start, maturity) - principal) if at_maturity else (principal * pct / Decimal('100'))

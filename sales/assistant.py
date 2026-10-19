@@ -270,7 +270,9 @@ def _entities():
                       'due_for_renewal. Counts APPROVED investments only, exactly as the '
                       'Investors screen does — filter approval eq pending for ones awaiting approval, approval eq all for '
                       'both. For how many investors / people / portfolios use the portfolios entity instead. renewals = '
-                      'times the investment was renewed; referred_by = who brought them into the club', 'fields': {
+                      'times the investment was renewed; referred_by = who brought them into the club. '
+                      'amount is what is STILL invested: a partial premature redemption reduces it and adds the '
+                      'withdrawn principal to redeemed_early, so originally invested = amount + redeemed_early', 'fields': {
             'name': ('name', 'enc'), 'phone': ('phone', 'enc'), 'scheme': ('scheme__name', 'text'),
             'source': ('source', 'choice'), 'amount': ('amount_invested', 'enc_money'),
             'invested': ('investment_date', 'date'), 'maturity': ('maturity_date', 'date'),
@@ -281,6 +283,11 @@ def _entities():
             'referred_by': ('reference_name', 'enc'), 'referrer_phone': ('reference_phone', 'enc'),
             'renewals': ('renewal_count', 'number'), 'first_invested': ('first_invested_on', 'date'),
             'current_term_start': ('investment_date', 'date'),
+            # Partial premature redemption: `amount` above is what is STILL
+            # invested (it shrinks as money is taken out), so the amount taken
+            # out early needs its own name or the two cannot be told apart.
+            'redeemed_early': ('redeemed_principal', 'enc_money'),
+            'revised_on': ('revision_date', 'date'),
         }},
         'portfolios': {'module': ('Club 1000',), 'view': PortfolioListView, 'rows': True, 'date': 'since',
                        'note': 'one row per PERSON (mobile number) — exactly the Investor Portfolios screen: how many '

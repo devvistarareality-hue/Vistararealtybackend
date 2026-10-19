@@ -982,6 +982,10 @@ class InvestorLedgerView(APIView):
                 'notes': p.notes,
                 'period': {k: (str(v) if not isinstance(v, int) else v) for k, v in periods[p.id].items()} if p.id in periods else None,
                 'is_balance': bool(p.balance_of_id),
+                # Only a premature redemption keeps its own signed LOI and
+                # the working behind it.
+                'has_loi': bool(p.loi_document),
+                'redemption': p.redemption_detail or None,
                 'due_date': str(p.due_date),
                 'term': term_of(terms, p.due_date),
                 '_id': p.id,
@@ -1368,6 +1372,326 @@ def _past_date(value, label, default=None):
     if d > date.today():
         raise ValueError(f'The {label} cannot be in the future.')
     return d
+
+
+def _inr(amount):
+    """A rupee figure in Indian grouping — 1000000 -> 10,00,000.
+
+    Written out because these strings end up in notes and log lines that a
+    person reads; "Redeemed 1000000.00" is a number nobody checks.
+    """
+    n = int(Decimal(amount or 0).quantize(Decimal('1')))
+    sign, n = ('-' if n < 0 else ''), abs(n)
+    text = str(n)
+    if len(text) > 3:
+        head, tail = text[:-3], text[-3:]
+        # Indian grouping: the last three digits, then pairs.
+        parts = []
+        while len(head) > 2:
+            parts.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            parts.insert(0, head)
+        text = ','.join(parts + [tail])
+    return f'{sign}\u20b9{text}'
+
+
+def _partial_settlement(investor, redeem_amount, on=None):
+    """What redeeming `redeem_amount` of this investment on `on` works out to.
+
+    The withdrawn money is penalised and the rest is not. The part taken out
+    earns the scheme's premature rate for the months it actually sat invested
+    (redeem_amount x rate x months); the part left behind keeps the scheme's
+    normal return and its original maturity date, and only its payout schedule
+    is resized to the smaller principal.
+
+    interest_paid_share is reported but NOT deducted. The withdrawn half may
+    already have been paid interest at the normal rate for those months, which
+    is more than the premature rate allows — that difference is shown on the
+    dialog and the LOI so whoever signs can see it, but the payable figure is
+    the gross one Chinmay specified: principal taken out, plus premature
+    interest on it. (Full redemption, the older path, does deduct it — the two
+    differ on purpose, not by accident.)
+    """
+    on = on or date.today()
+    scheme = investor.scheme
+    principal = investor.amount_invested or Decimal('0')
+    redeem_amount = Decimal(redeem_amount or 0).quantize(Decimal('0.01'))
+    months = _months_between(investor.investment_date, on) if investor.investment_date else 0
+    lock = scheme.premature_redemption_lock_months or 0
+    rate = scheme.premature_redemption_rate_pct_per_month or Decimal('0')
+
+    # Priced by the day, not by whole months. A redemption on the 19th had its
+    # last eighteen days thrown away when the interest was months x rate; the
+    # money sat invested for them, so it earns for them.
+    #
+    # The scheme states a per-MONTH rate, so it is annualised and spread over
+    # 365 — the same actual-day-count basis the payout schedule already uses
+    # (see services.generate_payout_schedule), rather than a notional 30-day
+    # month that would disagree with it.
+    days_held = (on - investor.investment_date).days if investor.investment_date else 0
+    days_held = max(days_held, 0)
+    daily_rate_pct = rate * Decimal('12') / Decimal('365')
+    # Per-day rupees on the amount coming out, for the working to show.
+    daily_interest = (redeem_amount * daily_rate_pct / Decimal('100')).quantize(Decimal('0.01'))
+    premature_interest = (redeem_amount * daily_rate_pct * Decimal(days_held)
+                          / Decimal('100')).quantize(Decimal('0.01'))
+    payable = (redeem_amount + premature_interest).quantize(Decimal('0.01'))
+    remaining = (principal - redeem_amount).quantize(Decimal('0.01'))
+
+    # Interest already handed over on the share being withdrawn, for the
+    # signer's benefit — see the docstring on why it is not subtracted.
+    paid_this_term = sum(
+        ((p.paid_amount if p.paid_amount is not None else p.amount_due) or Decimal('0')
+         for p in investor.payouts.all()
+         if p.status == 'paid' and p.payout_type == 'interest'
+         and (not investor.investment_date or p.due_date > investor.investment_date)),
+        Decimal('0'))
+    share = (redeem_amount / principal) if principal else Decimal('0')
+    interest_paid_share = (paid_this_term * share).quantize(Decimal('0.01'))
+
+    if investor.status != 'active':
+        reason = f'This investment is already {investor.get_status_display().lower()}.'
+    elif not scheme.premature_redemption_allowed:
+        reason = f'{scheme.name} does not allow redemption before maturity.'
+    elif months < lock:
+        reason = (f'{scheme.name} is locked in for {lock} months — {months} done, free from '
+                  f'{formatted_date(investor.investment_date + relativedelta(months=lock))}.')
+    elif redeem_amount <= 0:
+        reason = 'Enter how much is being redeemed.'
+    elif redeem_amount > principal:
+        reason = f'Cannot redeem more than the {principal} invested.'
+    elif remaining > 0 and remaining < (scheme.min_ticket_size or 0):
+        # Leaving less than the scheme's floor behind is not a smaller
+        # investment, it is one the scheme would never have accepted.
+        reason = (f'Redeeming this much leaves {remaining}, below {scheme.name}\'s minimum of '
+                  f'{scheme.min_ticket_size}. Redeem less, or redeem it all.')
+    else:
+        reason = ''
+
+    return {
+        'as_of': on,
+        'principal': principal,
+        'redeem_amount': redeem_amount,
+        'remaining_principal': remaining,
+        'is_full': remaining <= 0,
+        'months_elapsed': months,
+        'days_held': days_held,
+        'daily_interest': daily_interest,
+        'daily_rate_pct': daily_rate_pct.quantize(Decimal('0.000001')),
+        'lock_months': lock,
+        'rate_per_month': rate,
+        'premature_interest': premature_interest,
+        'payable': payable,
+        'interest_paid_share': interest_paid_share,
+        'normal_return_pct': investor.total_return_pct,
+        'maturity_date': investor.maturity_date,
+        'can_redeem': not reason,
+        'blocked_reason': reason,
+    }
+
+
+def _apply_redemption(investor, actor):
+    """Put an approved partial redemption into effect.
+
+    The figures come from pending_revision, not from recomputing: they are what
+    the signed LOI says, and a fresh calculation on the approval date would
+    quietly disagree with the paper someone signed.
+
+    What changes: a Premature Redemption payout for the money going out, the
+    principal reduced by the part withdrawn, and the remaining schedule resized
+    for what is left. The maturity date and the return % do not move — the rest
+    of the investment carries on exactly as agreed.
+    """
+    pr = investor.pending_revision or {}
+    dec = lambda k: Decimal(str(pr.get(k) or '0'))
+    try:
+        on = date.fromisoformat(str(pr.get('redemption_date')))
+    except (ValueError, TypeError):
+        on = date.today()
+    redeemed = dec('redeem_amount')
+    remaining = dec('remaining_principal')
+
+    investor.redeemed_principal = (investor.redeemed_principal or Decimal('0')) + redeemed
+    investor.redemption_count = (investor.redemption_count or 0) + 1
+    investor.amount_invested = remaining
+    fields = ['redeemed_principal', 'redemption_count', 'amount_invested', 'updated_at']
+
+    # Clear the schedule BEFORE writing this redemption's payout: the
+    # instalments still owed were sized for the larger principal and are
+    # rebuilt below, and a redemption payout created first would be pending too
+    # and swept away with it. Paid instalments are left alone — that money has
+    # gone out.
+    #
+    # Earlier redemptions are excluded explicitly. They are pending because the
+    # money has not been handed over yet, NOT because they are a stale
+    # schedule — deleting them wiped both the amount owed and the signed LOI
+    # kept against it, so a second redemption silently erased the first.
+    (investor.payouts
+     .filter(status='pending')
+     .exclude(payout_type='premature_redemption')
+     .delete())
+    Payout.objects.create(
+        investor=investor, payout_type='premature_redemption', due_date=on,
+        amount_due=dec('payable'),
+        notes=(pr.get('notes') or '')
+              or f"Redeemed {_inr(redeemed)} after {pr.get('days_held')} days",
+        # The LOI signed for this redemption, captured before the swap below
+        # hands it to the investor record — where the next revision or renewal
+        # would overwrite it.
+        loi_document=(investor.pending_loi_document.name
+                      if investor.pending_loi_document else None),
+        # Kept so this redemption can be shown in full later — on the next
+        # redemption's LOI, and anywhere the history is read back.
+        redemption_detail={k: pr.get(k) for k in (
+            'redemption_date', 'redeem_amount', 'premature_interest', 'payable',
+            'remaining_principal', 'days_held', 'daily_interest', 'rate_per_month',
+            'interest_paid_share')},
+    )
+    if remaining > 0:
+        generate_payout_schedule(investor, custom_entries=pr.get('payout_schedule'))
+    else:
+        # Nothing left invested: the investment is closed, not merely smaller.
+        investor.status = 'premature_redeemed'
+        fields.append('status')
+
+    # The signed redemption LOI becomes the investment's LOI, and the staged
+    # fields are cleared — the same close-out the revision branch does, which
+    # this path deliberately steps around.
+    if investor.loi_document:
+        try:
+            investor.loi_document.delete(save=False)
+        except Exception:
+            pass
+    if investor.pending_loi_document:
+        investor.loi_document.name = investor.pending_loi_document.name
+        investor.pending_loi_document = None
+    investor.pending_revision = None
+    investor.pending_revision_type = 'revise'
+    investor.approval_status = 'approved'
+    investor.approved_by, investor.approved_at = actor, timezone.now()
+    fields += ['loi_document', 'pending_loi_document', 'pending_revision',
+               'pending_revision_type', 'approval_status', 'approved_by', 'approved_at']
+    investor.save(update_fields=fields)
+
+
+class InvestorRedeemQuoteView(APIView):
+    """The working for a proposed partial redemption, before anything is saved —
+    what the Redeem dialog and the LOI both print."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        investor = _company_filtered(
+            Investor.objects.select_related('scheme'), request
+        ).prefetch_related('payouts').filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            on = _past_date(request.query_params.get('redemption_date'), 'redemption date')
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        amount = request.query_params.get('amount')
+        try:
+            amount = investor.amount_invested if amount in (None, '') else _money(amount, 'amount')
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_partial_settlement(investor, amount, on))
+
+
+class InvestorRedeemRequestView(APIView):
+    """Propose a partial (or full) premature redemption + a newly signed LOI.
+
+    Redeeming money out of a live investment changes what is owed, so it goes
+    through the same staged approval the revision and renewal flows use rather
+    than taking effect on the spot: held in pending_revision /
+    pending_loi_document with pending_revision_type='redeem' until
+    InvestorActionView approves it. A rejected redemption leaves the
+    investment exactly as it was.
+
+    This is the partial-aware path. InvestorRedeemView above is the older
+    all-or-nothing one, kept for the full-redemption flow already in use.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not club_can(request.user, 'club.investor.manage'):
+            return _no_permission()
+        investor = _investor_visibility_qs(request).prefetch_related('payouts').filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if investor.approval_status != 'approved':
+            return Response({'detail': 'Only an approved investor can be redeemed.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        loi = request.data.get('loi_file')
+        if not isinstance(loi, dict) or not loi.get('data'):
+            return Response({'detail': 'loi_file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            on = _past_date(request.data.get('redemption_date'), 'redemption date')
+            amount = _money(request.data.get('amount'), 'amount')
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if investor.investment_date and on < investor.investment_date:
+            return Response({'detail': 'The redemption date is before the investment date.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        st = _partial_settlement(investor, amount, on)
+        if not st['can_redeem']:
+            return Response({'detail': st['blocked_reason']}, status=status.HTTP_400_BAD_REQUEST)
+
+        # The whole working is stored, not just the amount: these are the
+        # figures the signed LOI shows, and recomputing them at approval time
+        # against a later date would quietly disagree with the paper.
+        pending = {
+            'redemption_date': str(on),
+            'redeem_amount': str(st['redeem_amount']),
+            'premature_interest': str(st['premature_interest']),
+            'payable': str(st['payable']),
+            'remaining_principal': str(st['remaining_principal']),
+            'months_elapsed': st['months_elapsed'],
+            'days_held': st['days_held'],
+            'daily_interest': str(st['daily_interest']),
+            'rate_per_month': str(st['rate_per_month']),
+            'interest_paid_share': str(st['interest_paid_share']),
+            'notes': (request.data.get('notes') or '').strip(),
+        }
+        schedule = request.data.get('payout_schedule')
+        if isinstance(schedule, list):
+            pending['payout_schedule'] = schedule
+
+        investor.pending_revision = pending
+        investor.pending_revision_type = 'redeem'
+        investor.revision_no += 1
+        investor.approval_status = 'pending'
+        investor.revision_draft = None
+        import base64
+        from django.core.files.base import ContentFile
+        try:
+            investor.pending_loi_document.save(
+                _investor_pending_loi_path(investor),
+                ContentFile(base64.b64decode(loi['data'])), save=False,
+            )
+        except Exception:
+            # Imported here as the rest of this module does.
+            import logging
+            logging.getLogger(__name__).exception('Investor redemption LOI save failed for %s', investor.id)
+            return Response({'detail': 'Could not save the signed LOI.'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        investor.save(update_fields=[
+            'pending_revision', 'pending_revision_type', 'revision_no', 'approval_status',
+            'pending_loi_document', 'revision_draft', 'updated_at'])
+        _notify_investor_approvers(investor.company, investor, request.user)
+        # The Log should say what was asked for and on whose investment, not
+        # just "updated investor".
+        from activity.recorder import note
+        note(request,
+             f'Redemption of {_inr(st["redeem_amount"])} from {investor.name}'
+             f'{" (" + investor.loi_no + ")" if investor.loi_no else ""} sent for approval — '
+             f'{st["days_held"]} days at {st["rate_per_month"]}%/month, '
+             f'{_inr(st["payable"])} payable, {_inr(st["remaining_principal"])} left invested',
+             action='update', target_type='Investor', target_id=investor.pk, module='Club 1000')
+        return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
 
 class InvestorRedeemView(APIView):
@@ -2261,15 +2585,19 @@ class InvestorActionView(APIView):
         is_revision = bool(investor.pending_revision)
         revision_type = investor.pending_revision_type if is_revision else None
         is_renewal = revision_type == 'renew'
+        is_redemption = revision_type == 'redeem'
 
         if action == 'approve':
             # Two-level schemes: level 1 passes it on; only level 2 makes it final.
-            final, gate = approval_gate(request, investor, 'Renewal' if is_renewal else ('Revision' if is_revision else 'New investment'))
+            final, gate = approval_gate(request, investor, 'Redemption' if is_redemption else (
+                'Renewal' if is_renewal else ('Revision' if is_revision else 'New investment')))
             if not final:
                 return gate
             investor.approval_step = None
             Investor.objects.filter(pk=investor.pk).update(approval_step=None)
-            if is_revision:
+            if is_redemption:
+                _apply_redemption(investor, request.user)
+            elif is_revision:
                 pr = investor.pending_revision or {}
                 old_principal = investor.amount_invested or Decimal('0')
                 # The term as it stood — kept as a past term if this is a renewal.
@@ -2981,6 +3309,16 @@ class InvestorLoiUrlView(APIView):
                                 status=status.HTTP_404_NOT_FOUND)
             from types import SimpleNamespace
             doc = SimpleNamespace(name=t['loi_document'], url='')
+        # ?payout=N — a premature redemption's own signed LOI, kept on the
+        # payout because the investor's copy is replaced by whatever is signed
+        # next.
+        payout_id = request.query_params.get('payout')
+        if investor and payout_id not in (None, ''):
+            po = investor.payouts.filter(pk=payout_id).first()
+            if not po or not po.loi_document:
+                return Response({'detail': 'This payout has no signed LOI of its own.'},
+                                status=status.HTTP_404_NOT_FOUND)
+            doc = po.loi_document
         if not investor or not doc:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         is_scheme_approver = investor.scheme_id in _scheme_approver_ids(request.user, request.user.company)
