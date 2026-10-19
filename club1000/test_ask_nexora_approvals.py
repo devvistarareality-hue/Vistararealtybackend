@@ -82,3 +82,23 @@ class AskNexoraApprovalsTests(TestCase):
         self.assertEqual((rows['RISE']['level1_approvers'], rows['RISE']['level2_approvers'], rows['RISE']['approval_levels']),
                          ('Sachin', 'Rajesh', 2))
         self.assertEqual(rows['EQUITY']['approval_levels'], 1)
+
+
+class ApproverPickerTests(TestCase):
+    def test_picker_lists_club_managers_and_every_director(self):
+        co = Company.objects.create(code='APK', name='Picker Co', is_active=True)
+        admin = User.objects.create_user('a@apk.com', company=co, user_code='APK1', password='p', name='Admin',
+                                         role='Admin', modules=['Club 1000'])
+        User.objects.create_user('d@apk.com', company=co, user_code='APK2', password='p', name='Bare Director',
+                                 role='Director', modules=[])
+        User.objects.create_user('m@apk.com', company=co, user_code='APK3', password='p', name='Club Manager',
+                                 role='Manager', manager_modules=['Club 1000'])
+        User.objects.create_user('s@apk.com', company=co, user_code='APK4', password='p', name='Plain Staff',
+                                 role='Employee', modules=['Club 1000'])
+        api = APIClient(); api.force_authenticate(admin)
+        got = {u['name']: u for u in api.get('/api/club1000/users/', {'approvers': '1'}).data}
+        self.assertEqual(set(got), {'Admin', 'Bare Director', 'Club Manager'})
+        self.assertEqual((got['Bare Director']['director'], got['Bare Director']['has_access']), (True, False))
+        # the ordinary list (lead assignment) is unchanged — only people with Club 1000 access
+        plain = {u['name'] for u in api.get('/api/club1000/users/').data}
+        self.assertEqual(plain, {'Admin', 'Club Manager', 'Plain Staff'})

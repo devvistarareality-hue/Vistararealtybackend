@@ -344,6 +344,16 @@ class Club1000UsersView(APIView):
         # the join this walked back to the database once per user in the list.
         users = (User.objects.filter(company=request.user.company, is_active=True)
                  .select_related('company').order_by('name'))
+        # ?approvers=1 — the approver pickers: Club 1000 managers and every Director (a
+        # Director can be appointed an approver in any module — sales.views.is_director).
+        if request.query_params.get('approvers') == '1':
+            from sales.views import is_director
+            return Response([
+                {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation,
+                 'club_manager': is_club1000_manager(u), 'director': is_director(u),
+                 'has_access': has_club1000_access(u)}
+                for u in users if is_club1000_manager(u) or is_director(u)
+            ])
         data = [
             {'id': u.id, 'name': u.name, 'user_code': u.user_code, 'role': u.role, 'designation': u.designation,
              # can act as an approver (approving needs manager-level Club 1000 access)
