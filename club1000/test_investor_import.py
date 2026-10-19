@@ -186,3 +186,18 @@ class InvestorImportTests(TestCase):
         from activity.models import ActivityLog
         self.assertTrue(ActivityLog.objects.filter(summary__startswith='Deleted 2 draft investors').exists()
                         or any(str(x.summary).startswith('Deleted 2 draft investors') for x in ActivityLog.objects.all()))
+
+    def test_only_manager_role_and_above_may_delete_an_investment(self):
+        inv = Investor.objects.create(company=self.co, scheme=self.scheme, added_by=self.admin, name='Live One', phone='9800000005',
+                                      amount_invested=Decimal('500000'), investment_date=RECENT, approval_status='approved')
+        # an Employee given manager-level Club 1000 access (like Shrey Patel) — refused
+        emp = User.objects.create_user('e@imp.com', company=self.co, user_code='IMP4', password='p', name='Exec',
+                                       role='Employee', modules=['Club 1000'], manager_modules=['Club 1000'])
+        api = APIClient(); api.force_authenticate(emp)
+        self.assertEqual(api.delete(f'/api/club1000/investors/{inv.pk}/').status_code, 403)
+        self.assertEqual(api.post('/api/club1000/investors/bulk-delete/', {'ids': [inv.pk]}, format='json').status_code, 403)
+        # a Manager by role — allowed
+        mgr = User.objects.create_user('mg@imp.com', company=self.co, user_code='IMP5', password='p', name='Mgr',
+                                       role='Manager', modules=['Club 1000'], manager_modules=['Club 1000'])
+        api = APIClient(); api.force_authenticate(mgr)
+        self.assertIn(api.delete(f'/api/club1000/investors/{inv.pk}/').status_code, (200, 204))

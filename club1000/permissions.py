@@ -11,6 +11,14 @@ def is_club1000_manager(user):
     )
 
 
+def can_delete_investors(user):
+    """Who may delete an investment: by ROLE — Manager, General Manager, Director, or a
+    real admin. Manager-level Club 1000 access given to an Employee is not enough
+    (the owner, 19 Oct 2026: "only role manager will have delete access"). Anyone may
+    still delete their own drafts — that check is in the views."""
+    return bool(_is_hard_admin(user) or user.role in ('Director', 'General Manager', 'Manager'))
+
+
 def has_club1000_access(user):
     """Any Club 1000 access at all: manager-level, or plain module access."""
     return is_club1000_manager(user) or 'Club 1000' in (user.modules or [])
