@@ -68,10 +68,20 @@ class DirectorApproverPoolTests(TestCase):
         self.assertIn('Bare Director', names)
         self.assertIn('Sales Director', names)
 
-    def test_a_director_can_be_named_an_accounts_approver_without_accounts_access(self):
+    def test_accounts_pool_is_only_people_with_accounts_access(self):
+        # The owner (19 Oct 2026): the Accounts approver picker lists only people who
+        # have Accounts & Finance — not every Director or Admin.
         names = self._names('accounts_module')
-        self.assertIn('Bare Director', names)
-        self.assertIn('Sales Director', names)
+        self.assertNotIn('Bare Director', names)
+        self.assertNotIn('Sales Director', names)
+        self.assertNotIn('The Admin', names)
+        User.objects.create_user('acc@dir.com', company=self.co, user_code='DIR006', password='p',
+                                 name='Accounts Director', role='Director', modules=['Accounts & Finance'])
+        User.objects.create_user('ca@dir.com', company=self.co, user_code='DIR007', password='p',
+                                 name='The CA', role='Manager', manager_modules=['Accounts & Finance'])
+        names = self._names('accounts_module')
+        self.assertIn('Accounts Director', names)
+        self.assertIn('The CA', names)
 
     # ------------------------------------------------- the pools that already had them
 
