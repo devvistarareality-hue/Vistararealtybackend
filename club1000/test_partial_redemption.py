@@ -417,6 +417,11 @@ class PartialRedemptionTests(TestCase):
     def test_a_missing_original_loi_is_listed_and_can_be_uploaded_again(self):
         self.assertEqual(self._request(200000).status_code, 201); self.assertEqual(self._approve().status_code, 200)
         Investor.objects.filter(pk=self.inv.pk).update(loi_history=None)        # a record from before LOIs were kept
+        from django.core.files.storage import default_storage
+        from club1000.views import _investor_loi_path
+        orig_path = _investor_loi_path(Investor.objects.get(pk=self.inv.pk))
+        if default_storage.exists(orig_path):
+            default_storage.delete(orig_path)                                     # left by an earlier run
         lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
         orig = next(l for l in lois if l['label'] == 'Original LOI')
         self.assertTrue(orig['missing'])
@@ -426,3 +431,15 @@ class PartialRedemptionTests(TestCase):
         self.assertEqual(r.status_code, 200, r.data)
         lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
         self.assertFalse(next(l for l in lois if l['label'] == 'Original LOI')['missing'])
+
+    def test_a_rejected_redemption_keeps_its_loi_listed_as_rejected(self):
+        """No LOI is deleted unless the investor is — a rejected one is kept and listed."""
+        from django.core.files.storage import default_storage
+        self.assertEqual(self._request(200000).status_code, 201)
+        path = Investor.objects.get(pk=self.inv.pk).pending_loi_document.name
+        r = self.api.post(f'/api/club1000/investors/{self.inv.pk}/action/', {'action': 'reject', 'reason': 'wrong amount'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertTrue(default_storage.exists(path))
+        lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
+        self.assertEqual(lois[0]['label'], 'Redemption 1 LOI (rejected)')
+        self.assertEqual(lois[0]['kind'], 'rejected')

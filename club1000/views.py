@@ -1783,7 +1783,8 @@ class InvestorRedeemView(APIView):
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         notes = (request.data.get('notes') or '').strip()
         with transaction.atomic():
-            investor.payouts.filter(status='pending').delete()
+            # Earlier redemptions still owed are records with their own LOI — kept.
+            investor.payouts.filter(status='pending').exclude(payout_type='premature_redemption').delete()
             payout = Payout.objects.create(
                 investor=investor, payout_type='premature_redemption', due_date=on, amount_due=amount,
                 notes=notes or f"Redeemed after {st['months_elapsed']} months",
@@ -2695,11 +2696,7 @@ class InvestorActionView(APIView):
                     investor.maturity_date = investor.investment_date + relativedelta(months=investor.scheme.tenure_months)
                     update_fields += ['scheme', 'investment_date', 'maturity_date']
                 if pr.get('document_name'):
-                    if investor.document:
-                        try:
-                            investor.document.delete(save=False)
-                        except Exception:
-                            pass
+                    # The KYC scan it replaces is kept in storage — records are not deleted.
                     investor.document.name = pr['document_name']
                     update_fields.append('document')
                 if is_renewal:
@@ -2789,7 +2786,9 @@ class InvestorActionView(APIView):
                         investor.past_terms = (investor.past_terms or []) + [finished]
                         investor.save(update_fields=['past_terms'])
                 else:
-                    Payout.objects.filter(investor=investor, status='pending').delete()
+                    # A redemption still owed is a record (with its own LOI and working),
+                    # not part of the schedule being rebuilt — never deleted here.
+                    Payout.objects.filter(investor=investor, status='pending').exclude(payout_type='premature_redemption').delete()
                 generate_payout_schedule(investor, custom_entries=payout_schedule)
                 # An investment approved before leads were made on approval may
                 # still have none — every approval makes sure it has one.
@@ -2870,15 +2869,13 @@ class InvestorActionView(APIView):
             if is_revision:
                 # Reject the PROPOSED revision/renewal only — the original
                 # approved terms and signed LOI are completely untouched.
+                # Its signed LOI is NEVER deleted (owner, 20 Oct 2026: no LOI is deleted
+                # unless the investor is) — it goes in the LOI register as rejected.
                 if investor.pending_loi_document:
-                    investor.pending_loi_document.delete(save=False)
-                staged_doc = (investor.pending_revision or {}).get('document_name')
-                if staged_doc:
-                    try:
-                        from django.core.files.storage import default_storage
-                        default_storage.delete(staged_doc)
-                    except Exception:
-                        pass
+                    _keep_rejected_loi(investor, investor.pending_loi_document.name,
+                                       'Redemption' if revision_type == 'redeem' else ('Renewal' if is_renewal else 'Revision'),
+                                       request.user)
+                    investor.pending_loi_document = None
                 # Kept on record, and the revision number goes back — R1 rejected
                 # leaves the investment as it was, not reading R1.
                 proposed = investor.pending_revision or {}
@@ -2895,8 +2892,9 @@ class InvestorActionView(APIView):
                                              'rejections', 'revision_no', 'updated_at'])
             else:
                 investor.approval_status = 'rejected'
+                # Kept, and listed as the rejected original — never deleted.
                 if investor.loi_document:
-                    investor.loi_document.delete(save=False)
+                    _keep_rejected_loi(investor, investor.loi_document.name, 'Original', request.user)
                 investor.save(update_fields=['approval_status', 'loi_document', 'updated_at'])
             try:
                 rejected_label = 'Investor renewal rejected' if is_renewal else ('Investor revision rejected' if is_revision else 'Investor rejected')
@@ -3237,12 +3235,20 @@ class InvestorUndoRenewalView(APIView):
                           if at_maturity else investor.amount_invested)
                 Payout.objects.create(investor=investor, payout_type='maturity', due_date=ended_maturity,
                                       amount_due=amount.quantize(Decimal('0.01')))
-        # The undone renewal's signed LOI is kept in storage (never deleted) and noted.
+        # Undo renewal is the one action (besides deleting the investor) that may delete
+        # an LOI: the undone renewal's own — its file and its entry in the LOI register.
         if new_loi and new_loi != (investor.loi_document.name if investor.loi_document else ''):
             investor.rejections = (investor.rejections or []) + [{'kind': 'undone-renewal', 'no': investor.renewal_count + 1,
-                                                                  'reason': 'renewal undone', 'loi_document': new_loi,
+                                                                  'reason': 'renewal undone',
                                                                   'at': timezone.now().isoformat(), 'by': request.user.name or ''}]
-            investor.save(update_fields=['rejections'])
+            if investor.loi_history is not None:
+                investor.loi_history = [e for e in investor.loi_history if e.get('path') != new_loi]
+            investor.save(update_fields=['rejections', 'loi_history'])
+            try:
+                from django.core.files.storage import default_storage
+                default_storage.delete(new_loi)
+            except Exception:
+                pass
         from activity.recorder import note
         note(request, f'Undid renewal — {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} · removed the '
                       f'renewed term {renewed_label}; back to {investor.investment_date:%d-%m-%Y} → {investor.maturity_date:%d-%m-%Y}',
@@ -3354,6 +3360,21 @@ class InvestorUploadLoiView(APIView):
             logging.getLogger(__name__).exception('Investor LOI save failed for %s', investor.id)
             return Response({'detail': 'Could not save LOI document.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(InvestorListSerializer(investor).data)
+
+
+def _keep_rejected_loi(investor, path, what, by):
+    """A rejected LOI is kept and listed in the LOI register as rejected — never deleted
+    (only deleting the investor, or undoing a renewal, removes an LOI)."""
+    from .services import legacy_lois, _short_term
+    rows = list(investor.loi_history) if investor.loi_history is not None else legacy_lois(investor)
+    if path and path not in {e.get('path') for e in rows}:
+        label = {'Original': 'Original LOI', 'Revision': f'{_short_term(investor)} · Revision',
+                 'Renewal': f'Renewal {(investor.renewal_count or 0) + 1} LOI',
+                 'Redemption': f'Redemption {(investor.redemption_count or 0) + 1} LOI'}.get(what, f'{what} LOI')
+        rows.append({'kind': 'rejected', 'label': f'{label} (rejected)', 'path': path,
+                     'at': timezone.now().date().isoformat(), 'by': by.name or ''})
+        Investor.objects.filter(pk=investor.pk).update(loi_history=rows)
+        investor.loi_history = rows
 
 
 def _loi_file_exists(path):
