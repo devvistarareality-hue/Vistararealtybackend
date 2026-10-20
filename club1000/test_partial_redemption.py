@@ -443,3 +443,27 @@ class PartialRedemptionTests(TestCase):
         lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
         self.assertEqual(lois[0]['label'], 'Redemption 1 LOI (rejected)')
         self.assertEqual(lois[0]['kind'], 'rejected')
+
+    def test_revise_redemption_replaces_the_latest_redemption(self):
+        """Revise LOI while the live LOI is a redemption's: the form works it out as the
+        investment stood before that redemption; on approval the redemption is reversed and
+        the corrected one applied — one redemption, the right principal, both LOIs kept."""
+        self.assertEqual(self._request(400000, paid_date=str(self.on)).status_code, 201)
+        self.assertEqual(self._approve().status_code, 200)
+        inv = self._fresh()
+        self.assertEqual((inv.amount_invested, inv.redemption_count), (Decimal('600000'), 1))
+        self.assertEqual(self.api.get(f'/api/club1000/investors/{inv.pk}/').data['live_loi_kind'], 'redemption')
+        q = self.api.get(f'/api/club1000/investors/{inv.pk}/redeem/quote/?amount=300000&redemption_date={self.on}&before_redemption=1').data
+        self.assertEqual(Decimal(str(q['remaining_principal'])), Decimal('700000'))       # read as before the redemption
+        self.assertEqual(self._fresh().amount_invested, Decimal('600000'))                # and nothing was kept
+        r = self._request(300000, paid_date=str(self.on), revise_redemption=True)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(self._fresh().pending_revision_type, 'reredeem')
+        self.assertEqual(self._approve().status_code, 200)
+        inv = self._fresh()
+        self.assertEqual((inv.amount_invested, inv.redemption_count, inv.redeemed_principal), (Decimal('700000'), 1, Decimal('300000')))
+        reds = Payout.objects.filter(investor=inv, payout_type='premature_redemption')
+        self.assertEqual(reds.count(), 1)
+        self.assertEqual(Decimal(str(reds[0].redemption_detail['redeem_amount'])), Decimal('300000'))
+        labels = [l['label'] for l in self.api.get(f'/api/club1000/investors/{inv.pk}/lois/').data['lois']]
+        self.assertEqual(labels[:2], ['Redemption 1 · Revision 1', 'Redemption 1 LOI'])

@@ -322,7 +322,7 @@ def _entities():
         }},
         'club_approvals': {'module': ('Club 1000',), 'rows_fn': approval_rows, 'date': 'date',
                            'note': 'Club 1000 Approvals screen. status pending = waiting for an approver (the Pending tab): '
-                           'kind new investment / revision / renewal / undo renewal request; stage waiting for approval '
+                           'kind new investment / revision / renewal / renewal revision / redemption / redemption revision / undo renewal request; stage waiting for approval '
                            '(one-level scheme) / waiting for level 1 / waiting for level 2 (level1_by approved it, a level 2 '
                            'approver gives the final approval). status rejected = turned down (kind new investment, '
                            'revision, renewal or undo renewal request, with reason and by whom; a rejected revision / '

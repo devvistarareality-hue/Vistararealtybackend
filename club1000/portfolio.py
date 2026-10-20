@@ -292,7 +292,9 @@ def approval_rows(user, company_id=None):
         base = {'investor': inv.name, 'phone': inv.phone, 'loi_no': inv.loi_no or '',
                 'scheme': sch.name if sch else '', 'amount': str(inv.amount_invested or 0)}
         if inv.approval_status == 'pending':
-            kind = ('renewal' if inv.pending_revision_type == 'renew' else 'revision') if inv.pending_revision else 'new investment'
+            kind = ({'renew': 'renewal', 'rerenew': 'renewal revision', 'redeem': 'redemption',
+                     'reredeem': 'redemption revision'}.get(inv.pending_revision_type, 'revision')
+                    if inv.pending_revision else 'new investment')
             proposed = (inv.pending_revision or {}).get('amount_invested')
             rows.append({**base, 'status': 'pending', 'kind': kind, 'stage': stage,
                          'level1_by': step.get('by_name', ''), 'by': inv.added_by.name if inv.added_by else '',

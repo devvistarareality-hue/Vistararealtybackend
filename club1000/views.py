@@ -1647,6 +1647,46 @@ def _apply_redemption(investor, actor):
     investor.save(update_fields=fields)
 
 
+def _last_redemption(investor):
+    """The latest part-redemption (its payout keeps the working and its signed LOI)."""
+    rows = [p for p in investor.payouts.all() if p.payout_type == 'premature_redemption' and p.redemption_detail]
+    return max(rows, key=lambda p: (p.due_date, p.id)) if rows else None
+
+
+def _revise_redemption_blocker(investor):
+    """Why the latest redemption cannot be revised ('' when it can). Revising re-does it:
+    the redemption is reversed and the corrected one applied in its place."""
+    if investor.approval_status != 'approved' or investor.pending_action:
+        return 'Finish the pending approval first.'
+    p = _last_redemption(investor)
+    if not p:
+        return 'There is no redemption to revise.'
+    live = investor.loi_document.name if investor.loi_document else ''
+    if not live or not p.loi_document or p.loi_document.name != live:
+        return 'Something was changed after this redemption, so it can no longer be revised as a redemption.'
+    if any(q.status == 'paid' and q.payout_type != 'premature_redemption' and q.due_date and q.due_date >= p.due_date
+           for q in investor.payouts.all()):
+        return 'Money has been paid after this redemption — undo those payments first, then revise it.'
+    return ''
+
+
+def _undo_last_redemption(investor):
+    """Reverse the latest part-redemption: the principal it took out goes back in, and
+    its payout goes (its signed LOI stays, in the LOI register). The caller re-applies
+    the corrected redemption straight after, which rebuilds the schedule."""
+    p = _last_redemption(investor)
+    d = p.redemption_detail or {}
+    amt = Decimal(str(d.get('redeem_amount') or 0))
+    investor.amount_invested = (investor.amount_invested or Decimal('0')) + amt
+    investor.redeemed_principal = max((investor.redeemed_principal or Decimal('0')) - amt, Decimal('0'))
+    investor.redemption_count = max((investor.redemption_count or 0) - 1, 0)
+    if investor.status == 'premature_redeemed':
+        investor.status = 'active'
+    investor.save(update_fields=['amount_invested', 'redeemed_principal', 'redemption_count', 'status', 'updated_at'])
+    p.delete()
+    return p
+
+
 class InvestorRedeemQuoteView(APIView):
     """The working for a proposed partial redemption, before anything is saved —
     what the Redeem dialog and the LOI both print."""
@@ -1665,6 +1705,22 @@ class InvestorRedeemQuoteView(APIView):
         except ValueError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         amount = request.query_params.get('amount')
+        if request.query_params.get('before_redemption') == '1':
+            # Revise redemption: the working as it stood before the latest redemption —
+            # reversed inside a transaction that is always rolled back.
+            why = _revise_redemption_blocker(investor)
+            if why:
+                return Response({'detail': why}, status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                _undo_last_redemption(investor)
+                investor = Investor.objects.select_related('scheme').prefetch_related('payouts').get(pk=investor.pk)
+                try:
+                    amt = investor.amount_invested if amount in (None, '') else _money(amount, 'amount')
+                    data = _partial_settlement(investor, amt, on)
+                except ValueError as e:
+                    data = None; err = str(e)
+                transaction.set_rollback(True)
+            return Response(data) if data is not None else Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
         try:
             amount = investor.amount_invested if amount in (None, '') else _money(amount, 'amount')
         except ValueError as e:
@@ -1714,7 +1770,20 @@ class InvestorRedeemRequestView(APIView):
             return Response({'detail': 'The redemption date is before the investment date.'},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        st = _partial_settlement(investor, amount, on)
+        # Revise redemption: correct the latest redemption itself — worked out as the
+        # investment stood before it; on approval it is reversed and this one applied.
+        revise_redemption = str(request.data.get('revise_redemption') or '').lower() in ('1', 'true', 'yes')
+        if revise_redemption:
+            why = _revise_redemption_blocker(investor)
+            if why:
+                return Response({'detail': why}, status=status.HTTP_400_BAD_REQUEST)
+            with transaction.atomic():
+                _undo_last_redemption(investor)
+                st = _partial_settlement(Investor.objects.select_related('scheme').prefetch_related('payouts').get(pk=investor.pk), amount, on)
+                transaction.set_rollback(True)
+            investor = _investor_visibility_qs(request).prefetch_related('payouts').filter(pk=pk).first()
+        else:
+            st = _partial_settlement(investor, amount, on)
         if not st['can_redeem']:
             return Response({'detail': st['blocked_reason']}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1742,7 +1811,7 @@ class InvestorRedeemRequestView(APIView):
             pending['payout_schedule'] = schedule
 
         investor.pending_revision = pending
-        investor.pending_revision_type = 'redeem'
+        investor.pending_revision_type = 'reredeem' if revise_redemption else 'redeem'
         investor.revision_no += 1
         investor.approval_status = 'pending'
         investor.revision_draft = None
@@ -1767,11 +1836,11 @@ class InvestorRedeemRequestView(APIView):
         # just "updated investor".
         from activity.recorder import note
         note(request,
-             f'Redemption of {_inr(st["redeem_amount"])} from {investor.name}'
+             f'{"Revised redemption" if revise_redemption else "Redemption"} of {_inr(st["redeem_amount"])} from {investor.name}'
              f'{" (" + investor.loi_no + ")" if investor.loi_no else ""} sent for approval — '
              f'{st["days_held"]} days at {st["rate_per_month"]}%/month, '
              f'{_inr(st["payable"])} payable, {_inr(st["remaining_principal"])} left invested',
-             action='update', target_type='Investor', target_id=investor.pk, module='Club 1000')
+             action='revise' if revise_redemption else 'update', target_type='investor', target_id=investor.pk, module='Club 1000')
         return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
 
@@ -2684,6 +2753,15 @@ class InvestorActionView(APIView):
             loi_kind = 'redemption' if is_redemption else ('renewal' if is_renewal else ('revision' if is_revision else 'new'))
             loi_term_revs = term_revisions(investor) if loi_kind == 'revision' else 0
             label_rr = ''
+            if revision_type == 'reredeem':
+                # Revise redemption: the latest redemption is reversed (its LOI kept),
+                # then the corrected one below is applied in its place.
+                red_n = investor.redemption_count or 1
+                k = 1 + sum(1 for e in loi_seed if str(e.get('label', '')).startswith(f'Redemption {red_n} · Revision'))
+                loi_kind, label_rr = 'revision', f'Redemption {red_n} · Revision {k}'
+                _undo_last_redemption(investor)
+                investor.refresh_from_db()
+                revision_type, is_redemption = 'redeem', True
             if revision_type == 'rerenew':
                 # Revise renewal: back to the term before the latest renewal (its LOI is
                 # kept), then the corrected renewal below is applied in its place.
@@ -2912,7 +2990,7 @@ class InvestorActionView(APIView):
                 # unless the investor is) — it goes in the LOI register as rejected.
                 if investor.pending_loi_document:
                     _keep_rejected_loi(investor, investor.pending_loi_document.name,
-                                       'Redemption' if revision_type == 'redeem' else ('Renewal' if is_renewal else 'Revision'),
+                                       'Redemption' if revision_type in ('redeem', 'reredeem') else ('Renewal' if is_renewal else 'Revision'),
                                        request.user)
                     investor.pending_loi_document = None
                 # Kept on record, and the revision number goes back — R1 rejected

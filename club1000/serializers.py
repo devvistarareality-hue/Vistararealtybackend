@@ -89,6 +89,23 @@ class SchemeSerializer(serializers.ModelSerializer):
 
 class InvestorListSerializer(serializers.ModelSerializer):
     scheme_name = serializers.CharField(source='scheme.name', read_only=True)
+    # What the live LOI is — 'redemption', 'renewal' or 'original' — so Revise LOI opens
+    # the form that made it (Redeem / Renew / the investor form).
+    live_loi_kind = serializers.SerializerMethodField()
+
+    def get_live_loi_kind(self, obj):
+        live = obj.loi_document.name if obj.loi_document else ''
+        hit = next((e for e in reversed(obj.loi_history or []) if live and e.get('path') == live), None)
+        label = str((hit or {}).get('label') or '')
+        if label.startswith('Redemption'):
+            return 'redemption'
+        if label.startswith('Renewal'):
+            return 'renewal'
+        if hit:
+            return 'original'
+        # Records from before the LOI register: the last change tells.
+        return 'redemption' if obj.redemption_count else ('renewal' if obj.renewal_count else 'original')
+
     approved_by_name = serializers.CharField(source='approved_by.name', read_only=True, default='')
     added_by_name = serializers.CharField(source='added_by.name', read_only=True, default=None)
     document_url = serializers.SerializerMethodField()
@@ -121,7 +138,7 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
             'maturity_date', 'is_matured', 'maturity_value', 'interest_payout', 'total_return_pct', 'document_url', 'status',
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
-            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'first_invested_on', 'rejected_reason', 'rejections', 'pending_action', 'approval_step', 'revision_date', 'revision_draft', 'redeemed_principal', 'redemption_count',
+            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'first_invested_on', 'rejected_reason', 'rejections', 'pending_action', 'approval_step', 'revision_date', 'revision_draft', 'redeemed_principal', 'redemption_count', 'live_loi_kind',
             'pending_revision', 'pending_revision_type',
             'pending_loi_document_url', 'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
         ]
