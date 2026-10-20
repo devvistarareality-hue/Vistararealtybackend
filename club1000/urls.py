@@ -35,6 +35,7 @@ urlpatterns = [
     path('investors/<int:pk>/loi-no/', views.InvestorLoiNoView.as_view()),
     path('investors/<int:pk>/upload-loi/', views.InvestorUploadLoiView.as_view()),
     path('investors/<int:pk>/loi-url/', views.InvestorLoiUrlView.as_view()),
+    path('investors/<int:pk>/lois/', views.InvestorLoisView.as_view()),
     path('payouts/',                  views.PayoutListView.as_view()),
     path('payouts/<int:pk>/mark-paid/', views.PayoutMarkPaidView.as_view()),
     path('payouts/<int:pk>/mark-unpaid/', views.PayoutMarkUnpaidView.as_view()),

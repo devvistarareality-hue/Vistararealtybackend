@@ -3354,6 +3354,29 @@ class InvestorUploadLoiView(APIView):
         return Response(InvestorListSerializer(investor).data)
 
 
+class InvestorLoisView(APIView):
+    """GET — every signed LOI of an investment, newest first (the investor card's LOIs
+    button): the original, each revision, renewal and redemption. Opened one by one
+    through InvestorLoiUrlView ?loi=<i>. Same access as opening an LOI."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        if not has_club1000_access(request.user):
+            return _no_access()
+        investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        is_scheme_approver = investor.scheme_id in _scheme_approver_ids(request.user, request.user.company)
+        if not (is_club1000_manager(request.user) or investor.added_by_id == request.user.id or is_scheme_approver):
+            return Response({'detail': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        from .services import investment_lois
+        live = investor.loi_document.name if investor.loi_document else ''
+        return Response({'lois': [
+            {'i': e['i'], 'kind': e.get('kind', ''), 'label': e.get('label', ''), 'at': e.get('at', ''),
+             'by': e.get('by', ''), 'current': bool(live) and e['path'] == live}
+            for e in reversed(investment_lois(investor))]})
+
+
 class InvestorLoiUrlView(APIView):
     """Short-lived signed URL for an investor's generated LOI PDF — mirrors
     sales.views.BookingLOIUrlView exactly. ?pending=1 serves the not-yet-approved

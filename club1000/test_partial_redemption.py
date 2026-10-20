@@ -410,3 +410,6 @@ class PartialRedemptionTests(TestCase):
         self.assertEqual([l['label'] for l in lois][:2], ['Redemption 2 LOI', 'Redemption 1 LOI'])
         self.assertTrue(lois[0]['current'])
         self.assertEqual(len({l['i'] for l in lois}), len(lois))
+        # the investor card's LOIs button reads the same list
+        card = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
+        self.assertEqual([l['label'] for l in card], [l['label'] for l in lois])
