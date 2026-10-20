@@ -1000,6 +1000,8 @@ class InvestorLedgerView(APIView):
                 # the working behind it.
                 'has_loi': bool(p.loi_document),
                 'redemption': p.redemption_detail or None,
+                # At maturity: this one payout is the principal AND the term's interest.
+                'maturity_split': PayoutSerializer().get_maturity_split(p),
                 'due_date': str(p.due_date),
                 'term': term_of(terms, p.due_date),
                 '_id': p.id,
