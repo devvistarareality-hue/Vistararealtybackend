@@ -75,13 +75,17 @@ class InvestorStatementView(APIView):
                 else:
                     status, tone = 'Upcoming', 'off'
                 period = e.get('period') or {}
+                rd = e.get('redemption') or {}
                 rows.append({
                     'label': e['label'], 'due': _fmt(due), 'amount': _num(e['amount']),
                     'paid': _num(e['paid_amount']) if e.get('paid_amount') is not None else None,
                     'paid_on': _fmt(e.get('paid_date')) if e['status'] == 'paid' else '—',
                     'status': status, 'tone': tone,
                     'added': 'added to the principal' in str(e.get('notes') or '').lower(),
-                    'working': (f"{period.get('label')} · {period.get('days')} days × ₹{_num(period.get('per_day')):,.2f} a day"
+                    'working': (f"Redeemed on {_fmt(rd.get('redemption_date') or due)}"
+                                + (f" · held {rd.get('days_held')} days" if rd.get('days_held') is not None else '')
+                                if e['type'] == 'premature_redemption' else
+                                f"{period.get('label')} · {period.get('days')} days × ₹{_num(period.get('per_day')):,.2f} a day"
                                 if period.get('days') else ''),
                 })
             s = t.get('summary') or {}
