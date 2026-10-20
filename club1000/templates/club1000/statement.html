@@ -67,6 +67,9 @@
   .madeof { margin: 0 0 8px; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--infobg); }
   .madeof-h { font-size: 8.5px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--info); margin-bottom: 4px; }
   .madeof-row { display: flex; justify-content: space-between; padding: 2px 0; color: var(--ink2); font-variant-numeric: tabular-nums; }
+  .madeof-row small { color: var(--muted); font-size: 8.5px; }
+  .madeof-note { margin-top: 4px; font-size: 9px; color: var(--muted); }
+  tr.redhead td { background: var(--warnbg) !important; color: var(--warn); font-weight: 800; font-size: 9.5px; }
   .madeof-row.tot { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 4px; font-weight: 800; color: var(--brand); }
   .ended { margin-top: 6px; padding: 7px 10px; border-radius: 8px; background: var(--infobg); color: var(--info); font-size: 9.5px; }
 
@@ -125,19 +128,21 @@
     <div class="termline">{{ t.start }} → {{ t.maturity }} · principal {{ t.principal|inr }} · interest {{ t.interest|inr }}</div></div>
     {% if t.made_of %}<div class="madeof row-avoid">
       <div class="madeof-h">How {{ t.label }} was made up at the renewal</div>
-      <div class="madeof-row"><span>Principal renewed</span><b>{{ t.made_of.principal|inr }}</b></div>
+      <div class="madeof-row"><span>Principal renewed{% if t.made_of.returned > 0 %} <small>({{ t.made_of.returned|inr }} of the previous principal was paid back to him)</small>{% endif %}</span><b>{{ t.made_of.principal|inr }}</b></div>
       {% if t.made_of.interest > 0 %}<div class="madeof-row"><span>+ Interest added from the previous term</span><b>{{ t.made_of.interest|inr }}</b></div>{% endif %}
       {% if t.made_of.fresh > 0 %}<div class="madeof-row"><span>+ New money added</span><b>{{ t.made_of.fresh|inr }}</b></div>{% endif %}
       <div class="madeof-row tot"><span>= Invested in {{ t.label }}</span><b>{{ t.made_of.total|inr }}</b></div>
+      {% if t.made_of.interest_paid > 0 %}<div class="madeof-note">The previous term's interest of {{ t.made_of.interest_paid|inr }} was paid to him at the renewal.</div>{% endif %}
     </div>{% endif %}
     <table>
       <thead><tr><th>#</th><th>Payout</th><th>Due date</th><th class="num">Amount</th><th class="num">Paid</th><th>Paid on</th><th>Status</th></tr></thead>
-      <tbody>{% for r in t.rows %}
-        <tr class="row-avoid"><td class="muted">{{ forloop.counter }}</td>
+      <tbody>{% for r in t.rows %}{% if r.head %}
+        <tr class="redhead row-avoid"><td colspan="7">{{ r.head }}</td></tr>{% else %}
+        <tr class="row-avoid"><td class="muted">{{ r.no }}</td>
           <td>{{ r.label }}{% if r.working %}<span class="sub">{{ r.working }}</span>{% endif %}{% if r.added %}<span class="sub">added to the principal</span>{% endif %}</td>
           <td>{{ r.due }}</td><td class="num">{{ r.amount|inr }}</td>
           <td class="num{% if r.paid is not None %} credit{% endif %}">{% if r.paid is not None %}{{ r.paid|inr }}{% else %}—{% endif %}</td>
-          <td>{{ r.paid_on }}</td><td><span class="pill {{ r.tone }}">{{ r.status }}</span></td></tr>
+          <td>{{ r.paid_on }}</td><td><span class="pill {{ r.tone }}">{{ r.status }}</span></td></tr>{% endif %}
       {% empty %}<tr><td colspan="7" class="muted">No payouts in this term.</td></tr>{% endfor %}</tbody>
       <tfoot><tr><td colspan="3">Term total</td><td class="num">{{ t.rows_total|inr }}</td><td class="num">{{ t.paid_out|inr }}</td><td colspan="2" class="num">{% if t.pending > 0 %}{{ t.pending|inr }} to pay{% elif t.carried > 0 %}{{ t.carried|inr }} settled into {{ t.next_label }}{% else %}Settled{% endif %}</td></tr></tfoot>
     </table>

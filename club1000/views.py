@@ -1078,7 +1078,9 @@ class InvestorLedgerView(APIView):
             total = Decimal(o['renewed_with'])
             added, fresh = Decimal(o['interest_added']), Decimal(o['fresh_money'])
             return {'principal': str(max(total - added - fresh, Decimal('0'))), 'interest': str(added),
-                    'fresh': str(fresh), 'total': str(total)}
+                    'fresh': str(fresh), 'total': str(total),
+                    # what went to him instead at that renewal — principal paid back, interest paid out
+                    'returned': str(o['principal_returned']), 'interest_paid': str(o['interest_to_investor'])}
 
         def _term_summary(t):
             mine = [p for p in all_payouts if payout_term(terms, p) == t['no']]

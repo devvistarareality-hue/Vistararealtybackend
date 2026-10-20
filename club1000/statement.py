@@ -36,6 +36,11 @@ def _num(v):
         return 0.0
 
 
+def _inr(n):
+    from .views import _inr as f
+    return f(n)
+
+
 class InvestorStatementView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -57,6 +62,7 @@ class InvestorStatementView(APIView):
                                    'current': True, 'summary': data['summary']}]
         sections = []
         overdue = 0.0
+        red_no = 0
         for t in terms:
             rows = []
             for e in data['entries']:
@@ -76,8 +82,20 @@ class InvestorStatementView(APIView):
                     status, tone = 'Upcoming', 'off'
                 period = e.get('period') or {}
                 rd = e.get('redemption') or {}
+                name = t['label'].split(' · ')[0]
+                if e['type'] == 'premature_redemption':
+                    # A redemption is its own step inside the term — headed as such.
+                    red_no += 1
+                    rows.append({'head': f"Redemption {red_no} · {_fmt(rd.get('redemption_date') or due)} — "
+                                         f"{_inr(_num(rd.get('redeem_amount') or e['amount']))} taken out of {name}"
+                                         + (f" · {_inr(_num(rd.get('remaining_principal')))} stays invested"
+                                            if rd.get('remaining_principal') not in (None, '') else '')})
+                # Handed to him at the renewal (not carried into it): say so.
+                at_renewal = bool(m) and not e.get('carried') and 'added to the principal' not in str(e.get('notes') or '').lower()
+                if at_renewal:
+                    status, tone = f'Paid at Renewal {m.group(1)}', 'ok'
                 rows.append({
-                    'label': e['label'], 'due': _fmt(due), 'amount': _num(e['amount']),
+                    'label': ('Principal paid back' if at_renewal and e['type'] == 'maturity' else e['label']), 'due': _fmt(due), 'amount': _num(e['amount']),
                     'paid': _num(e['paid_amount']) if e.get('paid_amount') is not None else None,
                     'paid_on': _fmt(e.get('paid_date')) if e['status'] == 'paid' else '—',
                     'status': status, 'tone': tone,
@@ -85,6 +103,9 @@ class InvestorStatementView(APIView):
                     'carried': bool(e.get('carried')),
                     'working': (('Not a payment — ' + ('added into' if e['type'] == 'interest' else 'renewed into') + ' the next term')
                                 if e.get('carried') else
+                                'Paid to him at the renewal' if at_renewal else
+                                (lambda ms: f"{_inr(_num(ms['principal']))} principal + {_inr(_num(ms['interest']))} interest")(e['maturity_split'])
+                                if e.get('maturity_split') else
                                 f"Redeemed on {_fmt(rd.get('redemption_date') or due)}"
                                 + (f" · held {rd.get('days_held')} days" if rd.get('days_held') is not None else '')
                                 if e['type'] == 'premature_redemption' else
@@ -94,11 +115,15 @@ class InvestorStatementView(APIView):
             s = t.get('summary') or {}
             mo = t.get('made_of') or {}
             carried = sum((r['amount'] for r in rows if r.get('carried')), 0.0)
+            # money rows only — the redemption headings carry no amount
+            money_rows = [r for r in rows if not r.get('head')]
+            for n, r in enumerate(money_rows, start=1):
+                r['no'] = n
             sections.append({
                 # this renewal's money, as it was made up at the renewal
                 'made_of': {k: _num(v) for k, v in mo.items()} if mo else None,
                 # rows total includes what was carried into the next term (not paid out)
-                'rows_total': sum((r['amount'] for r in rows), 0.0), 'carried': carried,
+                'rows_total': sum((r['amount'] for r in money_rows), 0.0), 'carried': carried,
                 'next_label': (terms[terms.index(t) + 1]['label'].split(' · ')[0] if terms.index(t) + 1 < len(terms) else ''),
                 'label': t['label'], 'current': t.get('current'), 'start': _fmt(t['start']), 'maturity': _fmt(t['maturity']),
                 'principal': _num(t['principal']), 'rows': rows,
