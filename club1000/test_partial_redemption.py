@@ -467,3 +467,10 @@ class PartialRedemptionTests(TestCase):
         self.assertEqual(Decimal(str(reds[0].redemption_detail['redeem_amount'])), Decimal('300000'))
         labels = [l['label'] for l in self.api.get(f'/api/club1000/investors/{inv.pk}/lois/').data['lois']]
         self.assertEqual(labels[:2], ['Redemption 1 · Revision 1', 'Redemption 1 LOI'])
+
+    def test_no_two_signed_lois_share_a_file(self):
+        """revision_no can step back (a revised renewal / redemption is undone and redone),
+        so the LOI file name must not depend on it alone — a reused name overwrote an LOI."""
+        from club1000.views import _investor_pending_loi_path
+        inv = self._fresh()
+        self.assertNotEqual(_investor_pending_loi_path(inv), _investor_pending_loi_path(inv))

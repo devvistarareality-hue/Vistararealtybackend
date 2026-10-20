@@ -741,7 +741,7 @@ class InvestorListCreateView(APIView):
                 investor.loi_no = _next_investor_loi_no(investor.company, investor.scheme)
                 investor.save(update_fields=['loi_no'])
             try:
-                investor.loi_document.save(_investor_loi_path(investor), ContentFile(base64.b64decode(loi['data'])), save=True)
+                investor.loi_document.save(_fresh_loi_path(_investor_loi_path(investor)), ContentFile(base64.b64decode(loi['data'])), save=True)
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception('Investor LOI save failed for %s', investor.id)
@@ -2555,7 +2555,22 @@ def _investor_pending_loi_path(investor):
     scheme_name = san(investor.scheme.name)
     client = san(investor.name)
     loi_no = san(investor.loi_no)
-    return f'Club1000/{scheme_name}/{client} - {loi_no}/LOI_R{investor.revision_no}.pdf'
+    # The time makes every signed LOI its own file: revision_no can step back (a revised
+    # renewal / redemption is undone and re-applied), and a name used twice overwrote the
+    # earlier LOI — "Renewal 3" landed on "Renewal 2 · Revision 1"'s file.
+    import uuid
+    stamp = f"{timezone.now():%Y%m%d}_{uuid.uuid4().hex[:8]}"
+    return f'Club1000/{scheme_name}/{client} - {loi_no}/LOI_R{investor.revision_no}_{stamp}.pdf'
+
+
+def _fresh_loi_path(path):
+    """`path`, or — when a file is already there — the same name with the time added,
+    so saving an LOI never overwrites another one."""
+    if not _loi_file_exists(path):
+        return path
+    import uuid
+    stem, dot, ext = path.rpartition('.')
+    return f"{stem}_{timezone.now():%Y%m%d}_{uuid.uuid4().hex[:8]}{dot}{ext}"
 
 
 def _investor_visibility_qs(request):
@@ -3559,7 +3574,7 @@ class InvestorUploadLoiView(APIView):
         import base64
         from django.core.files.base import ContentFile
         try:
-            investor.loi_document.save(_investor_loi_path(investor), ContentFile(base64.b64decode(loi['data'])), save=True)
+            investor.loi_document.save(_fresh_loi_path(_investor_loi_path(investor)), ContentFile(base64.b64decode(loi['data'])), save=True)
         except Exception:
             import logging
             logging.getLogger(__name__).exception('Investor LOI save failed for %s', investor.id)
