@@ -490,7 +490,15 @@ def legacy_lois(investor):
     if investor.loi_document:
         at = investor.approved_at.date() if investor.approved_at else investor.investment_date
         add('current', f'{_short_term(investor)} LOI', investor.loi_document.name, at)
-    return sorted(out, key=lambda e: e['at'])
+    # The original LOI is always listed — on a record changed before LOIs were kept
+    # its file may have been deleted; the list then offers an upload in its place.
+    if not any(e['kind'] == 'new' for e in out) and not (investor.past_terms or []):
+        from .views import _investor_loi_path
+        first = investor.first_invested_on or investor.investment_date   # when the investment began
+        add('new', 'Original LOI', _investor_loi_path(investor), first)
+    # Oldest first; on the same day the original comes before what followed it.
+    order = {id(e): n for n, e in enumerate(out)}
+    return sorted(out, key=lambda e: (e['at'], 0 if e['kind'] == 'new' else 1, order[id(e)]))
 
 
 def investment_lois(investor):

@@ -3356,6 +3356,22 @@ class InvestorUploadLoiView(APIView):
         return Response(InvestorListSerializer(investor).data)
 
 
+def _loi_file_exists(path):
+    """Is this LOI file really in storage? Supabase answers a signing request only for a
+    file it holds; without Supabase (local) ask the storage directly."""
+    if not path:
+        return False
+    import os
+    from sales.supabase_storage import create_signed_url
+    if os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
+        return bool(create_signed_url(path, expires_in=30))
+    from django.core.files.storage import default_storage
+    try:
+        return default_storage.exists(path)
+    except Exception:
+        return False
+
+
 class InvestorLoisView(APIView):
     """GET — every signed LOI of an investment, newest first (the investor card's LOIs
     button): the original, each revision, renewal and redemption. Opened one by one
@@ -3375,8 +3391,49 @@ class InvestorLoisView(APIView):
         live = investor.loi_document.name if investor.loi_document else ''
         return Response({'lois': [
             {'i': e['i'], 'kind': e.get('kind', ''), 'label': e.get('label', ''), 'at': e.get('at', ''),
-             'by': e.get('by', ''), 'current': bool(live) and e['path'] == live}
+             'by': e.get('by', ''), 'current': bool(live) and e['path'] == live,
+             # deleted by an approval made before LOIs were kept — a copy can be uploaded
+             'missing': not _loi_file_exists(e['path'])}
             for e in reversed(investment_lois(investor))]})
+
+    def post(self, request, pk):
+        """POST {i, file:{name, type, data}} — put back a copy of an LOI whose file is
+        missing (deleted before LOIs were kept). Managers only; only a missing one."""
+        if not has_club1000_access(request.user):
+            return _no_access()
+        if not is_club1000_manager(request.user):
+            return Response({'detail': 'Only a Club 1000 manager can upload an LOI.'}, status=status.HTTP_403_FORBIDDEN)
+        investor = _company_filtered(Investor.objects.select_related('scheme'), request).filter(pk=pk).first()
+        if not investor:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        f = request.data.get('file')
+        if not isinstance(f, dict) or not f.get('data'):
+            return Response({'detail': 'Attach the signed LOI.'}, status=status.HTTP_400_BAD_REQUEST)
+        from .services import investment_lois, legacy_lois
+        rows = list(investor.loi_history) if investor.loi_history is not None else legacy_lois(investor)
+        hit = next((e for e in investment_lois(investor) if str(e['i']) == str(request.data.get('i'))), None)
+        if not hit:
+            return Response({'detail': 'That LOI is not on record.'}, status=status.HTTP_404_NOT_FOUND)
+        if _loi_file_exists(hit['path']):
+            return Response({'detail': 'This LOI is already on file.'}, status=status.HTTP_400_BAD_REQUEST)
+        import base64
+        from django.core.files.base import ContentFile
+        from django.core.files.storage import default_storage
+        try:
+            saved = default_storage.save(hit['path'], ContentFile(base64.b64decode(f['data'])))
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('LOI re-upload failed for investor %s', investor.id)
+            return Response({'detail': 'Could not save the LOI.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        for r in rows:
+            if r.get('path') == hit['path']:
+                r['path'] = saved
+                r['restored'] = timezone.now().date().isoformat()
+        Investor.objects.filter(pk=investor.pk).update(loi_history=rows)
+        from activity.recorder import note
+        note(request, f'Uploaded a copy of {hit["label"]} — {investor.name}{f" · LOI {investor.loi_no}" if investor.loi_no else ""} (its file was missing)',
+             action='loi-upload', target_type='investor', target_id=str(investor.pk), module='Club 1000')
+        return Response({'ok': True})
 
 
 class InvestorLoiUrlView(APIView):

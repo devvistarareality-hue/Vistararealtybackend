@@ -413,3 +413,16 @@ class PartialRedemptionTests(TestCase):
         # the investor card's LOIs button reads the same list
         card = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
         self.assertEqual([l['label'] for l in card], [l['label'] for l in lois])
+
+    def test_a_missing_original_loi_is_listed_and_can_be_uploaded_again(self):
+        self.assertEqual(self._request(200000).status_code, 201); self.assertEqual(self._approve().status_code, 200)
+        Investor.objects.filter(pk=self.inv.pk).update(loi_history=None)        # a record from before LOIs were kept
+        lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
+        orig = next(l for l in lois if l['label'] == 'Original LOI')
+        self.assertTrue(orig['missing'])
+        self.assertEqual(lois[-1]['label'], 'Original LOI')                     # oldest, at the bottom
+        r = self.api.post(f'/api/club1000/investors/{self.inv.pk}/lois/',
+                          {'i': orig['i'], 'file': {'name': 'loi.pdf', 'type': 'application/pdf', 'data': 'eA=='}}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/lois/').data['lois']
+        self.assertFalse(next(l for l in lois if l['label'] == 'Original LOI')['missing'])
