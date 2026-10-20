@@ -1011,6 +1011,30 @@ class InvestorLedgerView(APIView):
             total_due += p.amount_due
             if p.status == 'paid':
                 total_paid += actual_paid
+        # A finished term carried into a renewal paid nothing out for the part it rolled
+        # over, so it had no rows: show where its money went — the principal renewed and
+        # the interest added into the renewal — as information rows (not payments; no
+        # total changes). From the term record, so older investments read the same.
+        for n, pt in enumerate(investor.past_terms or []):
+            nxt = terms[n + 1] if n + 1 < len(terms) else None
+            if not nxt:
+                continue
+            principal = Decimal(str(pt.get('principal') or 0))
+            renewed = Decimal(str(nxt['principal'] or 0))
+            rolled = Decimal(str(pt.get('rolled_interest') or 0))
+            mine = [p for p in all_payouts if term_of(terms, p.due_date) == n]
+            shown_rolled = any('added to the principal' in (p.notes or '') for p in mine)
+            r_no = nxt.get('renewal_no') or (n + 1)
+            base = {'payout_id': None, 'paid_amount': None, 'status': 'paid', 'paid_date': str(nxt['start']),
+                    'date': pt.get('maturity'), 'due_date': pt.get('maturity'), 'term': n, 'carried': True,
+                    'period': None, 'is_balance': False}
+            if rolled > 0 and not shown_rolled:
+                entries.append({**base, 'type': 'interest', 'label': 'Interest', 'amount': str(rolled),
+                                'notes': f'Settled to renewal R{r_no} · added to the principal'})
+            if min(principal, renewed) > 0:
+                entries.append({**base, 'type': 'maturity', 'label': 'Principal', 'amount': str(min(principal, renewed)),
+                                'notes': f'Settled to renewal R{r_no} · renewed'})
+
         # Same day: the investment first, interest before the principal it is paid
         # with, and an instalment before the balance it left.
         entries.sort(key=lambda e: (e['date'], {'investment': 0, 'interest': 1}.get(e['type'], 2),

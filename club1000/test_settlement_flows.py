@@ -224,6 +224,17 @@ class SettlementFlowTests(TestCase):
         labels = [l['label'] for l in self.api.get(f'/api/club1000/investors/{inv.pk}/lois/').data['lois']]
         self.assertEqual(labels[0], 'Renewal 1 · Revision 1')
 
+    def test_ledger_shows_where_a_renewed_terms_money_went(self):
+        """A finished term carried into a renewal shows its principal renewed (and interest
+        added in, when no payout row already says so) as information rows — not payments."""
+        inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')
+        d = self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data
+        carried = [e for e in d['entries'] if e.get('carried')]
+        self.assertEqual([(e['term'], e['label'], Decimal(e['amount'])) for e in carried], [(0, 'Principal', Decimal('100000'))])
+        self.assertIn('Settled to renewal R1', carried[0]['notes'])
+        self.assertEqual(Decimal(d['summary']['paid_out']), sum((p.paid_amount or p.amount_due for p in Payout.objects.filter(
+            investor=inv, status='paid')), Decimal('0')))                 # totals are payouts only
+
     def test_case1_everything_added_into_the_renewal(self):
         from club1000.services import money_in
         inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')

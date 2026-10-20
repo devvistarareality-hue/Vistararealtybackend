@@ -82,7 +82,9 @@ class InvestorStatementView(APIView):
                     'paid_on': _fmt(e.get('paid_date')) if e['status'] == 'paid' else '—',
                     'status': status, 'tone': tone,
                     'added': 'added to the principal' in str(e.get('notes') or '').lower(),
-                    'working': (f"Redeemed on {_fmt(rd.get('redemption_date') or due)}"
+                    'working': (('Not a payment — ' + ('added into' if e['type'] == 'interest' else 'renewed into') + ' the next term')
+                                if e.get('carried') else
+                                f"Redeemed on {_fmt(rd.get('redemption_date') or due)}"
                                 + (f" · held {rd.get('days_held')} days" if rd.get('days_held') is not None else '')
                                 if e['type'] == 'premature_redemption' else
                                 f"{period.get('label')} · {period.get('days')} days × ₹{_num(period.get('per_day')):,.2f} a day"
