@@ -1203,10 +1203,13 @@ class InvestorHistoryView(APIView):
             parts = (summary or '').split(' · ')
             return ' · '.join(parts[2:]) if len(parts) > 2 else ''
 
-        logs = list(ActivityLog.objects.filter(target_type='investor', target_id=str(investor.pk))
+        # target_type__iexact: the redemption request was logged as 'Investor'.
+        logs = list(ActivityLog.objects.filter(target_type__iexact='investor', target_id=str(investor.pk))
                     .order_by('created_at', 'id'))
         submitted = 'new'       # what the next approve / reject answers
-        revisions = renewals = 0
+        revisions = renewals = redemptions = 0
+        redemption_payouts = sorted((p for p in investor.payouts.all() if p.payout_type == 'premature_redemption'
+                                     and p.redemption_detail), key=lambda p: (p.due_date, p.id))
         seen = set()
         for r in logs:
             a = r.action
@@ -1214,7 +1217,8 @@ class InvestorHistoryView(APIView):
                 continue
             by = r.actor_name or ''
             if a == 'created':
-                add(r.created_at, 'added', 'Investment added', detail_of(r.summary), by, investor.amount_invested)
+                # What it was added with — not what is left after any redemption.
+                add(r.created_at, 'added', 'Investment added', detail_of(r.summary), by, money_in(investor))
                 seen.add('added')
             elif a == 'revise':
                 revisions += 1; submitted = 'revise'
@@ -1222,11 +1226,28 @@ class InvestorHistoryView(APIView):
             elif a == 'renew':
                 renewals += 1; submitted = 'renew'
                 add(r.created_at, 'renew', f'Renewal #{renewals} submitted for approval', '', by)
+            elif str(r.summary or '').startswith('Redemption of ') or a == 'redeem-request':
+                redemptions += 1; submitted = 'redeem'
+                add(r.created_at, 'redeem', f'Redemption #{redemptions} requested',
+                    str(r.summary or '').split(' sent for approval')[0].replace('Redemption of ', '') +
+                    (' · ' + r.summary.split(' — ', 1)[1] if ' — ' in str(r.summary or '') else ''), by)
+            elif a == 'approve-l1' and '— Redemption ·' in str(r.summary or '') and submitted != 'redeem':
+                # Older redemptions whose request line was not found: the level 1 line names it.
+                redemptions += 1; submitted = 'redeem'
+                add(r.created_at, 'approve-l1', f'Redemption #{redemptions} — level 1 approved', 'waiting for level 2', by)
             elif a in ('approve', 'reject'):
                 verb = 'approved' if a == 'approve' else 'rejected'
                 title = {'new': f'Investment {verb}', 'revise': f'Revision R{revisions} {verb}',
-                         'renew': f'Renewal #{renewals} {verb}'}[submitted]
-                add(r.created_at, a if submitted == 'new' else f'{submitted}-{a}', title, detail_of(r.summary), by)
+                         'renew': f'Renewal #{renewals} {verb}', 'redeem': f'Redemption #{redemptions} {verb}'}[submitted]
+                detail = detail_of(r.summary)
+                if submitted == 'redeem' and a == 'approve' and redemptions <= len(redemption_payouts):
+                    # Say what it did, from the payout it made — not the field changes.
+                    rp = redemption_payouts[redemptions - 1]
+                    d = rp.redemption_detail or {}
+                    detail = (f"{_inr(Decimal(str(d.get('redeem_amount') or 0)))} redeemed · {_inr(rp.amount_due)} payable"
+                              f" ({'paid' if rp.status == 'paid' else 'to pay'})"
+                              f" · {_inr(Decimal(str(d.get('remaining_principal') or 0)))} still invested")
+                add(r.created_at, a if submitted == 'new' else f'{submitted}-{a}', title, detail, by)
                 if submitted == 'new' and a == 'approve':
                     seen.add('approved')
             elif a == 'redeem':

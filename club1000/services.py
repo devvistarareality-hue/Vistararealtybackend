@@ -275,7 +275,8 @@ def money_in(investor):
     terms it is simply the amount invested."""
     terms = past_terms(investor)
     if not terms:
-        return investor.amount_invested or Decimal('0')
+        # Money taken out by a part-redemption was still put in.
+        return (investor.amount_invested or Decimal('0')) + redeemed_between(investor, investor.investment_date, None)
     total = terms[0]['principal']
     for t in terms:
         # New money at a renewal = what it renewed with beyond the principal and the
@@ -284,16 +285,33 @@ def money_in(investor):
     return total
 
 
+def redeemed_between(investor, start, end):
+    """Principal taken out by part-redemptions dated from `start` to before `end` (None =
+    to date). amount_invested is what is STILL invested, so a term's principal — what
+    it started with — is that plus what was redeemed during it. Only the partial-aware
+    path records redemption_detail; the old all-or-nothing redeem leaves the amount."""
+    total = Decimal('0')
+    for p in investor.payouts.all():
+        d = p.redemption_detail
+        if p.payout_type == 'premature_redemption' and d and p.due_date and (not start or p.due_date >= start) \
+                and (end is None or p.due_date < end):
+            total += Decimal(str(d.get('redeem_amount') or 0))
+    return total
+
+
 def term_list(investor):
     """Every term of an investment, oldest first, the running one last:
     [{no, start, maturity, principal, label}] — no 0 is the original investment."""
     out = []
+    # A term's principal is what it STARTED with: what is left plus what was redeemed in it.
     for n, t in enumerate(investor.past_terms or []):
-        out.append({'no': n, 'start': date.fromisoformat(t['start']), 'maturity': date.fromisoformat(t['maturity']),
-                    'principal': Decimal(str(t['principal'])), 'current': False})
+        start, maturity = date.fromisoformat(t['start']), date.fromisoformat(t['maturity'])
+        out.append({'no': n, 'start': start, 'maturity': maturity, 'current': False,
+                    'principal': Decimal(str(t['principal'])) + redeemed_between(investor, start, maturity)})
     if investor.investment_date and investor.maturity_date:
         out.append({'no': len(out), 'start': investor.investment_date, 'maturity': investor.maturity_date,
-                    'principal': investor.amount_invested or Decimal('0'), 'current': True})
+                    'principal': (investor.amount_invested or Decimal('0'))
+                    + redeemed_between(investor, investor.investment_date, None), 'current': True})
     # Renewals made before terms were kept left no record of the earlier ones: count
     # from the renewal number so the running term still reads 'Renewal N'.
     offset = max(0, (investor.renewal_count or 0) - len(investor.past_terms or []))

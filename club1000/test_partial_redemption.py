@@ -360,3 +360,23 @@ class PartialRedemptionTests(TestCase):
                      format='json')
         self.assertEqual(r.status_code, 404)
         self.assertEqual(self._fresh().amount_invested, Decimal('1000000'))
+
+    def test_ledger_and_history_after_a_part_redemption(self):
+        """The ledger's principal is what was put in (redeemed money included), so what is
+        paid back is not read as interest; History names the redemption."""
+        self.assertEqual(self._request(400000).status_code, 201)
+        self.assertEqual(self._approve().status_code, 200)
+        d = self.api.get(f'/api/club1000/investors/{self.inv.pk}/ledger/').data
+        self.assertEqual(Decimal(d['summary']['principal']), Decimal('1000000'))
+        self.assertEqual(Decimal(d['terms'][0]['principal']), Decimal('1000000'))
+        payouts = Payout.objects.filter(investor=self.inv)
+        total = sum((p.amount_due for p in payouts), Decimal('0'))
+        self.assertEqual(Decimal(d['summary']['interest']), total - Decimal('1000000'))   # never the redeemed 4 L
+        self.assertLess(Decimal(d['summary']['interest']), Decimal('200000'))
+        h = self.api.get(f'/api/club1000/investors/{self.inv.pk}/history/').data
+        titles = [e['title'] for e in h['events']]
+        self.assertIn('Redemption #1 requested', titles)
+        self.assertIn('Redemption #1 approved', titles)
+        approved = next(e for e in h['events'] if e['title'] == 'Redemption #1 approved')
+        self.assertIn('4,00,000 redeemed', approved['detail'])
+        self.assertIn('6,00,000 still invested', approved['detail'])
