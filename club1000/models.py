@@ -258,6 +258,11 @@ class Investor(models.Model):
     # the investment was once larger — the LOI and the ledger both need it, and
     # it cannot be recovered from amount_invested alone afterwards.
     redeemed_principal = EncryptedDecimalField(max_digits=14, decimal_places=2, default=0)
+    # Every signed LOI this investment has had, oldest first — the original, each
+    # revision, renewal and redemption: [{kind, label, path, at, by}]. Approvals add to
+    # it and no longer delete the LOI they replace. Null on records from before it
+    # was kept (their list is rebuilt from what is stored — services.legacy_lois).
+    loi_history = models.JSONField(null=True, blank=True)
     # How many redemptions have been approved on this investment. Counted
     # rather than derived from the payout rows so a pending one can be labelled
     # "Redemption 2" before it is approved — and so the number does not shift

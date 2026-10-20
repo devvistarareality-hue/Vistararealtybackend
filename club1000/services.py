@@ -462,3 +462,39 @@ def generate_payout_schedule(investor, custom_entries=None):
             due_date=investor.maturity_date,
             amount_due=total_payable.quantize(Decimal('0.01')),
         )
+
+
+def _short_term(investor):
+    """'Original' or 'Renewal N' — the running term's name."""
+    n = investor.renewal_count or 0
+    return 'Original' if n == 0 else f'Renewal {n}'
+
+
+def legacy_lois(investor):
+    """The LOIs still stored for a record from before loi_history was kept: each kept
+    term's LOI, each redemption's LOI (on its payout), and the current one."""
+    out, seen = [], set()
+
+    def add(kind, label, path, at):
+        if path and path not in seen:
+            seen.add(path)
+            out.append({'kind': kind, 'label': label, 'path': path, 'at': str(at or ''), 'by': ''})
+    terms = term_list(investor)
+    for t, pt in zip(terms, investor.past_terms or []):
+        name = t['label'].split(' · ')[0]
+        add('renewal' if t['renewal_no'] else 'new', f'{name} LOI', pt.get('loi_document'), t['start'])
+    pays = sorted((p for p in investor.payouts.all() if p.payout_type == 'premature_redemption' and p.loi_document),
+                  key=lambda p: (p.due_date, p.id))
+    for n, p in enumerate(pays, start=1):
+        add('redemption', f'Redemption {n} LOI', p.loi_document.name if hasattr(p.loi_document, 'name') else p.loi_document, p.due_date)
+    if investor.loi_document:
+        at = investor.approved_at.date() if investor.approved_at else investor.investment_date
+        add('current', f'{_short_term(investor)} LOI', investor.loi_document.name, at)
+    return sorted(out, key=lambda e: e['at'])
+
+
+def investment_lois(investor):
+    """The LOI register as the Ledger lists it: stored history, or rebuilt for older
+    records. Each carries `i`, its place in that list (used to open it)."""
+    rows = investor.loi_history if investor.loi_history is not None else legacy_lois(investor)
+    return [{**r, 'i': i} for i, r in enumerate(rows) if r.get('path')]

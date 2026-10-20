@@ -958,6 +958,7 @@ class InvestorLedgerView(APIView):
         payout_labels = dict(PAYOUT_TYPE_CHOICES)
         # Each term (the original investment and every renewal) is its own ledger:
         # its entries carry `term`, and `terms` gives each one's own figures.
+        from .services import investment_lois
         terms = term_list(investor)
         entries = [{
             'type': 'investment',
@@ -1072,6 +1073,10 @@ class InvestorLedgerView(APIView):
             'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0),
             # How many times the running term has been revised (its LOI reads "Renewal 2 · Revision 1").
             'current_term_revisions': term_revisions(investor),
+            # Every LOI of this investment, newest first — opened with ?loi=<i>.
+            'lois': [{'i': e['i'], 'kind': e.get('kind', ''), 'label': e.get('label', ''), 'at': e.get('at', ''),
+                      'by': e.get('by', ''), 'current': bool(investor.loi_document) and e['path'] == investor.loi_document.name}
+                     for e in reversed(investment_lois(investor))],
         })
 
 
@@ -1598,11 +1603,8 @@ def _apply_redemption(investor, actor):
     # The signed redemption LOI becomes the investment's LOI, and the staged
     # fields are cleared — the same close-out the revision branch does, which
     # this path deliberately steps around.
-    if investor.loi_document:
-        try:
-            investor.loi_document.delete(save=False)
-        except Exception:
-            pass
+    # The LOI it replaces is kept (it is in the LOI register), not deleted — deleting
+    # it also erased the previous redemption's LOI, which its payout points to.
     if investor.pending_loi_document:
         investor.loi_document.name = investor.pending_loi_document.name
         investor.pending_loi_document = None
@@ -2644,6 +2646,12 @@ class InvestorActionView(APIView):
                 return gate
             investor.approval_step = None
             Investor.objects.filter(pk=investor.pk).update(approval_step=None)
+            # The LOI register: what is stored before this approval (older records),
+            # then the LOI this approval makes the live one.
+            from .services import legacy_lois, _short_term
+            loi_seed = list(investor.loi_history) if investor.loi_history is not None else legacy_lois(investor)
+            loi_kind = 'redemption' if is_redemption else ('renewal' if is_renewal else ('revision' if is_revision else 'new'))
+            loi_term_revs = term_revisions(investor) if loi_kind == 'revision' else 0
             if is_redemption:
                 _apply_redemption(investor, request.user)
             elif is_revision:
@@ -2712,8 +2720,8 @@ class InvestorActionView(APIView):
                         # The ended term keeps its signed LOI — readable from its Ledger
                         # term, and back in place if this renewal is ever undone.
                         finished['loi_document'] = investor.loi_document.name
-                    else:
-                        investor.loi_document.delete(save=False)
+                    # A revised LOI no longer deletes the one it replaces — it stays in
+                    # the LOI register, openable from the Ledger.
                 if investor.pending_loi_document:
                     investor.loi_document.name = investor.pending_loi_document.name
                     investor.pending_loi_document = None
@@ -2799,6 +2807,17 @@ class InvestorActionView(APIView):
                     generate_past_term_payouts(investor)
                 investor.pending_payout_schedule = None
                 investor.save(update_fields=['pending_payout_schedule'])
+
+            investor.refresh_from_db(fields=['loi_document', 'renewal_count', 'redemption_count'])
+            new_path = investor.loi_document.name if investor.loi_document else ''
+            if new_path and new_path not in {e.get('path') for e in loi_seed}:
+                label = {'new': 'Original LOI', 'renewal': f'Renewal {investor.renewal_count} LOI',
+                         'redemption': f'Redemption {investor.redemption_count or 1} LOI',
+                         'revision': f'{_short_term(investor)} · Revision {loi_term_revs + 1}'}[loi_kind]
+                loi_seed.append({'kind': loi_kind, 'label': label, 'path': new_path,
+                                 'at': timezone.now().date().isoformat(), 'by': request.user.name or ''})
+            Investor.objects.filter(pk=investor.pk).update(loi_history=loi_seed)
+            investor.loi_history = loi_seed
 
             # Referral reward: 0.5% of the amount on a new investment (this
             # approval isn't a revision at all — maiden approval), 0.25% of
@@ -3358,6 +3377,15 @@ class InvestorLoiUrlView(APIView):
                                 status=status.HTTP_404_NOT_FOUND)
             from types import SimpleNamespace
             doc = SimpleNamespace(name=t['loi_document'], url='')
+        # ?loi=<i> — one entry of the LOI register (the Ledger's LOIs list).
+        loi_i = request.query_params.get('loi')
+        if investor and loi_i not in (None, ''):
+            from .services import investment_lois
+            hit = next((e for e in investment_lois(investor) if str(e['i']) == str(loi_i)), None)
+            if not hit:
+                return Response({'detail': 'That LOI is not on record.'}, status=status.HTTP_404_NOT_FOUND)
+            from types import SimpleNamespace
+            doc = SimpleNamespace(name=hit['path'], url='')
         # ?payout=N — a premature redemption's own signed LOI, kept on the
         # payout because the investor's copy is replaced by whatever is signed
         # next.

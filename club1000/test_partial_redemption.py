@@ -397,3 +397,16 @@ class PartialRedemptionTests(TestCase):
         self.assertEqual(self._request(400000).status_code, 201)
         self.assertEqual(self._approve().status_code, 200)
         self.assertEqual(Payout.objects.get(investor=self.inv, payout_type='premature_redemption').status, 'pending')
+
+    def test_every_loi_is_kept_and_listed_newest_first(self):
+        """Each approval adds its LOI to the register and no longer deletes the one it
+        replaces — a second redemption used to erase the first one's signed LOI."""
+        from django.core.files.storage import default_storage
+        self.assertEqual(self._request(200000).status_code, 201); self.assertEqual(self._approve().status_code, 200)
+        first = Payout.objects.get(investor=self.inv, payout_type='premature_redemption').loi_document.name
+        self.assertEqual(self._request(100000).status_code, 201); self.assertEqual(self._approve().status_code, 200)
+        self.assertTrue(default_storage.exists(first))                    # the first redemption's LOI survives
+        lois = self.api.get(f'/api/club1000/investors/{self.inv.pk}/ledger/').data['lois']
+        self.assertEqual([l['label'] for l in lois][:2], ['Redemption 2 LOI', 'Redemption 1 LOI'])
+        self.assertTrue(lois[0]['current'])
+        self.assertEqual(len({l['i'] for l in lois}), len(lois))
