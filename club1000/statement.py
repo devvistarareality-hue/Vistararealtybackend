@@ -82,6 +82,7 @@ class InvestorStatementView(APIView):
                     'paid_on': _fmt(e.get('paid_date')) if e['status'] == 'paid' else '—',
                     'status': status, 'tone': tone,
                     'added': 'added to the principal' in str(e.get('notes') or '').lower(),
+                    'carried': bool(e.get('carried')),
                     'working': (('Not a payment — ' + ('added into' if e['type'] == 'interest' else 'renewed into') + ' the next term')
                                 if e.get('carried') else
                                 f"Redeemed on {_fmt(rd.get('redemption_date') or due)}"
@@ -91,7 +92,14 @@ class InvestorStatementView(APIView):
                                 if period.get('days') else ''),
                 })
             s = t.get('summary') or {}
+            mo = t.get('made_of') or {}
+            carried = sum((r['amount'] for r in rows if r.get('carried')), 0.0)
             sections.append({
+                # this renewal's money, as it was made up at the renewal
+                'made_of': {k: _num(v) for k, v in mo.items()} if mo else None,
+                # rows total includes what was carried into the next term (not paid out)
+                'rows_total': sum((r['amount'] for r in rows), 0.0), 'carried': carried,
+                'next_label': (terms[terms.index(t) + 1]['label'].split(' · ')[0] if terms.index(t) + 1 < len(terms) else ''),
                 'label': t['label'], 'current': t.get('current'), 'start': _fmt(t['start']), 'maturity': _fmt(t['maturity']),
                 'principal': _num(t['principal']), 'rows': rows,
                 'total': _num(s.get('total')), 'paid_out': _num(s.get('paid_out')), 'pending': _num(s.get('pending')),

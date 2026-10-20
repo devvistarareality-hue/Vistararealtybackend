@@ -234,6 +234,10 @@ class SettlementFlowTests(TestCase):
         self.assertIn('Settled to renewal R1', carried[0]['notes'])
         self.assertEqual(Decimal(d['summary']['paid_out']), sum((p.paid_amount or p.amount_due for p in Payout.objects.filter(
             investor=inv, status='paid')), Decimal('0')))                 # totals are payouts only
+        mo = d['terms'][1]['made_of']                                     # renewal 1 = principal + interest added + new money
+        self.assertEqual(Decimal(mo['principal']) + Decimal(mo['interest']) + Decimal(mo['fresh']), Decimal(mo['total']))
+        self.assertEqual(Decimal(mo['total']), Decimal('107500'))
+        self.assertGreater(Decimal(d['terms'][0]['summary']['interest']), 0)            # the ended term's earned interest
 
     def test_case1_everything_added_into_the_renewal(self):
         from club1000.services import money_in

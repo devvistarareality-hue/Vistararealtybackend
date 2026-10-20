@@ -1073,6 +1073,13 @@ class InvestorLedgerView(APIView):
             'paid_at_renewal': ((investor.past_terms or [])[n] or {}).get('paid_at_renewal') or '',
         } for n, o in enumerate(past_terms(investor))]
 
+        def _made_of(o):
+            # renewed with = principal renewed + interest added + new money
+            total = Decimal(o['renewed_with'])
+            added, fresh = Decimal(o['interest_added']), Decimal(o['fresh_money'])
+            return {'principal': str(max(total - added - fresh, Decimal('0'))), 'interest': str(added),
+                    'fresh': str(fresh), 'total': str(total)}
+
         def _term_summary(t):
             mine = [p for p in all_payouts if term_of(terms, p.due_date) == t['no']]
             amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
@@ -1081,6 +1088,8 @@ class InvestorLedgerView(APIView):
             back = sum((p.amount_due or Decimal('0') for p in mine if p.payout_type != 'interest'), Decimal('0'))
             interest = sum((p.amount_due or Decimal('0') for p in mine if p.payout_type == 'interest'), Decimal('0')) \
                 + max(back - t['principal'], Decimal('0'))
+            if not t['current'] and t['no'] < len(outcomes):
+                interest = max(interest, Decimal(outcomes[t['no']]['interest_earned']))   # earned, carried into the renewal or not
             return {
                 'principal': str(t['principal']), 'interest': str(interest), 'total': str(due),
                 'due_till_today': str(sum((p.amount_due or Decimal('0') for p in mine if p.due_date <= today), Decimal('0'))),
@@ -1094,6 +1103,8 @@ class InvestorLedgerView(APIView):
             'entries': entries,
             'terms': [{'no': t['no'], 'label': t['label'], 'start': str(t['start']), 'maturity': str(t['maturity']),
                        'principal': str(t['principal']), 'current': t['current'], 'summary': _term_summary(t),
+                       # A renewal's money, as it was made up at the renewal.
+                       **({'made_of': _made_of(outcomes[t['no'] - 1])} if 0 < t['no'] <= len(outcomes) else {}),
                        # its signed LOI can be opened (the running term's is the live one)
                        'has_loi': bool(investor.loi_document) if t['current'] else bool(((investor.past_terms or [])[t['no']] or {}).get('loi_document')),
                        **(outcomes[t['no']] if t['no'] < len(outcomes) and not t['current'] else {})}
