@@ -173,6 +173,20 @@ class PayoutSerializer(serializers.ModelSerializer):
     # and Paid lists group by it, so an old term's payouts stay traceable.
     term_no = serializers.SerializerMethodField()
     term_label = serializers.SerializerMethodField()
+    # An at-maturity investment pays its principal AND the term's interest in this one
+    # payout — {principal, interest} so it is not shown as "Principal ₹5,80,000".
+    maturity_split = serializers.SerializerMethodField()
+
+    def get_maturity_split(self, obj):
+        from decimal import Decimal
+        inv = obj.investor
+        if obj.payout_type != 'maturity' or (inv.interest_payout in ('quarterly', 'monthly')) \
+                or obj.due_date != inv.maturity_date:
+            return None
+        amount = obj.amount_due or Decimal('0')
+        principal = min(amount, inv.amount_invested or Decimal('0'))
+        interest = amount - principal
+        return {'principal': str(principal), 'interest': str(interest)} if interest > 0 else None
 
     def _term(self, obj):
         from .services import term_list, term_of
@@ -194,7 +208,7 @@ class PayoutSerializer(serializers.ModelSerializer):
         model = Payout
         fields = [
             'id', 'investor', 'investor_name', 'investor_phone', 'investor_loi_no', 'scheme_name', 'payout_type', 'due_date',
-            'term_no', 'term_label',
+            'term_no', 'term_label', 'maturity_split',
             'amount_due', 'status', 'paid_amount', 'paid_date', 'paid_by', 'notes', 'balance_of', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'investor', 'payout_type', 'due_date', 'amount_due', 'balance_of',
