@@ -196,6 +196,34 @@ class SettlementFlowTests(TestCase):
         inv.refresh_from_db(); a.refresh_from_db(); b.refresh_from_db()
         return inv, a, b, old_maturity
 
+    def test_revise_renewal_redoes_the_renewal_with_the_corrected_figures(self):
+        """Revise LOI on a renewed investment opens the renewal itself: on approval the term
+        goes back to before the renewal and the corrected one is applied — the ended term
+        settled again from the new figures, the old renewal LOI kept in the register."""
+        inv, a, b, old_maturity = self._renew_quarterly(107500, 'reinvest')       # renewed everything
+        self.assertEqual(inv.renewal_count, 1)
+        # the form reads the investment as it was before the renewal — and nothing is kept
+        before = self.api.get(f'/api/club1000/investors/{inv.pk}/settlement/?before_renewal=1').data
+        self.assertEqual(Decimal(str(before['principal'])), Decimal('100000'))
+        inv.refresh_from_db()
+        self.assertEqual((inv.renewal_count, inv.amount_invested), (1, Decimal('107500')))
+        # correct it: he took the interest, principal renewed
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/renew/', {
+            'revise_renewal': True, 'amount_invested': '100000', 'investment_date': str(old_maturity),
+            'interest_payout': 'quarterly', 'interest_choice': 'pay',
+            'loi_file': {'name': 'loi.pdf', 'type': 'application/pdf', 'data': 'eA=='}}, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+        inv.refresh_from_db()
+        self.assertEqual(inv.pending_revision_type, 'rerenew')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        inv.refresh_from_db(); a.refresh_from_db()
+        self.assertEqual((inv.renewal_count, inv.amount_invested, len(inv.past_terms)), (1, Decimal('100000'), 1))
+        self.assertEqual(inv.past_terms[0]['interest_choice'], 'pay')
+        self.assertNotIn('added to the principal', a.notes or '')        # now paid to him, not rolled in
+        labels = [l['label'] for l in self.api.get(f'/api/club1000/investors/{inv.pk}/lois/').data['lois']]
+        self.assertEqual(labels[0], 'Renewal 1 · Revision 1')
+
     def test_case1_everything_added_into_the_renewal(self):
         from club1000.services import money_in
         inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')
