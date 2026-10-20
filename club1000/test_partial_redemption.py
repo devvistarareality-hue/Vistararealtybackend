@@ -380,3 +380,20 @@ class PartialRedemptionTests(TestCase):
         approved = next(e for e in h['events'] if e['title'] == 'Redemption #1 approved')
         self.assertIn('4,00,000 redeemed', approved['detail'])
         self.assertIn('6,00,000 still invested', approved['detail'])
+
+    def test_a_redemption_is_handed_over_on_its_paid_date(self):
+        """Redeemed means paid: with the paid date (and UTR) given on the request, the
+        approved redemption's payout is recorded as paid — never owed or overdue."""
+        self.assertEqual(self._request(400000, paid_date=str(self.on), paid_notes='UTR 123').status_code, 201)
+        self.assertEqual(self._approve().status_code, 200)
+        p = Payout.objects.get(investor=self.inv, payout_type='premature_redemption')
+        self.assertEqual((p.status, p.paid_date, p.paid_amount), ('paid', self.on, p.amount_due))
+        self.assertIn('UTR 123', p.notes)
+        # a paid date before the redemption date is refused
+        self.assertEqual(self._request(100000, paid_date=str(self.on - relativedelta(days=1))).status_code, 400)
+
+    def test_without_a_paid_date_it_stays_owed(self):
+        """Older app builds send no paid date — the redemption is owed until paid from Payouts."""
+        self.assertEqual(self._request(400000).status_code, 201)
+        self.assertEqual(self._approve().status_code, 200)
+        self.assertEqual(Payout.objects.get(investor=self.inv, payout_type='premature_redemption').status, 'pending')

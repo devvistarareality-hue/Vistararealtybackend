@@ -1565,11 +1565,17 @@ def _apply_redemption(investor, actor):
      .filter(status='pending')
      .exclude(payout_type='premature_redemption')
      .delete())
+    # Handed over on the paid date given with the request: recorded as paid, so it is
+    # never shown as owed (or overdue) for money the investor already has.
+    paid_on = _parse_date(pr.get('paid_date'))
+    paid_by = User.objects.filter(pk=pr.get('paid_by')).first() if paid_on and pr.get('paid_by') else None
+    base_note = (pr.get('notes') or '') or f"Redeemed {_inr(redeemed)} after {pr.get('days_held')} days"
     Payout.objects.create(
         investor=investor, payout_type='premature_redemption', due_date=on,
         amount_due=dec('payable'),
-        notes=(pr.get('notes') or '')
-              or f"Redeemed {_inr(redeemed)} after {pr.get('days_held')} days",
+        **({'status': 'paid', 'paid_date': paid_on, 'paid_amount': dec('payable'), 'paid_by': paid_by or actor}
+           if paid_on else {}),
+        notes=base_note + (f" · {pr['paid_notes']}" if paid_on and pr.get('paid_notes') else ''),
         # The LOI signed for this redemption, captured before the swap below
         # hands it to the investor record — where the next revision or renewal
         # would overwrite it.
@@ -1664,8 +1670,14 @@ class InvestorRedeemRequestView(APIView):
         try:
             on = _past_date(request.data.get('redemption_date'), 'redemption date')
             amount = _money(request.data.get('amount'), 'amount')
+            # Redeemed means handed over: the date the money went to the investor
+            # (the redemption date unless told otherwise). Older app builds send none
+            # — their redemption stays owed until it is paid from Payouts.
+            paid_on = _past_date(request.data.get('paid_date'), 'paid date') if request.data.get('paid_date') else None
         except ValueError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if paid_on and paid_on < on:
+            return Response({'detail': 'The paid date is before the redemption date.'}, status=status.HTTP_400_BAD_REQUEST)
         if investor.investment_date and on < investor.investment_date:
             return Response({'detail': 'The redemption date is before the investment date.'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -1690,6 +1702,9 @@ class InvestorRedeemRequestView(APIView):
             'interest_paid_share': str(st['interest_paid_share']),
             'notes': (request.data.get('notes') or '').strip(),
         }
+        if paid_on:
+            pending.update(paid_date=str(paid_on), paid_by=request.user.id,
+                           paid_notes=(request.data.get('paid_notes') or '').strip())
         schedule = request.data.get('payout_schedule')
         if isinstance(schedule, list):
             pending['payout_schedule'] = schedule
