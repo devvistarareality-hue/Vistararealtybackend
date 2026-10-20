@@ -239,6 +239,38 @@ class SettlementFlowTests(TestCase):
         self.assertEqual(Decimal(mo['total']), Decimal('107500'))
         self.assertGreater(Decimal(d['terms'][0]['summary']['interest']), 0)            # the ended term's earned interest
 
+    def test_revising_an_at_maturity_renewal_does_not_double_the_ended_terms_interest(self):
+        """A renewal makes the ended term's at-maturity interest its own row and settles it;
+        revising (undo + redo) must replace that row, not make a second one."""
+        start = date.today() - relativedelta(months=25)
+        inv = self._inv(start)
+        Investor.objects.filter(pk=inv.pk).update(interest_payout='maturity')
+        inv.refresh_from_db()
+        Payout.objects.create(investor=inv, payout_type='maturity', due_date=inv.maturity_date, amount_due=Decimal('130000'))
+        old_maturity = inv.maturity_date
+        Investor.objects.filter(pk=inv.pk).update(approval_status='pending', pending_revision_type='renew', pending_revision={
+            'amount_invested': '100000', 'investment_date': str(old_maturity), 'interest_payout': 'maturity', 'interest_choice': 'pay'})
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
+        interest_rows = lambda: Payout.objects.filter(investor=inv, payout_type='interest', due_date=old_maturity).count()
+        self.assertEqual(interest_rows(), 1)
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/renew/', {
+            'revise_renewal': True, 'amount_invested': '120000', 'investment_date': str(old_maturity),
+            'interest_payout': 'maturity', 'interest_choice': 'reinvest',
+            'loi_file': {'name': 'loi.pdf', 'type': 'application/pdf', 'data': 'eA=='}}, format='json')
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(self.api.post(f'/api/club1000/investors/{inv.pk}/action/', {'action': 'approve'}, format='json').status_code, 200)
+        self.assertEqual(interest_rows(), 1)
+
+    def test_a_redemption_on_the_renewal_day_belongs_to_the_new_term(self):
+        from club1000.services import term_list, payout_term
+        inv, a, b, old_maturity = self._renew_quarterly(100000, 'pay')
+        p = Payout.objects.create(investor=inv, payout_type='premature_redemption', due_date=old_maturity, amount_due=Decimal('1000'))
+        terms = term_list(inv)
+        self.assertEqual(payout_term(terms, p), terms[-1]['no'])                    # the renewed term, not the one before
+        m = Payout.objects.filter(investor=inv, payout_type='maturity', due_date=old_maturity).first()
+        if m:
+            self.assertEqual(payout_term(terms, m), 0)                              # a maturity that day is the ended term's
+
     def test_case1_everything_added_into_the_renewal(self):
         from club1000.services import money_in
         inv, a, b, _ = self._renew_quarterly(107500, 'reinvest')

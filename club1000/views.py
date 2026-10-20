@@ -26,7 +26,7 @@ from .serializers import (
     LeadListSerializer, LeadCreateSerializer, FollowUpSerializer, LeadStatusHistorySerializer,
 )
 from .services import (past_terms, maturity_value, generate_payout_schedule, generate_past_term_payouts, money_in, normalize_phone, interest_periods,
-                       close_term, term_list, term_of)
+                       close_term, term_list, term_of, payout_term)
 
 
 def _company_filtered(qs, request, field='company'):
@@ -1005,7 +1005,7 @@ class InvestorLedgerView(APIView):
                 # At maturity: this one payout is the principal AND the term's interest.
                 'maturity_split': PayoutSerializer().get_maturity_split(p),
                 'due_date': str(p.due_date),
-                'term': term_of(terms, p.due_date),
+                'term': payout_term(terms, p),
                 '_id': p.id,
             })
             total_due += p.amount_due
@@ -1022,7 +1022,7 @@ class InvestorLedgerView(APIView):
             principal = Decimal(str(pt.get('principal') or 0))
             renewed = Decimal(str(nxt['principal'] or 0))
             rolled = Decimal(str(pt.get('rolled_interest') or 0))
-            mine = [p for p in all_payouts if term_of(terms, p.due_date) == n]
+            mine = [p for p in all_payouts if payout_term(terms, p) == n]
             shown_rolled = any('added to the principal' in (p.notes or '') for p in mine)
             r_no = nxt.get('renewal_no') or (n + 1)
             base = {'payout_id': None, 'paid_amount': None, 'status': 'paid', 'paid_date': str(nxt['start']),
@@ -1081,7 +1081,7 @@ class InvestorLedgerView(APIView):
                     'fresh': str(fresh), 'total': str(total)}
 
         def _term_summary(t):
-            mine = [p for p in all_payouts if term_of(terms, p.due_date) == t['no']]
+            mine = [p for p in all_payouts if payout_term(terms, p) == t['no']]
             amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
             due = sum((p.amount_due or Decimal('0') for p in mine), Decimal('0'))
             paid = sum((amt(p) or Decimal('0') for p in mine if p.status == 'paid'), Decimal('0'))
@@ -3325,7 +3325,7 @@ def _revise_renewal_blocker(investor):
     settled_note = (f'Added to renewal R{investor.renewal_count}', f'Settled at renewal R{investor.renewal_count}',
                     f'Settled to renewal R{investor.renewal_count}')
     paid = [p for p in investor.payouts.all() if p.status == 'paid' and not (p.notes or '').startswith(settled_note)
-            and (term_of(terms, p.due_date) == cur_no or (p.notes or '').startswith(f'Term ending {ended:%d-%m-%Y}'))]
+            and (payout_term(terms, p) == cur_no or (p.notes or '').startswith(f'Term ending {ended:%d-%m-%Y}'))]
     if paid:
         return 'Money has already been paid in this renewed term — undo those payments first, then revise the renewal.'
     reward = investor.referral_rewards.filter(pct=REINVESTMENT_REFERRAL_REWARD_PCT).order_by('-created_at').first()
@@ -3366,8 +3366,15 @@ def _undo_last_renewal(investor, user, keep_loi=False):
     cur_no = terms[-1]['no']
     ended_maturity = date.fromisoformat(last['maturity'])
     all_pays = list(investor.payouts.all())
-    current = [p for p in all_pays if term_of(terms, p.due_date) == cur_no]
-    made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
+    current = [p for p in all_pays if payout_term(terms, p) == cur_no]
+    # The rows the renewal made for the ended term — its principal paid back, and for an
+    # at-maturity term its interest — all fall on the ended term's maturity day. They are
+    # found by that, not by their note: paying them at the renewal rewrites the note
+    # ("Settled to renewal R#"), and a revised renewal then made them a second time.
+    at_maturity_term = (last.get('interest_payout') or 'maturity') not in ('quarterly', 'monthly')
+    made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')
+                       or (p.due_date == ended_maturity and (p.payout_type == 'maturity'
+                                                              or (p.payout_type == 'interest' and at_maturity_term)))]
     settled = [p for p in all_pays if (p.notes or '').startswith((f'Added to renewal R{investor.renewal_count}',
                                                                   f'Settled at renewal R{investor.renewal_count}',
                                                                   f'Settled to renewal R{investor.renewal_count}'))]
@@ -3444,7 +3451,7 @@ class InvestorUndoRenewalView(APIView):
         cur_no = terms[-1]['no']
         ended_maturity = date.fromisoformat(last['maturity'])
         all_pays = list(investor.payouts.all())
-        current = [p for p in all_pays if term_of(terms, p.due_date) == cur_no]
+        current = [p for p in all_pays if payout_term(terms, p) == cur_no]
         made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
         settled = [p for p in all_pays if (p.notes or '').startswith((f'Added to renewal R{investor.renewal_count}',
                                                                       f'Settled at renewal R{investor.renewal_count}',

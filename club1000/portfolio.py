@@ -227,7 +227,7 @@ def term_rows(user, company_id=None):
     the Ledger's term tabs show it."""
     from rest_framework.test import APIRequestFactory, force_authenticate
     from rest_framework.request import Request
-    from .services import term_list, term_of
+    from .services import term_list, term_of, payout_term
     from .views import _investor_visibility_qs
     raw = APIRequestFactory().get('/ai/', {'company_id': str(company_id)} if company_id else {})
     force_authenticate(raw, user=user)
@@ -244,7 +244,7 @@ def term_rows(user, company_id=None):
     for inv in investors:
         terms = term_list(inv)
         for t in terms:
-            mine = [p for p in payouts.get(inv.pk, []) if term_of(terms, p.due_date) == t['no']]
+            mine = [p for p in payouts.get(inv.pk, []) if payout_term(terms, p) == t['no']]
             amt = lambda p: p.paid_amount if p.paid_amount is not None else p.amount_due
             due = sum((_money(p.amount_due) for p in mine), Decimal('0'))
             paid = sum((_money(amt(p)) for p in mine if p.status == 'paid'), Decimal('0'))

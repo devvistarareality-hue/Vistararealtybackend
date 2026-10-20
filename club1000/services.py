@@ -333,6 +333,19 @@ def term_of(terms, due_date):
     return pick
 
 
+def payout_term(terms, payout):
+    """Which term a payout belongs to. A maturity / interest payout dated a term's start
+    day is the term before's (it ends that day); a redemption is always made inside the
+    running term — even on its first day — so it belongs to the term it was made in."""
+    if payout.payout_type == 'premature_redemption':
+        pick = 0
+        for t in terms:
+            if payout.due_date and t['start'] <= payout.due_date:
+                pick = t['no']
+        return pick
+    return term_of(terms, payout.due_date)
+
+
 def close_term(investor, term, next_principal, maturity_paid=False, roll_room=None):
     """On a renewal: the term just finished, as its payouts should stand — its
     at-maturity interest (less whatever was rolled into a larger renewal) and the

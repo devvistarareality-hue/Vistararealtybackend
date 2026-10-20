@@ -206,12 +206,12 @@ class PayoutSerializer(serializers.ModelSerializer):
         return {'principal': str(principal), 'interest': str(interest)} if interest > 0 else None
 
     def _term(self, obj):
-        from .services import term_list, term_of
+        from .services import term_list, term_of, payout_term
         cache = self.context.setdefault('_terms', {}) if isinstance(self.context, dict) else {}
         terms = cache.get(obj.investor_id)
         if terms is None:
             terms = cache[obj.investor_id] = term_list(obj.investor)
-        no = term_of(terms, obj.due_date)
+        no = payout_term(terms, obj)
         return no, next((t['label'] for t in terms if t['no'] == no), ''), len(terms)
 
     def get_term_no(self, obj):
