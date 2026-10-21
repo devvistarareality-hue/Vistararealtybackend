@@ -106,6 +106,15 @@ class InvestorListSerializer(serializers.ModelSerializer):
         # Records from before the LOI register: the last change tells.
         return 'redemption' if obj.redemption_count else ('renewal' if obj.renewal_count else 'original')
 
+    # Undo renewal is offered only when nothing happened on top of the renewal.
+    can_undo_renewal = serializers.SerializerMethodField()
+
+    def get_can_undo_renewal(self, obj):
+        if not obj.renewal_count or obj.approval_status != 'approved':
+            return False
+        from .views import _undo_renewal_blocker
+        return not _undo_renewal_blocker(obj)
+
     approved_by_name = serializers.CharField(source='approved_by.name', read_only=True, default='')
     added_by_name = serializers.CharField(source='added_by.name', read_only=True, default=None)
     document_url = serializers.SerializerMethodField()
@@ -138,7 +147,7 @@ class InvestorListSerializer(serializers.ModelSerializer):
             'name', 'phone', 'email', 'pan', 'amount_invested', 'investment_date',
             'maturity_date', 'is_matured', 'maturity_value', 'interest_payout', 'total_return_pct', 'document_url', 'status',
             'approval_status', 'added_by', 'added_by_name', 'notes', 'lead', 'security',
-            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'first_invested_on', 'rejected_reason', 'rejections', 'pending_action', 'approval_step', 'revision_date', 'revision_draft', 'redeemed_principal', 'redemption_count', 'live_loi_kind',
+            'loi_no', 'loi_document_url', 'revision_no', 'renewal_count', 'first_invested_on', 'rejected_reason', 'rejections', 'pending_action', 'approval_step', 'revision_date', 'revision_draft', 'redeemed_principal', 'redemption_count', 'live_loi_kind', 'can_undo_renewal',
             'pending_revision', 'pending_revision_type',
             'pending_loi_document_url', 'approved_by', 'approved_by_name', 'approved_at', 'created_at', 'updated_at',
         ]
