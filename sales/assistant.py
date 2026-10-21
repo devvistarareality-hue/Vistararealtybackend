@@ -224,7 +224,10 @@ def _entities():
                                      "lead's hot/warm/cold, which is tc_status / stm_status on the leads "
                                      "entity. leads = how many leads they have brought.",
                              'fields': {
-            'name': ('name', 'enc'), 'phone': ('contact_no', 'enc'), 'firm': ('firm_name', 'text'),
+            'name': ('name', 'enc'), 'phone': ('contact_no', 'enc'),
+            # Plain text, so unlike name/phone this one groups and filters in SQL
+            # — "how many partners per firm" is a real question here.
+            'firm': ('firm_name', 'text'),
             'type': ('cp_type', 'choice'), 'category': ('category', 'choice'),
             'stage': ('stage', 'choice'),
             'segment': ('segment', 'choice'), 'city': ('city', 'text'), 'area': ('area', 'text'),

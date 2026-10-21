@@ -274,6 +274,76 @@ class PartnerTypeTests(APITestCase):
         self.assertEqual(list(self.client.get(LIST, {'stage': 'cold'}).data), [])
         self.assertEqual(self.client.get(LIST, {'facets': '1'}).data['stages'], ['hot'])
 
+    # ------------------------------------------------------ the firm filter
+
+    def test_filtering_by_firm_returns_only_that_firm(self):
+        self._mk(name='A', firm_name='Shah Realty')
+        self._mk(name='B', firm_name='Shah Realty')
+        self._mk(name='C', firm_name='Patel Estates')
+        r = self.client.get(LIST, {'firm': 'Shah Realty'})
+        self.assertEqual(sorted(c['name'] for c in r.data), ['A', 'B'])
+
+    def test_a_firm_added_today_is_in_the_picker(self):
+        """The whole point of the filter being built from the data: nobody has
+        to register a firm anywhere for it to be filterable."""
+        before = self.client.get(LIST, {'facets': '1'}).data['firms']
+        self.assertNotIn('Brand New Realty', before)
+
+        r = self._add(firm_name='Brand New Realty', contact_no='9611111111')
+        self.assertEqual(r.status_code, 201, r.data)
+
+        after = self.client.get(LIST, {'facets': '1'}).data['firms']
+        self.assertIn('Brand New Realty', after)
+        # And it filters, not just lists.
+        rows = self.client.get(LIST, {'firm': 'Brand New Realty'})
+        self.assertEqual([c['name'] for c in rows.data], ['New Partner'])
+
+    def test_a_firm_renamed_away_leaves_the_picker(self):
+        cp = self._mk(name='A', firm_name='Old Name')
+        self.assertIn('Old Name', self.client.get(LIST, {'facets': '1'}).data['firms'])
+        self.client.patch(f'{LIST}{cp.id}/', {'firm_name': 'New Name'}, format='json')
+        firms = self.client.get(LIST, {'facets': '1'}).data['firms']
+        self.assertNotIn('Old Name', firms)
+        self.assertIn('New Name', firms)
+
+    def test_the_picker_offers_one_spelling_per_firm(self):
+        """A firm typed three ways is one choice, and picking it finds all three
+        — otherwise the filter splits a firm against itself."""
+        self._mk(name='A', firm_name='SHAH REALTY')
+        self._mk(name='B', firm_name='SHAH REALTY')
+        self._mk(name='C', firm_name='Shah Realty')
+        firms = self.client.get(LIST, {'facets': '1'}).data['firms']
+        self.assertEqual(firms, ['SHAH REALTY'], 'the most-used spelling is kept')
+        r = self.client.get(LIST, {'firm': 'SHAH REALTY'})
+        self.assertEqual(sorted(c['name'] for c in r.data), ['A', 'B', 'C'])
+
+    def test_partners_with_no_firm_do_not_put_a_blank_in_the_picker(self):
+        self._mk(name='No firm', firm_name='')
+        self._mk(name='Has firm', firm_name='Shah Realty')
+        self.assertEqual(self.client.get(LIST, {'facets': '1'}).data['firms'], ['Shah Realty'])
+
+    def test_firm_narrows_alongside_the_other_filters(self):
+        self._mk(name='Hit', firm_name='Shah Realty', cp_type='A', stage='hot')
+        self._mk(name='Wrong firm', firm_name='Patel Estates', cp_type='A', stage='hot')
+        self._mk(name='Wrong type', firm_name='Shah Realty', cp_type='B', stage='hot')
+        r = self.client.get(LIST, {'firm': 'Shah Realty', 'cp_type': 'A', 'stage': 'hot'})
+        self.assertEqual([c['name'] for c in r.data], ['Hit'])
+
+    def test_another_company_s_firms_are_not_offered_or_returned(self):
+        self._mk(name='Ours', firm_name='Our Realty')
+        ChannelPartner.objects.create(company=self.other_co, name='Theirs',
+                                      contact_no='9557777777', firm_name='Their Realty')
+        self.assertEqual(list(self.client.get(LIST, {'firm': 'Their Realty'}).data), [])
+        self.assertEqual(self.client.get(LIST, {'facets': '1'}).data['firms'], ['Our Realty'])
+
+    def test_the_firm_picker_answers_for_the_rows_asked_about(self):
+        """Facets honour the other filters, same as the existing pickers: an
+        inactive-only view offers only the firms of inactive partners."""
+        self._mk(name='Active one', firm_name='Active Realty', is_active=True)
+        self._mk(name='Gone', firm_name='Dormant Realty', is_active=False)
+        f = self.client.get(LIST, {'facets': '1', 'status': 'inactive'})
+        self.assertEqual(f.data['firms'], ['Dormant Realty'])
+
     # ------------------------------------------------------- activity log
 
     def test_the_log_records_the_band_in_words(self):

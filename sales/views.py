@@ -3929,25 +3929,36 @@ def _cp_parse_date(value):
         return None
 
 
-def _cp_places(qs):
-    """Every place these partners sit in, for the Location picker.
+def _cp_typed(qs, *fields):
+    """Every value these partners hold across `fields`, for a free-text picker.
 
-    Area and city are two columns holding the same kind of value and the table
-    shows them together, so the picker offers them together. Deduped
-    case-insensitively — AHMEDABAD and Ahmedabad are one place, and offering
-    both would split a filter that matches either anyway. The spelling kept is
-    whichever is used most, so the list reads the way the data mostly does.
+    Deduped case-insensitively — AHMEDABAD and Ahmedabad are one place, and
+    offering both would split a filter that matches either anyway. The spelling
+    kept is whichever is used most, so the list reads the way the data mostly
+    does. Blanks are left out: "no value" is not a choice a picker offers.
+
+    This is for columns people TYPE, where the same thing comes back spelled
+    several ways. A fixed choice list uses _cp_distinct instead.
     """
     from collections import Counter
     counts = Counter()
-    for city, area in qs.order_by().values_list('city', 'area'):
-        for v in (city, area):
+    for row in qs.order_by().values_list(*fields):
+        for v in row:
             if v and v.strip():
                 counts[v.strip()] += 1
     best = {}
     for value, n in counts.most_common():          # most-used spelling first
         best.setdefault(value.lower(), value)
     return sorted(best.values(), key=str.lower)
+
+
+def _cp_places(qs):
+    """Every place these partners sit in, for the Location picker.
+
+    Area and city are two columns holding the same kind of value and the table
+    shows them together, so the picker offers them together.
+    """
+    return _cp_typed(qs, 'city', 'area')
 
 
 def _cp_distinct(qs, field):
@@ -3990,6 +4001,10 @@ class ChannelPartnerListCreateView(APIView):
         # How warm the desk reads this partner — hot / warm / cold.
         if p.get('stage'):
             qs = qs.filter(stage=p['stage'])
+        # Firm, matched case-insensitively: the picker offers one spelling per
+        # firm, and the rows behind it may be typed differently.
+        if p.get('firm'):
+            qs = qs.filter(firm_name__iexact=p['firm'].strip())
         # The Location column shows area and city together, so the filter has to
         # match either — city alone would be nearly useless here, since 439 of
         # the 594 partners on the live directory have no city at all and are
@@ -4026,6 +4041,8 @@ class ChannelPartnerListCreateView(APIView):
                 'segments': _cp_distinct(qs, 'segment'),
                 'cp_types': _cp_distinct(qs, 'cp_type'),
                 'stages': _cp_distinct(qs, 'stage'),
+                # Typed by hand, so a firm added today shows up here tomorrow.
+                'firms': _cp_typed(qs, 'firm_name'),
                 'locations': _cp_places(qs),
                 'created_by': [
                     {'id': u.id, 'name': u.name}
