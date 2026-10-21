@@ -1319,6 +1319,10 @@ class InvestorHistoryView(APIView):
             if p.status == 'paid' and p.paid_date:
                 paid = p.paid_amount if p.paid_amount is not None else p.amount_due
                 bits = [f'due {formatted_date(p.due_date)}']
+                # An at-maturity payout is the principal AND the term's interest together.
+                split = PayoutSerializer().get_maturity_split(p)
+                if split:
+                    bits.insert(0, f"{_inr(Decimal(split['principal']))} principal + {_inr(Decimal(split['interest']))} interest")
                 per = periods.get(p.id)
                 if per:
                     bits.insert(0, f"{per['label']} · {formatted_date(per['from'])}–{formatted_date(per['to'])} · {per['days']} days × ₹{per['per_day']:,}/day")
@@ -1326,7 +1330,8 @@ class InvestorHistoryView(APIView):
                     bits.append(f'target ₹{p.amount_due:,.0f}')
                 if p.notes:
                     bits.append(p.notes)
-                add(_day_start(p.paid_date), 'paid', f'{labels.get(p.payout_type, p.payout_type)}{" balance" if p.balance_of_id else ""} paid', ' · '.join(bits),
+                kind = 'Principal + interest' if split else labels.get(p.payout_type, p.payout_type)
+                add(_day_start(p.paid_date), 'paid', f'{kind}{" balance" if p.balance_of_id else ""} paid', ' · '.join(bits),
                     p.paid_by.name if p.paid_by else '', paid)
         pay_logs = ActivityLog.objects.filter(target_type='payout', action__in=['mark-unpaid', 'delete-payment', 'edit-payment'],
                                               target_id__in=[str(p.pk) for p in payouts])

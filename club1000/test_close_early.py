@@ -44,3 +44,11 @@ class CloseEarlyTests(TestCase):
                               amount_due=Decimal('5000'), status='pending')
         self._pay(self.mat)
         self.assertEqual(self.inv.status, 'active')
+
+    def test_history_names_principal_and_interest(self):
+        self._pay(self.mat)
+        rows = self.api.get(f'/api/club1000/investors/{self.inv.pk}/history/').data
+        rows = rows.get('events', rows) if isinstance(rows, dict) else rows
+        paid = next(r for r in rows if r.get('kind') == 'paid')
+        self.assertEqual(paid['title'], 'Principal + interest paid')
+        self.assertIn('₹1,00,00,000 principal + ₹40,00,000 interest', paid['detail'])
