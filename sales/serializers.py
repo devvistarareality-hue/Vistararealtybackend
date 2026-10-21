@@ -23,6 +23,7 @@ class ChannelPartnerSerializer(serializers.ModelSerializer):
         model = ChannelPartner
         fields = [
             'id', 'company_id', 'name', 'contact_no', 'firm_name', 'category', 'segment',
+            'cp_type', 'stage',
             'city', 'area', 'is_active', 'created_by', 'created_at', 'updated_at', 'lead_count',
             'follow_up_count', 'site_visit_count',
         ]

@@ -43,16 +43,16 @@ class CpDirectoryFilterTests(TestCase):
 
         # Placed by city only, by area only, and by both — the three shapes the
         # live data actually takes.
-        cls.by_city = partner('City Only', city='Ahmedabad', category='premium',
+        cls.by_city = partner('City Only', city='Ahmedabad', category='platinum',
                               segment='residential', is_active=True)
-        cls.by_area = partner('Area Only', area='AHMEDABAD', category='normal',
+        cls.by_area = partner('Area Only', area='AHMEDABAD', category='gold',
                               segment='industrial', is_active=False)
         cls.both = partner('Both Fields', city='Baroda', area='BARODA',
-                           category='normal', segment='both', is_active=True)
-        cls.elsewhere = partner('Far Away', city='KOLKATA', category='referral',
+                           category='gold', segment='both', is_active=True)
+        cls.elsewhere = partner('Far Away', city='KOLKATA', category='diamond',
                                 segment='residential', is_active=False,
                                 created_by=cls.other_user)
-        cls.nowhere = partner('No Place', category='normal', is_active=False)
+        cls.nowhere = partner('No Place', category='gold', is_active=False)
 
         # Engagement: one with a lead, one with only a follow-up, three with
         # nothing at all.
@@ -78,9 +78,10 @@ class CpDirectoryFilterTests(TestCase):
         self.assertEqual(self._names('?status=inactive'),
                          {'Area Only', 'Far Away', 'No Place'})
 
-    def test_type_narrows_the_list(self):
-        self.assertEqual(self._names('?category=premium'), {'City Only'})
-        self.assertEqual(self._names('?category=referral'), {'Far Away'})
+    def test_category_narrows_the_list(self):
+        # Named for Category, not Type: Type is now its own field (A/B/C).
+        self.assertEqual(self._names('?category=platinum'), {'City Only'})
+        self.assertEqual(self._names('?category=diamond'), {'Far Away'})
 
     def test_segment_narrows_the_list(self):
         self.assertEqual(self._names('?segment=industrial'), {'Area Only'})
@@ -152,7 +153,7 @@ class CpDirectoryFilterTests(TestCase):
         r = self.api.get('/api/sales/channel-partners/?facets=1')
         self.assertEqual(r.status_code, 200)
         f = r.json()
-        self.assertEqual(f['categories'], ['normal', 'premium', 'referral'])
+        self.assertEqual(f['categories'], ['diamond', 'gold', 'platinum'])
         self.assertEqual(f['segments'], ['both', 'industrial', 'residential'])
         self.assertEqual([u['name'] for u in f['created_by']], ['CP Admin', 'Second Adder'])
 
@@ -166,14 +167,14 @@ class CpDirectoryFilterTests(TestCase):
 
     def test_facets_answer_for_the_rows_asked_about(self):
         f = self.api.get('/api/sales/channel-partners/?facets=1&status=active').json()
-        self.assertEqual(f['categories'], ['normal', 'premium'])
+        self.assertEqual(f['categories'], ['gold', 'platinum'])
 
     # ------------------------------------------------------------------ scoping
 
     def test_another_company_is_never_listed(self):
         theirs = ChannelPartner.objects.create(
             company=self.other_co, name='Their Partner', contact_no='+919870009999',
-            city='Ahmedabad', category='normal', is_active=True)
+            city='Ahmedabad', category='gold', is_active=True)
         self.assertNotIn(theirs.name, self._names('?location=Ahmedabad'))
         self.assertNotIn(theirs.name, self._names('?status=active'))
         self.assertNotIn(theirs.name, self._names())
