@@ -338,16 +338,43 @@ BUDGET_BUCKETS = [
     ('gt_5cr', 'Above ₹5 Cr'),
 ]
 
+# The tiers a partner is graded into. Replaced Premium / Normal / Referral in
+# Oct 2026; the old values were cleared rather than mapped across, because
+# 'normal' was the field's default and so said nothing about the 697 partners
+# carrying it — they had never actually been graded by anyone.
 CP_CATEGORY = [
-    ('premium',  'Premium'),
-    ('normal',   'Normal'),
-    ('referral', 'Referral'),
+    ('platinum', 'Platinum'),
+    ('gold',     'Gold'),
+    ('diamond',  'Diamond'),
 ]
 
 CP_SEGMENT = [
     ('residential', 'Residential'),
     ('industrial', 'Industrial'),
     ('both', 'Both'),
+]
+
+# Which book a partner is dealt with on. A third axis, not a rename of the two
+# above: `category` is how much they are worth to us (Premium/Normal/Referral),
+# `segment` is what they sell (Residential/Industrial), and this is the footing
+# the relationship sits on — wholesale, retail, or someone who brings business
+# without being a registered CP at all. Stored as the letter, since that is what
+# the business says ("he's a B").
+CP_TYPE = [
+    ('A', 'A (Wholesale)'),
+    ('B', 'B (Retail)'),
+    ('C', 'C (Non CP)'),
+]
+
+# How warm the relationship with this partner is — the CP desk's own read on
+# them, and the fourth thing on a partner that is not the other three. This is
+# about the PARTNER, not about any lead they brought: a lead's hot/warm/cold is
+# Lead.telecaller_status / stm_status and has nothing to do with this.
+CP_STAGE = [
+    ('new',  'New'),
+    ('hot',  'Hot'),
+    ('warm', 'Warm'),
+    ('cold', 'Cold'),
 ]
 
 
@@ -364,8 +391,22 @@ class ChannelPartner(models.Model):
     # encrypted column can't be looked up or deduped on directly.
     contact_key = models.CharField(max_length=64, blank=True, db_index=True)
     firm_name = models.CharField(max_length=150, blank=True)
-    category = models.CharField(max_length=10, choices=CP_CATEGORY, default='normal')
+    # No default: a tier nobody picked is not a grading, and defaulting this is
+    # exactly how 697 partners came to be filed as 'normal'. Blank until set, the
+    # same as cp_type and segment.
+    category = models.CharField(max_length=10, choices=CP_CATEGORY, blank=True)
     segment = models.CharField(max_length=15, choices=CP_SEGMENT, blank=True)
+    # Blank rather than defaulted to 'A': the partners already on the directory
+    # have never been graded, and defaulting them all to one letter would be
+    # inventing a fact about each of them. verbose_name drives the activity log,
+    # which reads it as "Type: — → A (Wholesale)".
+    cp_type = models.CharField('Type', max_length=1, choices=CP_TYPE, blank=True)
+    # A partner added from now on starts at 'new' — not blank, because "nobody
+    # has looked at this one yet" is itself the first stage. Blank is reserved
+    # for the partners that predate the field; they are read and set by hand,
+    # and calling them New would claim they are fresh arrivals.
+    stage = models.CharField('Stage', max_length=10, choices=CP_STAGE, blank=True,
+                             default='new')
     city = models.CharField(max_length=100, blank=True)
     area = models.CharField(max_length=200, blank=True)
     is_active = models.BooleanField(default=True)

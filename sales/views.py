@@ -3984,6 +3984,12 @@ class ChannelPartnerListCreateView(APIView):
             qs = qs.filter(category=p['category'])
         if p.get('segment'):
             qs = qs.filter(segment=p['segment'])
+        # A / B / C — the wholesale / retail / non-CP band.
+        if p.get('cp_type'):
+            qs = qs.filter(cp_type=p['cp_type'])
+        # How warm the desk reads this partner — hot / warm / cold.
+        if p.get('stage'):
+            qs = qs.filter(stage=p['stage'])
         # The Location column shows area and city together, so the filter has to
         # match either — city alone would be nearly useless here, since 439 of
         # the 594 partners on the live directory have no city at all and are
@@ -4018,6 +4024,8 @@ class ChannelPartnerListCreateView(APIView):
             return Response({
                 'categories': _cp_distinct(qs, 'category'),
                 'segments': _cp_distinct(qs, 'segment'),
+                'cp_types': _cp_distinct(qs, 'cp_type'),
+                'stages': _cp_distinct(qs, 'stage'),
                 'locations': _cp_places(qs),
                 'created_by': [
                     {'id': u.id, 'name': u.name}
@@ -4037,6 +4045,10 @@ class ChannelPartnerListCreateView(APIView):
                 if needle in (nm or '').lower() or needle in (ph or '').lower() or needle in (firm or '').lower()
             ]
             qs = qs.filter(id__in=hits)
+        # Ask Nexora reads the directory through this view, so its answer about
+        # partners is this screen's own list — same scoping, same filters.
+        if _ai_capture(request, qs):
+            return Response({})
         return Response(ChannelPartnerSerializer(qs, many=True).data)
 
     def post(self, request):

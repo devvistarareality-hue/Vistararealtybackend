@@ -207,6 +207,30 @@ def _entities():
             'stm': ('stm__name', 'text'), 'source': ('source', 'text'), 'units': ('plot_numbers', 'text'),
             'client': ('client_name', 'enc'), 'amount': ('final_amount', 'enc_money'),
         }},
+        # The partner firms themselves (CP Details), not their leads — for
+        # "how many wholesale CPs in Surat", "how many partners has nobody
+        # contacted". A partner's leads are counted by the leads entity.
+        'channel_partners': {'module': SALES_MODULES, 'view': v.ChannelPartnerListCreateView,
+                             'date': 'added', 'company': 'company_id',
+                             'note': "the Channel Partner directory, one row per partner firm. "
+                                     "type is the band they are dealt with on — A (Wholesale), B (Retail), "
+                                     "C (Non CP); blank for a partner who has never been graded. category is "
+                                     "the tier they are graded into (platinum/gold/diamond, blank if ungraded "
+                                     "— most of the directory, since the tiers replaced the old "
+                                     "premium/normal/referral in Oct 2026 and nobody was carried across) and "
+                                     "segment what they sell (residential/industrial/both) — three different "
+                                     "things, do not mix them up. stage is how warm the CP desk reads the "
+                                     "PARTNER (hot/warm/cold, blank if not read yet) — nothing to do with a "
+                                     "lead's hot/warm/cold, which is tc_status / stm_status on the leads "
+                                     "entity. leads = how many leads they have brought.",
+                             'fields': {
+            'name': ('name', 'enc'), 'phone': ('contact_no', 'enc'), 'firm': ('firm_name', 'text'),
+            'type': ('cp_type', 'choice'), 'category': ('category', 'choice'),
+            'stage': ('stage', 'choice'),
+            'segment': ('segment', 'choice'), 'city': ('city', 'text'), 'area': ('area', 'text'),
+            'active': ('is_active', 'bool'), 'added': ('created_at', 'datetime'),
+            'added_by': ('created_by__name', 'text'), 'leads': ('lead_count', 'number'),
+        }},
         'availability': {'module': SALES_MODULES, 'rows_fn': _availability_rows, 'date': 'date',
                          'note': 'STM / telecaller daily sign-in ("marked available"): signed_in time, the '
                                  'designated due_by time, late_minutes and late yes/no; last 120 days',
@@ -916,8 +940,13 @@ def run_query(user, company_id, args, list_cap=LIST_LIMIT, mask=True):
     qs, rows = _scoped(user, spec, args.get('book'), company_id, screen)
     if rows is not None:
         return _run_rows(rows, fields, args, spec.get('date'), list_cap, mask)
-    if 'stage' in fields and not any(f.get('field') == 'stage' and 'draft' in str(f.get('value')).lower()
-                                     for f in args.get('filters') or []):
+    # Bookings only: drafts are left out unless they are what was asked for.
+    # Keyed on the annotation, not on the name 'stage' — a channel partner has a
+    # real `stage` column of its own (hot/warm/cold), and matching by name tried
+    # to exclude a `_stage` that table has never had.
+    if fields.get('stage', (None,))[0] == '_stage' \
+            and not any(f.get('field') == 'stage' and 'draft' in str(f.get('value')).lower()
+                        for f in args.get('filters') or []):
         qs = qs.exclude(_stage='draft')
     qs, checks = _apply_filters(qs, fields, args.get('filters'))
 
