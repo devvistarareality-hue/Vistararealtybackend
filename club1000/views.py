@@ -1111,7 +1111,8 @@ class InvestorLedgerView(APIView):
                        'has_loi': bool(investor.loi_document) if t['current'] else bool(((investor.past_terms or [])[t['no']] or {}).get('loi_document')),
                        **(outcomes[t['no']] if t['no'] < len(outcomes) and not t['current'] else {})}
                       for t in terms],
-            'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0),
+            'can_undo_renewal': bool(investor.renewal_count) and len(investor.past_terms or []) >= (investor.renewal_count or 0)
+                                and not _undo_renewal_blocker(investor),
             # How many times the running term has been revised (its LOI reads "Renewal 2 · Revision 1").
             'current_term_revisions': term_revisions(investor),
             # Every LOI of this investment, newest first — opened with ?loi=<i>.
@@ -3322,6 +3323,20 @@ class InvestorRenewView(APIView):
         return Response(InvestorListSerializer(investor).data, status=status.HTTP_201_CREATED)
 
 
+def _undo_renewal_blocker(investor, terms=None, payouts=None):
+    """Why the latest renewal cannot be undone ('' when it can): only the renewal itself
+    is undone, so nothing may have happened on top of it — a redemption in the renewed
+    term (undo / revise that first) or the investment already paid out and closed."""
+    if investor.status in ('redeemed', 'premature_redeemed'):
+        return 'This investment is closed — its money has been paid out — so its renewal cannot be undone.'
+    terms = terms or term_list(investor)
+    cur_no = terms[-1]['no']
+    payouts = payouts if payouts is not None else list(investor.payouts.all())
+    if any(p.payout_type == 'premature_redemption' and payout_term(terms, p) == cur_no for p in payouts):
+        return 'A redemption was made after this renewal — the current LOI is the redemption\'s. Undo the renewal is not possible.'
+    return ''
+
+
 def _revise_renewal_blocker(investor):
     """Why the latest renewal cannot be revised ('' when it can). Revising it re-does it:
     the term goes back to before the renewal and the corrected renewal is applied."""
@@ -3462,6 +3477,9 @@ class InvestorUndoRenewalView(APIView):
         cur_no = terms[-1]['no']
         ended_maturity = date.fromisoformat(last['maturity'])
         all_pays = list(investor.payouts.all())
+        why = _undo_renewal_blocker(investor, terms, all_pays)
+        if why:
+            return Response({'detail': why}, status=status.HTTP_400_BAD_REQUEST)
         current = [p for p in all_pays if payout_term(terms, p) == cur_no]
         made_at_renewal = [p for p in all_pays if (p.notes or '').startswith(f'Term ending {ended_maturity:%d-%m-%Y}')]
         settled = [p for p in all_pays if (p.notes or '').startswith((f'Added to renewal R{investor.renewal_count}',

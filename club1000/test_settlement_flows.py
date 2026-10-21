@@ -334,6 +334,21 @@ class SettlementFlowTests(TestCase):
         r = self.api.post(f'/api/club1000/investors/{inv.pk}/pending-action/', {'action': 'approve'}, format='json')
         self.assertEqual(r.status_code, 200, r.data)
 
+    def test_no_undo_renewal_after_a_redemption_or_once_closed(self):
+        inv, a, b, old_maturity = self._renew_quarterly(100000, 'pay')
+        red = Payout.objects.create(investor=inv, payout_type='premature_redemption', due_date=date.today(),
+                                    amount_due=Decimal('20000'), status='pending')
+        self.assertFalse(self.api.get(f'/api/club1000/investors/{inv.pk}/ledger/').data['can_undo_renewal'])
+        self.assertFalse(self.api.get('/api/club1000/investors/').data[0]['can_undo_renewal'])
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'reason': 'x'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('redemption', r.data['detail'])
+        red.delete()
+        Investor.objects.filter(pk=inv.pk).update(status='redeemed')
+        r = self.api.post(f'/api/club1000/investors/{inv.pk}/undo-renewal/', {'reason': 'x'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('closed', r.data['detail'])
+
     def test_part_interest_taken_and_fresh_money_added(self):
         """Takes ₹2,500 of the ₹7,500 interest and adds ₹50,000: ₹5,000 goes into the renewal."""
         from club1000.services import money_in
