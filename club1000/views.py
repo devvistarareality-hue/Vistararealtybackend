@@ -1422,13 +1422,17 @@ def _pay_payout(payout, amount, paid_on, notes, user):
 
 
 def _close_if_paid_out(investor):
-    """A matured investment whose principal has been paid in full from Payouts is
-    closed — what the Payout button on Investors used to do — and opens again if
+    """An investment whose principal has been paid in full from Payouts is
+    closed (before maturity too, once nothing else is owed) — what the Payout button on Investors used to do — and opens again if
     that payment is undone or leaves a balance due."""
     if investor.status not in ('active', 'matured', 'redeemed') or not investor.maturity_date:
         return
-    final = [p for p in investor.payouts.all() if p.payout_type == 'maturity' and p.due_date >= investor.maturity_date]
-    settled = bool(final) and investor.maturity_date <= date.today() and all(p.status == 'paid' for p in final)
+    payouts = list(investor.payouts.all())
+    final = [p for p in payouts if p.payout_type == 'maturity' and p.due_date >= investor.maturity_date]
+    # Closed once the principal is paid back: at maturity, or earlier when it was paid
+    # ahead of its date and nothing at all is left to pay him.
+    settled = bool(final) and all(p.status == 'paid' for p in final) and (
+        investor.maturity_date <= date.today() or not any(p.status == 'pending' for p in payouts))
     want = 'redeemed' if settled else ('active' if investor.status == 'redeemed' else investor.status)
     if want != investor.status:
         investor.status = want
@@ -3607,16 +3611,16 @@ def _keep_rejected_loi(investor, path, what, by):
 
 
 def _loi_file_exists(path):
-    """Is this LOI file really in storage? Supabase answers a signing request only for a
-    file it holds; without Supabase (local) ask the storage directly."""
+    """Is this LOI file really in the storage files are saved to? Supabase answers a
+    signing request only for a file it holds; any other storage is asked directly."""
     if not path:
         return False
-    import os
-    from sales.supabase_storage import create_signed_url
-    if os.getenv('SUPABASE_URL') and os.getenv('SUPABASE_SERVICE_KEY'):
-        return bool(create_signed_url(path, expires_in=30))
     from django.core.files.storage import default_storage
+    from sales.supabase_storage import SupabaseStorage, object_exists
     try:
+        st = getattr(default_storage, '_wrapped', default_storage)
+        if isinstance(st, SupabaseStorage) or 'Supabase' in type(st).__name__:
+            return object_exists(path)
         return default_storage.exists(path)
     except Exception:
         return False
