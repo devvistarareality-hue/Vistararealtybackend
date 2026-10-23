@@ -67,6 +67,26 @@ def _seed():
     ARAccount.objects.create(company=co, root_booking=bk, booking=bk)
     tl = TaskList.objects.create(company=co, name='Onboarding', created_by=boss)
     Task.objects.create(company=co, task_list=tl, title='Collect KYC', created_by=boss)
+    # Club 1000 and HR go through the same cycle — every module, not only Sales.
+    from attendance.models import AttendanceRecord
+    from club1000 import models as c1
+    cl = c1.Lead.objects.create(company=co, name='Club Lead', phone='+919811111111')
+    c1.LeadStatusHistory.objects.create(lead=cl, field_changed='status', new_value='contacted')
+    c1.FollowUp.objects.create(lead=cl, assigned_to=rep, scheduled_at=timezone.now())
+    sch = c1.Scheme.objects.create(company=co, name='RISE', tenure_months=24, min_ticket_size='100000')
+    inv = c1.Investor.objects.create(
+        company=co, scheme=sch, added_by=boss, name='Investor One', phone='+919822222222',
+        loi_no='RISE/001', amount_invested='2500000.00', investment_date=date(2024, 10, 20),
+        maturity_date=date(2026, 10, 20), total_return_pct='16.00', interest_payout='quarterly',
+        status='active', approval_status='approved', renewal_count=1,
+        past_terms=[{'no': 0, 'start': '2022-10-20', 'maturity': '2024-10-20', 'principal': '2000000.00'}],
+        loi_history=[{'kind': 'new', 'label': 'Original LOI', 'path': 'Club1000/RISE/LOI.pdf', 'at': '2022-10-20'}])
+    c1.Payout.objects.create(investor=inv, payout_type='interest', due_date=date(2025, 1, 20),
+                             amount_due='100000.00', status='paid', paid_amount='100000.00',
+                             paid_date=date(2025, 1, 20))
+    c1.ReferralReward.objects.create(investor=inv, reference_name='Ref', reference_phone='+919833333333',
+                                     amount='6250.00')
+    AttendanceRecord.objects.create(user=rep, date=date(2026, 9, 1))
     return co, boss, rep, proj, other, bk
 
 
@@ -108,6 +128,21 @@ class BackupResetRestoreCycle(APITestCase):
             if label in NOT_RESTORED:
                 continue
             self.assertEqual(after[label], want, f'{label}: {after[label]} back, expected {want}')
+
+    def test_club1000_investor_comes_back_exactly(self):
+        from club1000.models import Investor, Payout
+        before = Investor.objects.get(company=self.co)
+        reset_company(self.co, keep_user_id=self.boss.id)
+        self.assertEqual(Investor.objects.filter(company=self.co).count(), 0)
+        result = restore(self.co, parse_workbook(self.workbook), commit=True)
+        self.assertTrue(result['ok'], result.get('detail'))
+        inv = Investor.objects.get(company=self.co)
+        self.assertEqual((inv.pk, inv.name, inv.phone, inv.loi_no, inv.amount_invested, inv.renewal_count,
+                          inv.past_terms, inv.loi_history, inv.scheme_id),
+                         (before.pk, 'Investor One', '+919822222222', 'RISE/001', before.amount_invested, 1,
+                          before.past_terms, before.loi_history, before.scheme_id))
+        p = Payout.objects.get(investor=inv)
+        self.assertEqual((p.status, p.paid_amount, p.paid_date), ('paid', p.amount_due, date(2025, 1, 20)))
 
     def test_notifications_are_wiped_by_the_reset_and_do_not_come_back(self):
         """Asked for directly: a reset clears the bell, and a restore leaves it

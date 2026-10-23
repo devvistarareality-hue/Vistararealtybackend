@@ -1,15 +1,14 @@
 """Excel backup of one company: a workbook with a sheet per module, and the
 restore that reads it back.
 
-Built around one workflow. An admin takes a snapshot, runs Data Reset
-(SalesDataResetView) to wipe that company's trial Sales data, then uploads the
-same file to put it back — with the original row ids, so everything that
-pointed at a record still resolves.
+Every module is covered — Sales, Channel Partner, HR, AR, Task Allocation,
+Club 1000 and the Activity Log (SHEETS below; test_backup_coverage fails when a
+new model is not in it). A Data Reset empties the modules picked (and whatever
+depends on them), and restoring the workbook puts every row back with its
+original id, so everything that pointed at a record still resolves.
 
-Only the tables Data Reset actually clears are restorable. The rest (projects,
-plots, users, AR, tasks, Club 1000 …) are exported so the snapshot is complete,
-but never written back: the reset never removed them, so there is nothing to
-put back and overwriting live rows is exactly what we don't want.
+Uploaded files (LOI PDFs, KYC documents) stay in storage; the workbook carries
+their paths, so a restored record points at the same file again.
 
 Encrypted columns need no special handling here. EncryptedTextField and friends
 (see fields.py) decrypt on read and encrypt on write, so reading an attribute
